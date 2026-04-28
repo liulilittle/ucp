@@ -314,19 +314,19 @@ namespace Ucp
             }
 
             long nowMicros = _network == null ? UcpTime.NowMicroseconds() : _network.CurrentTimeUs;
-            long elapsedMicros = _lastFairQueueRoundMicros == 0 ? _config.FairQueueRoundMilliseconds * 1000L : nowMicros - _lastFairQueueRoundMicros;
-            if (elapsedMicros < 1000L)
+            long elapsedMicros = _lastFairQueueRoundMicros == 0 ? _config.FairQueueRoundMilliseconds * UcpConstants.MICROS_PER_MILLI : nowMicros - _lastFairQueueRoundMicros;
+            if (elapsedMicros < UcpConstants.MICROS_PER_MILLI)
             {
-                elapsedMicros = 1000L;
+                elapsedMicros = UcpConstants.MICROS_PER_MILLI;
             }
 
-            if (elapsedMicros > _config.FairQueueRoundMilliseconds * 2000L)
+            if (elapsedMicros > _config.FairQueueRoundMilliseconds * UcpConstants.MICROS_PER_MILLI * UcpConstants.MAX_BUFFERED_FAIR_QUEUE_ROUNDS)
             {
-                elapsedMicros = _config.FairQueueRoundMilliseconds * 2000L;
+                elapsedMicros = _config.FairQueueRoundMilliseconds * UcpConstants.MICROS_PER_MILLI * UcpConstants.MAX_BUFFERED_FAIR_QUEUE_ROUNDS;
             }
 
             _lastFairQueueRoundMicros = nowMicros;
-            double roundBytes = _bandwidthLimitBytesPerSecond * (elapsedMicros / 1000000d);
+            double roundBytes = _bandwidthLimitBytesPerSecond * (elapsedMicros / (double)UcpConstants.MICROS_PER_SECOND);
             double fairShareCap = active.Count > 0 ? _bandwidthLimitBytesPerSecond / (double)active.Count : _bandwidthLimitBytesPerSecond;
             double effectiveTotalPacing = 0;
             double[] effectivePacing = new double[active.Count];
@@ -392,7 +392,7 @@ namespace Ucp
                     return;
                 }
 
-                long delayMicros = Math.Max(1, _config.FairQueueRoundMilliseconds) * 1000L;
+                long delayMicros = Math.Max(UcpConstants.MIN_TIMER_WAIT_MILLISECONDS, _config.FairQueueRoundMilliseconds) * UcpConstants.MICROS_PER_MILLI;
                 _fairQueueTimerId = _network.AddTimer(_network.NowMicroseconds + delayMicros, delegate { OnFairQueueRound(null); });
             }
         }

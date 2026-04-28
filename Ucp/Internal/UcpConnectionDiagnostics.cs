@@ -20,6 +20,7 @@ namespace Ucp.Internal
         public int TimeoutRetransmissions;
         public int CongestionWindowBytes;
         public double PacingRateBytesPerSecond;
+        public double EstimatedLossPercent;
         public long LastRttMicros;
         public System.Collections.Generic.List<long> RttSamplesMicros = new System.Collections.Generic.List<long>();
         public bool ReceivedReset;

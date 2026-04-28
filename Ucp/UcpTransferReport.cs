@@ -15,6 +15,7 @@ namespace Ucp
         public System.Collections.Generic.List<long> RttSamplesMicros = new System.Collections.Generic.List<long>();
         public int CongestionWindowBytes;
         public double PacingRateBytesPerSecond;
+        public double EstimatedLossPercent;
         public uint RemoteWindowBytes;
 
         public double RetransmissionRatio

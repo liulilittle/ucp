@@ -35,7 +35,7 @@ namespace Ucp
             _minimumPacketCapacityBytes = UcpConstants.DataHeaderSize + Math.Max(1, config.MaxPayloadSize);
             _maxPacingRateBytesPerSecond = config.MaxPacingRateBytesPerSecond;
             _minPacingIntervalMicros = config.MinPacingIntervalMicros;
-            _bucketDurationMicros = config.PacingBucketDurationMicros <= 0 ? 1000000L : config.PacingBucketDurationMicros;
+            _bucketDurationMicros = config.PacingBucketDurationMicros <= 0 ? UcpConstants.DEFAULT_PACING_BUCKET_DURATION_MICROS : config.PacingBucketDurationMicros;
             SetRate(initialRateBytesPerSecond, 0);
             _tokens = _capacity;
         }
@@ -54,7 +54,7 @@ namespace Ucp
 
             Refill(nowMicros);
             PacingRateBytesPerSecond = rateBytesPerSecond;
-            _capacity = Math.Max(Math.Max(_sendQuantumBytes, _minimumPacketCapacityBytes), rateBytesPerSecond * _bucketDurationMicros / 1000000d);
+            _capacity = Math.Max(Math.Max(_sendQuantumBytes, _minimumPacketCapacityBytes), rateBytesPerSecond * _bucketDurationMicros / UcpConstants.MICROS_PER_SECOND);
             if (_tokens > _capacity)
             {
                 _tokens = _capacity;
@@ -85,11 +85,11 @@ namespace Ucp
 
             if (PacingRateBytesPerSecond <= 0)
             {
-                return 1000;
+                return UcpConstants.DEFAULT_PACING_WAIT_MICROS;
             }
 
             double deficit = bytes - _tokens;
-            long waitMicros = (long)Math.Ceiling((deficit / PacingRateBytesPerSecond) * 1000000d);
+            long waitMicros = (long)Math.Ceiling((deficit / PacingRateBytesPerSecond) * UcpConstants.MICROS_PER_SECOND);
             if (_minPacingIntervalMicros > 0 && waitMicros < _minPacingIntervalMicros)
             {
                 return _minPacingIntervalMicros;
@@ -112,7 +112,7 @@ namespace Ucp
                 return;
             }
 
-            _tokens += (elapsedMicros / 1000000d) * PacingRateBytesPerSecond;
+            _tokens += (elapsedMicros / (double)UcpConstants.MICROS_PER_SECOND) * PacingRateBytesPerSecond;
             if (_tokens > _capacity)
             {
                 _tokens = _capacity;

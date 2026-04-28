@@ -26,7 +26,28 @@ namespace UcpTest
         public long ElapsedMilliseconds;
         public double TargetBandwidthBytesPerSecond;
         public double UtilizationPercent;
+        public double EstimatedLossPercent;
         public string Note = string.Empty;
+
+        public double ThroughputMbps
+        {
+            get { return ToMbps(ThroughputBytesPerSecond); }
+        }
+
+        public double TargetMbps
+        {
+            get { return ToMbps(TargetBandwidthBytesPerSecond); }
+        }
+
+        public double PacingMbps
+        {
+            get { return ToMbps(PacingRateBytesPerSecond); }
+        }
+
+        public double RetransmissionPercent
+        {
+            get { return RetransmissionRatio * 100d; }
+        }
 
         private static readonly object Sync = new object();
         private static readonly List<UcpPerformanceReport> Reports = new List<UcpPerformanceReport>();
@@ -53,6 +74,7 @@ namespace UcpTest
             performance.RetransmittedPackets = report.RetransmittedPackets;
             performance.TargetBandwidthBytesPerSecond = targetBandwidthBytesPerSecond;
             performance.UtilizationPercent = targetBandwidthBytesPerSecond <= 0 ? 0 : throughputBytesPerSecond * 100d / targetBandwidthBytesPerSecond;
+            performance.EstimatedLossPercent = report.EstimatedLossPercent;
             FillLatencyStatistics(performance, report.RttSamplesMicros);
             performance.Note = BuildNote(performance);
             return performance;
@@ -67,17 +89,19 @@ namespace UcpTest
 
             StringBuilder builder = new StringBuilder();
             builder.AppendLine("Scenario: " + report.ScenarioName);
-            builder.AppendLine("Throughput(B/s): " + report.ThroughputBytesPerSecond.ToString("F2"));
-            builder.AppendLine("RetransmissionRatio: " + report.RetransmissionRatio.ToString("P2"));
+            builder.AppendLine("Throughput(Mbps): " + report.ThroughputMbps.ToString("F2"));
+            builder.AppendLine("Target(Mbps): " + report.TargetMbps.ToString("F2"));
+            builder.AppendLine("Retransmission(%): " + report.RetransmissionPercent.ToString("F2"));
             builder.AppendLine("LastRtt(us): " + report.LastRttMicros);
             builder.AppendLine("AverageRtt(us): " + report.AverageRttMicros);
             builder.AppendLine("P95Rtt(us): " + report.P95RttMicros);
             builder.AppendLine("P99Rtt(us): " + report.P99RttMicros);
             builder.AppendLine("Jitter(us): " + report.JitterMicros);
             builder.AppendLine("CWND(bytes): " + report.CongestionWindowBytes);
-            builder.AppendLine("Pacing(bytes/s): " + report.PacingRateBytesPerSecond.ToString("F2"));
+            builder.AppendLine("Pacing(Mbps): " + report.PacingMbps.ToString("F2"));
             builder.AppendLine("RWND(bytes): " + report.RemoteWindowBytes);
             builder.AppendLine("BandwidthWaste(%): " + report.BandwidthWastePercent.ToString("F2"));
+            builder.AppendLine("EstimatedLoss(%): " + report.EstimatedLossPercent.ToString("F2"));
             builder.AppendLine("DataPacketsSent: " + report.DataPacketsSent);
             builder.AppendLine("RetransmittedPackets: " + report.RetransmittedPackets);
             builder.AppendLine("Elapsed(ms): " + report.ElapsedMilliseconds);
@@ -225,23 +249,23 @@ namespace UcpTest
             });
 
             builder.AppendLine("+------------------+----------------+----------------+---------+----------+----------+----------+----------+----------+----------+----------------+----------+----------+");
-            builder.AppendLine("| Scenario         | Throughput B/s | Target B/s     | Util%   | Retrans% | Avg RTT  | P95 RTT  | P99 RTT  | Jitter   | CWND     | Current Pacing | RWND     | Waste%   |");
+            builder.AppendLine("| Scenario         | Throughput Mb  | Target Mbps    | Util%   | Retrans% | Avg RTT  | P95 RTT  | P99 RTT  | Jitter   | CWND     | Current Mbps   | RWND     | Waste%   |");
             builder.AppendLine("+------------------+----------------+----------------+---------+----------+----------+----------+----------+----------+----------+----------------+----------+----------+");
             for (int i = 0; i < snapshot.Count; i++)
             {
                 UcpPerformanceReport report = snapshot[i];
                 builder.AppendLine(string.Format(CultureInfo.InvariantCulture, "| {0,-16} | {1,14:F2} | {2,14:F2} | {3,7:F2} | {4,8:F2} | {5,8} | {6,8} | {7,8} | {8,8} | {9,8} | {10,14:F2} | {11,8} | {12,8:F2} |",
                     Trim(report.ScenarioName, 16),
-                    report.ThroughputBytesPerSecond,
-                    report.TargetBandwidthBytesPerSecond,
+                    report.ThroughputMbps,
+                    report.TargetMbps,
                     report.UtilizationPercent,
-                    report.RetransmissionRatio * 100d,
+                    report.RetransmissionPercent,
                     report.AverageRttMicros,
                     report.P95RttMicros,
                     report.P99RttMicros,
                     report.JitterMicros,
                     report.CongestionWindowBytes,
-                    report.PacingRateBytesPerSecond,
+                    report.PacingMbps,
                     report.RemoteWindowBytes,
                     report.BandwidthWastePercent));
             }
@@ -285,8 +309,8 @@ namespace UcpTest
 
                 UcpPerformanceReport report = new UcpPerformanceReport();
                 report.ScenarioName = columns[1].Trim();
-                report.ThroughputBytesPerSecond = ParseDouble(columns[2]);
-                report.TargetBandwidthBytesPerSecond = ParseDouble(columns[3]);
+                report.ThroughputBytesPerSecond = FromMbps(ParseDouble(columns[2]));
+                report.TargetBandwidthBytesPerSecond = FromMbps(ParseDouble(columns[3]));
                 report.UtilizationPercent = ParseDouble(columns[4]);
                 report.RetransmissionRatio = ParseDouble(columns[5]) / 100d;
                 report.AverageRttMicros = ParseLong(columns[6]);
@@ -294,7 +318,7 @@ namespace UcpTest
                 report.P99RttMicros = ParseLong(columns[8]);
                 report.JitterMicros = ParseLong(columns[9]);
                 report.CongestionWindowBytes = ParseInt(columns[10]);
-                report.PacingRateBytesPerSecond = ParseDouble(columns[11]);
+                report.PacingRateBytesPerSecond = FromMbps(ParseDouble(columns[11]));
                 report.RemoteWindowBytes = ParseUInt(columns[12]);
                 report.BandwidthWastePercent = ParseDouble(columns[13]);
                 report.Note = BuildNote(report);
@@ -409,6 +433,16 @@ namespace UcpTest
             }
 
             return value.Substring(0, length);
+        }
+
+        private static double ToMbps(double bytesPerSecond)
+        {
+            return bytesPerSecond * UcpConstants.BITS_PER_BYTE / UcpConstants.BITS_PER_MEGABIT;
+        }
+
+        private static double FromMbps(double megabitsPerSecond)
+        {
+            return megabitsPerSecond * UcpConstants.BITS_PER_MEGABIT / UcpConstants.BITS_PER_BYTE;
         }
 
         private static int GetScenarioOrder(string scenarioName)

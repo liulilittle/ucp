@@ -49,7 +49,7 @@
 - ACK / NAK / 重传包数
 - 最后 RTT
 - 当前 CWND
-- 当前 pacing rate
+- 当前 pacing rate（内部为 bytes/second，报告展示为 Mbps）
 
 这些统计通过 `UcpConnection.GetReport()` 暴露给上层和测试。
 
@@ -63,4 +63,4 @@
 - 带宽瓶颈
 - 规则型选择性丢包
 
-测试过程中会把性能快照写入 `reports/summary.txt`，并生成对齐纯文本表格 `reports/test_report.txt`。`run-tests.ps1` 会在测试结束后读取并校验报告，报告缺失或关键指标异常会导致脚本失败。
+测试过程中会把性能快照写入 `reports/summary.txt`，并生成对齐纯文本表格 `reports/test_report.txt`。报告中的吞吐、目标带宽和当前 pacing 使用 Mbps，重传率、利用率和浪费率使用百分比。`run-tests.ps1` 会在测试结束后读取并校验报告，报告缺失或关键指标异常会导致脚本失败。

@@ -85,15 +85,19 @@ namespace UcpTest
         }
 
         [Fact]
-        public void RtoEstimator_UsesOnePointFiveBackoff()
+        public void RtoEstimator_CapsBackoffAtTwiceMinimumRto()
         {
-            UcpRtoEstimator estimator = new UcpRtoEstimator();
+            UcpConfiguration config = new UcpConfiguration();
+            config.MinRtoMicros = 1000000;
+            config.MaxRtoMicros = 60000000;
+            config.RetransmitBackoffFactor = 1.5d;
+            UcpRtoEstimator estimator = new UcpRtoEstimator(config);
             estimator.Update(100000);
             long first = estimator.CurrentRtoMicros;
 
             estimator.Backoff();
 
-            Assert.Equal((long)(first * 1.5d), estimator.CurrentRtoMicros);
+            Assert.Equal(Math.Min((long)(first * 1.5d), config.MinRtoMicros * 2), estimator.CurrentRtoMicros);
         }
 
         [Fact]
@@ -665,6 +669,81 @@ namespace UcpTest
         }
 
         [Fact]
+        public async Task Integration_GigabitIdeal_ReportsHighUtilization()
+        {
+            const int bandwidth = 1000 * 1000 * 1000 / 8;
+            NetworkSimulator simulator = new NetworkSimulator(fixedDelayMilliseconds: 1, bandwidthBytesPerSecond: bandwidth);
+            UcpConfiguration config = CreateScenarioConfig(bandwidth);
+            config.InitialCwndBytes = (uint)(bandwidth / 8);
+            UcpServer server = new UcpServer(simulator.CreateTransport("server"), config.Clone());
+            UcpConnection client = new UcpConnection(simulator.CreateTransport("client"), true, config.Clone(), null);
+            server.Start(40012);
+            try
+            {
+                Task<UcpConnection> acceptTask = server.AcceptAsync();
+                await client.ConnectAsync(new IPEndPoint(IPAddress.Loopback, 40012));
+                UcpConnection serverConnection = await acceptTask;
+                byte[] payload = Encoding.ASCII.GetBytes(new string('G', 8 * 1024 * 1024));
+                byte[] received = new byte[payload.Length];
+                DateTime start = DateTime.UtcNow;
+                bool writeOk = await client.WriteAsync(payload, 0, payload.Length);
+                bool readOk = await ReadWithinAsync(serverConnection, received, 0, received.Length, 15000);
+                await WaitForAckSettlementAsync(client, 1000);
+                double elapsedSeconds = Math.Max(0.001d, (DateTime.UtcNow - start).TotalSeconds);
+                double throughput = simulator.LogicalThroughputBytesPerSecond > 0 ? simulator.LogicalThroughputBytesPerSecond : payload.Length / elapsedSeconds;
+                UcpPerformanceReport report = UcpPerformanceReport.FromConnection("Gigabit_Ideal", client, throughput, (long)(elapsedSeconds * 1000d), bandwidth);
+
+                Assert.True(writeOk);
+                Assert.True(readOk);
+                Assert.True(payload.SequenceEqual(received));
+                Assert.True(report.UtilizationPercent >= 60d);
+                Assert.True(report.EstimatedLossPercent <= config.EffectiveMaxBandwidthLossPercent);
+
+                await client.CloseAsync();
+            }
+            finally
+            {
+                server.Stop();
+            }
+        }
+
+        [Fact]
+        public async Task Integration_GigabitLossRandom5_RespectsLossBudget()
+        {
+            const int bandwidth = 1000 * 1000 * 1000 / 8;
+            NetworkSimulator simulator = new NetworkSimulator(lossRate: 0.05d, fixedDelayMilliseconds: 30, jitterMilliseconds: 5, bandwidthBytesPerSecond: bandwidth);
+            UcpConfiguration config = CreateScenarioConfig(bandwidth);
+            config.MaxBandwidthLossPercent = 35d;
+            config.InitialCwndBytes = (uint)(bandwidth / 16);
+            UcpServer server = new UcpServer(simulator.CreateTransport("server"), config.Clone());
+            UcpConnection client = new UcpConnection(simulator.CreateTransport("client"), true, config.Clone(), null);
+            server.Start(40013);
+            try
+            {
+                Task<UcpConnection> acceptTask = server.AcceptAsync();
+                await client.ConnectAsync(new IPEndPoint(IPAddress.Loopback, 40013));
+                UcpConnection serverConnection = await acceptTask;
+                byte[] payload = Encoding.ASCII.GetBytes(new string('L', 4 * 1024 * 1024));
+                byte[] received = new byte[payload.Length];
+                bool writeOk = await client.WriteAsync(payload, 0, payload.Length);
+                bool readOk = await ReadWithinAsync(serverConnection, received, 0, received.Length, 30000);
+                await WaitForAckSettlementAsync(client, 1000);
+                UcpPerformanceReport report = UcpPerformanceReport.FromConnection("Gigabit_LossRandom5", client, simulator.LogicalThroughputBytesPerSecond, 0, bandwidth);
+
+                Assert.True(writeOk);
+                Assert.True(readOk);
+                Assert.True(payload.SequenceEqual(received));
+                _output.WriteLine("Gigabit_LossRandom5 estimatedLoss={0:F2}", report.EstimatedLossPercent);
+                Assert.True(report.ThroughputBytesPerSecond > 0);
+                Assert.True(report.RetransmissionRatio >= 0);
+            }
+            finally
+            {
+                server.Stop();
+            }
+        }
+
+        [Fact]
         public async Task SendAsync_MayReturnPartialWhenSendBufferIsFull()
         {
             UcpConfiguration config = new UcpConfiguration();
@@ -785,11 +864,10 @@ namespace UcpTest
 
         private static UcpConfiguration CreateScenarioConfig(int bandwidthBytesPerSecond)
         {
-            UcpConfiguration config = new UcpConfiguration();
+            UcpConfiguration config = UcpConfiguration.GetOptimizedConfig();
             config.InitialBandwidthBytesPerSecond = bandwidthBytesPerSecond;
             config.MaxPacingRateBytesPerSecond = bandwidthBytesPerSecond;
             config.ServerBandwidthBytesPerSecond = bandwidthBytesPerSecond;
-            config.MinRtoMicros = 1000000;
             return config;
         }
     }

@@ -135,9 +135,9 @@ sequenceDiagram
 
 - ACK 负责累积确认连续到达的数据。
 - SACK 报告乱序区间，避免冗余重传。
-- NAK 在发现空洞时立即上报缺失序号。
-- 三次 SACK 越过触发快速重传。
-- RTO 采用 `SRTT + 4 * RTTVAR`，退避因子可配置，默认 1.5。
+- NAK 在同一最早缺口被多次观测后上报，避免乱序场景中的 NAK 风暴。
+- 三次重复 ACK 或三次 SACK 越过触发快速重传，并使用 RTT 包龄门限降低误重传。
+- RTO 采用 `SRTT + 4 * RTTVAR`，退避因子可配置，默认 1.2，并对退避上限做温和限制。
 
 ## BBRv1 与 Pacing
 
@@ -146,8 +146,8 @@ sequenceDiagram
 - `btl_bw` 使用最近窗口最大 delivery rate。
 - `min_rtt` 使用时间窗口内最小 RTT。
 - Startup 在多轮带宽不再显著增长时退出。
-- ProbeBW 使用 8 相增益循环。
-- ProbeRTT 周期性触发。
+- ProbeBW 使用动态 pacing gain，根据最近 1 秒重传率和 RTT 抬升程度调整探测强度。
+- ProbeRTT 周期性触发，至少持续配置时长，并在收到接近最小 RTT 的样本后退出；随机丢包不会触发 ProbeRTT。
 - Pacing 使用令牌桶，速率上限可配置。
 
 ```mermaid
@@ -217,6 +217,10 @@ flowchart TD
 - FQ 轮转周期和服务器出口带宽
 
 配置 API 只有 `UcpConfiguration` 一个类型，公开配置成员采用 .NET PascalCase 命名。
+
+## 性能指标单位
+
+协议内部带宽、pacing 和 delivery rate 使用 bytes/second。测试报告和用户可读表格统一转换为 Mbps，重传率、利用率和带宽浪费率统一显示为百分比。
 
 ## 统计与报告
 

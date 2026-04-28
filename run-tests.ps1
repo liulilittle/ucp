@@ -1,15 +1,20 @@
 $ErrorActionPreference = "Stop"
 
-$reportDir = "E:\dd\ucp\Ucp.Tests\bin\Debug\net8.0\reports"
+$libraryProject = ".\Ucp\UcpLibrary.csproj"
+$testProject = ".\Ucp.Tests\UcpTest.csproj"
+$reportDir = ".\Ucp.Tests\bin\Debug\net8.0\reports"
 if (Test-Path $reportDir) {
     Remove-Item -Recurse -Force $reportDir
 }
 
+[void][System.IO.Directory]::CreateDirectory($reportDir)
+
 Write-Host "[1/2] build"
-dotnet build "E:\dd\ucp\Ucp.slnx"
+dotnet build $libraryProject
+dotnet build $testProject --no-dependencies
 
 Write-Host "[2/2] test"
-dotnet test "E:\dd\ucp\Ucp.slnx" --no-build
+dotnet test $testProject --no-build
 
 Write-Host "[report] formatted summary"
-dotnet run --project "E:\dd\ucp\Ucp.Tests\UcpTest.csproj" --no-build -- "E:\dd\ucp\Ucp.Tests\bin\Debug\net8.0\reports\test_report.txt"
+dotnet run --project $testProject --no-build -- ".\Ucp.Tests\bin\Debug\net8.0\reports\test_report.txt"

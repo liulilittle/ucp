@@ -65,7 +65,7 @@ namespace Ucp
                 case UcpPacketType.Rst:
                     UcpControlPacket control = new UcpControlPacket();
                     control.Header = header;
-                    if (count >= UcpConstants.CommonHeaderSize + 4)
+                    if (count >= UcpConstants.CommonHeaderSize + UcpConstants.SEQUENCE_NUMBER_SIZE)
                     {
                         control.HasSequenceNumber = true;
                         control.SequenceNumber = ReadUInt32(buffer, offset + UcpConstants.CommonHeaderSize);
@@ -80,7 +80,7 @@ namespace Ucp
 
         private static byte[] EncodeControl(UcpControlPacket packet)
         {
-            int size = packet.HasSequenceNumber ? UcpConstants.CommonHeaderSize + 4 : UcpConstants.CommonHeaderSize;
+            int size = packet.HasSequenceNumber ? UcpConstants.CommonHeaderSize + UcpConstants.SEQUENCE_NUMBER_SIZE : UcpConstants.CommonHeaderSize;
             byte[] bytes = new byte[size];
             WriteCommonHeader(packet.Header, bytes, 0);
             if (packet.HasSequenceNumber)
@@ -99,11 +99,11 @@ namespace Ucp
             WriteCommonHeader(packet.Header, bytes, index);
             index += UcpConstants.CommonHeaderSize;
             WriteUInt32(packet.SequenceNumber, bytes, index);
-            index += 4;
+            index += UcpConstants.SEQUENCE_NUMBER_SIZE;
             WriteUInt16(packet.FragmentTotal, bytes, index);
-            index += 2;
+            index += sizeof(ushort);
             WriteUInt16(packet.FragmentIndex, bytes, index);
-            index += 2;
+            index += sizeof(ushort);
 
             if (payloadLength > 0)
             {
@@ -121,26 +121,26 @@ namespace Ucp
                 blockCount = UcpConstants.MaxAckSackBlocks;
             }
 
-            byte[] bytes = new byte[UcpConstants.AckFixedSize + (blockCount * 8)];
+            byte[] bytes = new byte[UcpConstants.AckFixedSize + (blockCount * UcpConstants.SACK_BLOCK_SIZE)];
             int index = 0;
             WriteCommonHeader(packet.Header, bytes, index);
             index += UcpConstants.CommonHeaderSize;
             WriteUInt32(packet.AckNumber, bytes, index);
-            index += 4;
+            index += UcpConstants.SEQUENCE_NUMBER_SIZE;
             WriteUInt16((ushort)blockCount, bytes, index);
-            index += 2;
+            index += sizeof(ushort);
 
             for (int i = 0; i < blockCount; i++)
             {
                 SackBlock block = packet.SackBlocks[i];
                 WriteUInt32(block.Start, bytes, index);
-                index += 4;
+                index += UcpConstants.SEQUENCE_NUMBER_SIZE;
                 WriteUInt32(block.End, bytes, index);
-                index += 4;
+                index += UcpConstants.SEQUENCE_NUMBER_SIZE;
             }
 
             WriteUInt32(packet.WindowSize, bytes, index);
-            index += 4;
+            index += sizeof(uint);
             WriteUInt48(packet.EchoTimestamp, bytes, index);
             return bytes;
         }
@@ -148,17 +148,17 @@ namespace Ucp
         private static byte[] EncodeNak(UcpNakPacket packet)
         {
             int count = packet.MissingSequences == null ? 0 : packet.MissingSequences.Count;
-            byte[] bytes = new byte[UcpConstants.NakFixedSize + (count * 4)];
+            byte[] bytes = new byte[UcpConstants.NakFixedSize + (count * UcpConstants.SEQUENCE_NUMBER_SIZE)];
             int index = 0;
             WriteCommonHeader(packet.Header, bytes, index);
             index += UcpConstants.CommonHeaderSize;
             WriteUInt16((ushort)count, bytes, index);
-            index += 2;
+            index += sizeof(ushort);
 
             for (int i = 0; i < count; i++)
             {
                 WriteUInt32(packet.MissingSequences[i], bytes, index);
-                index += 4;
+                index += UcpConstants.SEQUENCE_NUMBER_SIZE;
             }
 
             return bytes;
@@ -176,11 +176,11 @@ namespace Ucp
             UcpDataPacket data = new UcpDataPacket();
             data.Header = header;
             data.SequenceNumber = ReadUInt32(buffer, index);
-            index += 4;
+            index += UcpConstants.SEQUENCE_NUMBER_SIZE;
             data.FragmentTotal = ReadUInt16(buffer, index);
-            index += 2;
+            index += sizeof(ushort);
             data.FragmentIndex = ReadUInt16(buffer, index);
-            index += 2;
+            index += sizeof(ushort);
 
             int payloadLength = count - UcpConstants.DataHeaderSize;
             data.Payload = new byte[payloadLength];
@@ -205,11 +205,11 @@ namespace Ucp
             UcpAckPacket ack = new UcpAckPacket();
             ack.Header = header;
             ack.AckNumber = ReadUInt32(buffer, index);
-            index += 4;
+            index += UcpConstants.SEQUENCE_NUMBER_SIZE;
             ushort blockCount = ReadUInt16(buffer, index);
-            index += 2;
+            index += sizeof(ushort);
 
-            int expectedSize = UcpConstants.AckFixedSize + (blockCount * 8);
+            int expectedSize = UcpConstants.AckFixedSize + (blockCount * UcpConstants.SACK_BLOCK_SIZE);
             if (count < expectedSize)
             {
                 return false;
@@ -219,14 +219,14 @@ namespace Ucp
             {
                 SackBlock block = new SackBlock();
                 block.Start = ReadUInt32(buffer, index);
-                index += 4;
+                index += UcpConstants.SEQUENCE_NUMBER_SIZE;
                 block.End = ReadUInt32(buffer, index);
-                index += 4;
+                index += UcpConstants.SEQUENCE_NUMBER_SIZE;
                 ack.SackBlocks.Add(block);
             }
 
             ack.WindowSize = ReadUInt32(buffer, index);
-            index += 4;
+            index += sizeof(uint);
             ack.EchoTimestamp = ReadUInt48(buffer, index);
             packet = ack;
             return true;
@@ -242,8 +242,8 @@ namespace Ucp
 
             int index = offset + UcpConstants.CommonHeaderSize;
             ushort missingCount = ReadUInt16(buffer, index);
-            index += 2;
-            int expectedSize = UcpConstants.NakFixedSize + (missingCount * 4);
+            index += sizeof(ushort);
+            int expectedSize = UcpConstants.NakFixedSize + (missingCount * UcpConstants.SEQUENCE_NUMBER_SIZE);
             if (count < expectedSize)
             {
                 return false;
@@ -254,7 +254,7 @@ namespace Ucp
             for (int i = 0; i < missingCount; i++)
             {
                 nak.MissingSequences.Add(ReadUInt32(buffer, index));
-                index += 4;
+                index += UcpConstants.SEQUENCE_NUMBER_SIZE;
             }
 
             packet = nak;
@@ -271,8 +271,8 @@ namespace Ucp
 
             header.Type = (UcpPacketType)buffer[offset];
             header.Flags = (UcpPacketFlags)buffer[offset + 1];
-            header.ConnectionId = ReadUInt32(buffer, offset + 2);
-            header.Timestamp = ReadUInt48(buffer, offset + 6);
+            header.ConnectionId = ReadUInt32(buffer, offset + UcpConstants.PACKET_TYPE_FIELD_SIZE + UcpConstants.PACKET_FLAGS_FIELD_SIZE);
+            header.Timestamp = ReadUInt48(buffer, offset + UcpConstants.PACKET_TYPE_FIELD_SIZE + UcpConstants.PACKET_FLAGS_FIELD_SIZE + UcpConstants.CONNECTION_ID_SIZE);
             return true;
         }
 
@@ -280,55 +280,55 @@ namespace Ucp
         {
             buffer[offset] = (byte)header.Type;
             buffer[offset + 1] = (byte)header.Flags;
-            WriteUInt32(header.ConnectionId, buffer, offset + 2);
-            WriteUInt48(header.Timestamp, buffer, offset + 6);
+            WriteUInt32(header.ConnectionId, buffer, offset + UcpConstants.PACKET_TYPE_FIELD_SIZE + UcpConstants.PACKET_FLAGS_FIELD_SIZE);
+            WriteUInt48(header.Timestamp, buffer, offset + UcpConstants.PACKET_TYPE_FIELD_SIZE + UcpConstants.PACKET_FLAGS_FIELD_SIZE + UcpConstants.CONNECTION_ID_SIZE);
         }
 
         private static void WriteUInt16(ushort value, byte[] buffer, int offset)
         {
-            buffer[offset] = (byte)(value >> 8);
+            buffer[offset] = (byte)(value >> UcpConstants.BYTE_BITS);
             buffer[offset + 1] = (byte)value;
         }
 
         private static ushort ReadUInt16(byte[] buffer, int offset)
         {
-            return (ushort)((buffer[offset] << 8) | buffer[offset + 1]);
+            return (ushort)((buffer[offset] << UcpConstants.BYTE_BITS) | buffer[offset + 1]);
         }
 
         private static void WriteUInt32(uint value, byte[] buffer, int offset)
         {
-            buffer[offset] = (byte)(value >> 24);
-            buffer[offset + 1] = (byte)(value >> 16);
-            buffer[offset + 2] = (byte)(value >> 8);
+            buffer[offset] = (byte)(value >> UcpConstants.UINT24_BITS);
+            buffer[offset + 1] = (byte)(value >> UcpConstants.UINT16_BITS);
+            buffer[offset + 2] = (byte)(value >> UcpConstants.BYTE_BITS);
             buffer[offset + 3] = (byte)value;
         }
 
         private static uint ReadUInt32(byte[] buffer, int offset)
         {
-            return ((uint)buffer[offset] << 24)
-                | ((uint)buffer[offset + 1] << 16)
-                | ((uint)buffer[offset + 2] << 8)
+            return ((uint)buffer[offset] << UcpConstants.UINT24_BITS)
+                | ((uint)buffer[offset + 1] << UcpConstants.UINT16_BITS)
+                | ((uint)buffer[offset + 2] << UcpConstants.BYTE_BITS)
                 | buffer[offset + 3];
         }
 
         private static void WriteUInt48(long value, byte[] buffer, int offset)
         {
-            ulong normalized = (ulong)value & 0x0000FFFFFFFFFFFFUL;
-            buffer[offset] = (byte)(normalized >> 40);
-            buffer[offset + 1] = (byte)(normalized >> 32);
-            buffer[offset + 2] = (byte)(normalized >> 24);
-            buffer[offset + 3] = (byte)(normalized >> 16);
-            buffer[offset + 4] = (byte)(normalized >> 8);
+            ulong normalized = (ulong)value & UcpConstants.UINT48_MASK;
+            buffer[offset] = (byte)(normalized >> UcpConstants.UINT40_BITS);
+            buffer[offset + 1] = (byte)(normalized >> UcpConstants.UINT32_BITS);
+            buffer[offset + 2] = (byte)(normalized >> UcpConstants.UINT24_BITS);
+            buffer[offset + 3] = (byte)(normalized >> UcpConstants.UINT16_BITS);
+            buffer[offset + 4] = (byte)(normalized >> UcpConstants.BYTE_BITS);
             buffer[offset + 5] = (byte)normalized;
         }
 
         private static long ReadUInt48(byte[] buffer, int offset)
         {
-            ulong value = ((ulong)buffer[offset] << 40)
-                | ((ulong)buffer[offset + 1] << 32)
-                | ((ulong)buffer[offset + 2] << 24)
-                | ((ulong)buffer[offset + 3] << 16)
-                | ((ulong)buffer[offset + 4] << 8)
+            ulong value = ((ulong)buffer[offset] << UcpConstants.UINT40_BITS)
+                | ((ulong)buffer[offset + 1] << UcpConstants.UINT32_BITS)
+                | ((ulong)buffer[offset + 2] << UcpConstants.UINT24_BITS)
+                | ((ulong)buffer[offset + 3] << UcpConstants.UINT16_BITS)
+                | ((ulong)buffer[offset + 4] << UcpConstants.BYTE_BITS)
                 | buffer[offset + 5];
             return (long)value;
         }

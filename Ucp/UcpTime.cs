@@ -15,16 +15,16 @@ namespace Ucp
         public static long ReadStopwatchMicroseconds()
         {
             long elapsedTicks = Stopwatch.GetTimestamp() - StartTicks;
-            return (elapsedTicks * 1000000L) / Stopwatch.Frequency;
+            return (elapsedTicks * UcpConstants.MICROS_PER_SECOND) / Stopwatch.Frequency;
         }
 
         public static long NowMicroseconds()
         {
             long elapsedTicks = Stopwatch.GetTimestamp() - StartTicks;
-            long elapsedMilliseconds = (elapsedTicks * 1000L) / Stopwatch.Frequency;
+            long elapsedMilliseconds = (elapsedTicks * UcpConstants.MICROS_PER_MILLI) / Stopwatch.Frequency;
             if (elapsedMilliseconds != Volatile.Read(ref _cachedElapsedMilliseconds))
             {
-                Volatile.Write(ref _cachedMicroseconds, (elapsedTicks * 1000000L) / Stopwatch.Frequency);
+                Volatile.Write(ref _cachedMicroseconds, (elapsedTicks * UcpConstants.MICROS_PER_SECOND) / Stopwatch.Frequency);
                 Volatile.Write(ref _cachedElapsedMilliseconds, elapsedMilliseconds);
             }
 

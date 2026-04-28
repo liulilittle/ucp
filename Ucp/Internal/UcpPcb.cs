@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Net;
 using System.Security.Cryptography;
 using System.Threading;
@@ -51,6 +52,7 @@ namespace Ucp.Internal
         private readonly SortedDictionary<uint, InboundSegment> _recvBuffer = new SortedDictionary<uint, InboundSegment>(UcpSequenceComparer.Instance);
         private readonly Queue<ReceiveChunk> _receiveQueue = new Queue<ReceiveChunk>();
         private readonly HashSet<uint> _nakIssued = new HashSet<uint>();
+        private readonly Dictionary<uint, int> _missingSequenceCounts = new Dictionary<uint, int>();
         private readonly SemaphoreSlim _receiveSignal = new SemaphoreSlim(0, int.MaxValue);
         private readonly SemaphoreSlim _sendSpaceSignal = new SemaphoreSlim(0, int.MaxValue);
         private readonly SemaphoreSlim _flushLock = new SemaphoreSlim(1, 1);
@@ -93,6 +95,10 @@ namespace Ucp.Internal
         private bool _closedResourcesReleased;
         private uint _largestCumulativeAckNumber;
         private bool _hasLargestCumulativeAckNumber;
+        private uint _lastAckNumber;
+        private bool _hasLastAckNumber;
+        private int _duplicateAckCount;
+        private bool _fastRecoveryActive;
         private uint _localReceiveWindowBytes = UcpConstants.DefaultReceiveWindowBytes;
         private int _queuedReceiveBytes;
         private long _bytesSent;
@@ -105,6 +111,10 @@ namespace Ucp.Internal
         private int _fastRetransmissions;
         private int _timeoutRetransmissions;
         private readonly List<long> _rttSamplesMicros = new List<long>();
+        private long _lastNakWindowMicros;
+        private int _naksSentThisRttWindow;
+        private long _lastAckReceivedMicros;
+        private bool _tailLossProbePending;
 
         public UcpPcb(ITransport transport, IPEndPoint remoteEndPoint, bool isServerSide, bool useFairQueue, Action<UcpPcb> closedCallback, uint? connectionId, UcpConfiguration config)
             : this(transport, remoteEndPoint, isServerSide, useFairQueue, closedCallback, connectionId, config, null)
@@ -190,6 +200,7 @@ namespace Ucp.Internal
                 diagnostics.TimeoutRetransmissions = _timeoutRetransmissions;
                 diagnostics.CongestionWindowBytes = _bbr.CongestionWindowBytes;
                 diagnostics.PacingRateBytesPerSecond = _bbr.PacingRateBytesPerSecond;
+                diagnostics.EstimatedLossPercent = _bbr.EstimatedLossPercent;
                 diagnostics.LastRttMicros = _lastRttMicros;
                 diagnostics.RttSamplesMicros.AddRange(_rttSamplesMicros);
                 diagnostics.ReceivedReset = _rstReceived;
@@ -272,14 +283,14 @@ namespace Ucp.Internal
                 _synSent = true;
             }
 
-            long deadlineMicros = NowMicros() + (_config.ConnectTimeoutMilliseconds * 1000L);
+            long deadlineMicros = NowMicros() + (_config.ConnectTimeoutMilliseconds * UcpConstants.MICROS_PER_MILLI);
             while (NowMicros() < deadlineMicros)
             {
                 SendControl(UcpPacketType.Syn, UcpPacketFlags.None);
                 int waitMilliseconds;
                 lock (_sync)
                 {
-                    waitMilliseconds = (int)Math.Max(100L, _rtoEstimator.CurrentRtoMicros / 1000L);
+                    waitMilliseconds = (int)Math.Max(UcpConstants.MIN_HANDSHAKE_WAIT_MILLISECONDS, _rtoEstimator.CurrentRtoMicros / UcpConstants.MICROS_PER_MILLI);
                 }
 
                 Task completed = await Task.WhenAny(_connectedTcs.Task, Task.Delay(waitMilliseconds, _cts.Token)).ConfigureAwait(false);
@@ -488,7 +499,7 @@ namespace Ucp.Internal
                 SendControl(UcpPacketType.Fin, UcpPacketFlags.None);
             }
 
-            await WaitWithTimeoutAsync(_closedTcs.Task, 1000).ConfigureAwait(false);
+            await WaitWithTimeoutAsync(_closedTcs.Task, UcpConstants.CLOSE_WAIT_TIMEOUT_MILLISECONDS).ConfigureAwait(false);
             TransitionToClosed();
         }
 
@@ -506,13 +517,13 @@ namespace Ucp.Internal
 
             if (packet.Header.Type == UcpPacketType.Syn)
             {
-                await HandleSynAsync((UcpControlPacket)packet).ConfigureAwait(false);
+                HandleSyn((UcpControlPacket)packet);
                 return;
             }
 
             if (packet.Header.Type == UcpPacketType.SynAck)
             {
-                await HandleSynAckAsync((UcpControlPacket)packet).ConfigureAwait(false);
+                HandleSynAck((UcpControlPacket)packet);
                 return;
             }
 
@@ -530,13 +541,13 @@ namespace Ucp.Internal
 
             if (packet.Header.Type == UcpPacketType.Data)
             {
-                await HandleDataAsync((UcpDataPacket)packet).ConfigureAwait(false);
+                HandleData((UcpDataPacket)packet);
                 return;
             }
 
             if (packet.Header.Type == UcpPacketType.Fin)
             {
-                await HandleFinAsync((UcpControlPacket)packet).ConfigureAwait(false);
+                HandleFin((UcpControlPacket)packet);
                 return;
             }
 
@@ -623,7 +634,7 @@ namespace Ucp.Internal
             _flushLock.Dispose();
         }
 
-        private async Task HandleSynAsync(UcpControlPacket packet)
+        private void HandleSyn(UcpControlPacket packet)
         {
             bool shouldReply = false;
             lock (_sync)
@@ -657,7 +668,7 @@ namespace Ucp.Internal
             }
         }
 
-        private async Task HandleSynAckAsync(UcpControlPacket packet)
+        private void HandleSynAck(UcpControlPacket packet)
         {
             bool shouldAck = false;
             bool shouldEstablish = false;
@@ -693,6 +704,7 @@ namespace Ucp.Internal
             int remainingFlight;
             long sampleRtt = 0;
             long nowMicros = NowMicros();
+            bool fastRetransmitTriggered = false;
 
             lock (_sync)
             {
@@ -719,6 +731,11 @@ namespace Ucp.Internal
                     _lastRttMicros = sampleRtt;
                     AddRttSampleUnsafe(sampleRtt);
                 }
+
+                _lastAckReceivedMicros = nowMicros;
+                _tailLossProbePending = false;
+
+                UpdateDuplicateAckStateUnsafe(ackPacket, nowMicros, out fastRetransmitTriggered);
 
                 foreach (KeyValuePair<uint, OutboundSegment> pair in _sendBuffer)
                 {
@@ -779,10 +796,17 @@ namespace Ucp.Internal
                         if (UcpSequenceComparer.IsBefore(segment.SequenceNumber, highestSack))
                         {
                             segment.MissingAckCount++;
-                            if (segment.MissingAckCount == 3 && segment.SendCount == 1 && !segment.NeedsRetransmit)
+                            if (segment.MissingAckCount >= UcpConstants.DUPLICATE_ACK_THRESHOLD && segment.SendCount == 1 && !segment.NeedsRetransmit)
                             {
-                                segment.NeedsRetransmit = true;
-                                _fastRetransmissions++;
+                                long rttForFastRetransmit = GetFastRetransmitAgeThresholdUnsafe();
+                                if (ShouldTriggerEarlyRetransmitUnsafe() || rttForFastRetransmit <= 0 || nowMicros - segment.LastSendMicros >= rttForFastRetransmit)
+                                {
+                                    segment.NeedsRetransmit = true;
+                                    _fastRetransmissions++;
+                                    bool isCongestionLoss = IsCongestionLossUnsafe(sampleRtt);
+                                    _bbr.OnFastRetransmit(nowMicros, isCongestionLoss);
+                                    TraceLogUnsafe("FastRetransmit sequence=" + segment.SequenceNumber + " sack=true congestion=" + isCongestionLoss);
+                                }
                             }
                         }
                     }
@@ -829,7 +853,7 @@ namespace Ucp.Internal
                 TransitionToClosed();
             }
 
-            if (deliveredBytes > 0 || remainingFlight > 0)
+            if (fastRetransmitTriggered || deliveredBytes > 0 || remainingFlight > 0)
             {
                 await FlushSendQueueAsync().ConfigureAwait(false);
             }
@@ -837,6 +861,8 @@ namespace Ucp.Internal
 
         private async Task HandleNakAsync(UcpNakPacket nakPacket)
         {
+            bool notifiedLoss = false;
+            long nowMicros = NowMicros();
             lock (_sync)
             {
                 for (int i = 0; i < nakPacket.MissingSequences.Count; i++)
@@ -845,8 +871,20 @@ namespace Ucp.Internal
                     OutboundSegment segment;
                     if (_sendBuffer.TryGetValue(sequence, out segment))
                     {
-                        segment.NeedsRetransmit = true;
+                        if (!segment.NeedsRetransmit)
+                        {
+                            segment.NeedsRetransmit = true;
+                            _tailLossProbePending = false;
+                            notifiedLoss = true;
+                        }
                     }
+                }
+
+                if (notifiedLoss)
+                {
+                    bool isCongestionLoss = IsCongestionLossUnsafe(0);
+                    _bbr.OnPacketLoss(nowMicros, GetRetransmissionRatioUnsafe(), isCongestionLoss);
+                    TraceLogUnsafe("NAK loss congestion=" + isCongestionLoss + " count=" + nakPacket.MissingSequences.Count);
                 }
             }
 
@@ -901,7 +939,83 @@ namespace Ucp.Internal
             return highest;
         }
 
-        private async Task HandleDataAsync(UcpDataPacket dataPacket)
+        private void UpdateDuplicateAckStateUnsafe(UcpAckPacket ackPacket, long nowMicros, out bool fastRetransmitTriggered)
+        {
+            fastRetransmitTriggered = false;
+            bool hasSack = ackPacket.SackBlocks != null && ackPacket.SackBlocks.Count > 0;
+            bool duplicateAck = _hasLastAckNumber && ackPacket.AckNumber == _lastAckNumber && !hasSack;
+                if (duplicateAck)
+                {
+                    _duplicateAckCount++;
+                if (_duplicateAckCount >= UcpConstants.DUPLICATE_ACK_THRESHOLD && !_fastRecoveryActive)
+                {
+                    uint lostSeq = UcpSequenceComparer.Increment(ackPacket.AckNumber);
+                    OutboundSegment lostSegment;
+                    if (_sendBuffer.TryGetValue(lostSeq, out lostSegment) && !lostSegment.Acked && lostSegment.SendCount == 1 && !lostSegment.NeedsRetransmit)
+                    {
+                        long rttForFastRetransmit = GetFastRetransmitAgeThresholdUnsafe();
+                        if (ShouldTriggerEarlyRetransmitUnsafe() || rttForFastRetransmit <= 0 || nowMicros - lostSegment.LastSendMicros >= rttForFastRetransmit)
+                        {
+                            lostSegment.NeedsRetransmit = true;
+                            _fastRecoveryActive = true;
+                            _fastRetransmissions++;
+                            fastRetransmitTriggered = true;
+                            bool isCongestionLoss = IsCongestionLossUnsafe(0);
+                            _bbr.OnFastRetransmit(nowMicros, isCongestionLoss);
+                            TraceLogUnsafe("FastRetransmit sequence=" + lostSeq + " dupAck=true congestion=" + isCongestionLoss);
+                        }
+                    }
+                }
+            }
+            else
+            {
+                _duplicateAckCount = 0;
+                _fastRecoveryActive = false;
+            }
+
+            _lastAckNumber = ackPacket.AckNumber;
+            _hasLastAckNumber = true;
+        }
+
+        private bool IsCongestionLossUnsafe(long sampleRttMicros)
+        {
+            long currentRttMicros = sampleRttMicros > 0 ? sampleRttMicros : _lastRttMicros;
+            long smoothedRttMicros = _rtoEstimator.SmoothedRttMicros;
+            if (currentRttMicros <= 0 || smoothedRttMicros <= 0)
+            {
+                return false;
+            }
+
+            return currentRttMicros > (long)(smoothedRttMicros * 1.1d);
+        }
+
+        private long GetFastRetransmitAgeThresholdUnsafe()
+        {
+            long rttMicros = _rtoEstimator.SmoothedRttMicros > 0 ? _rtoEstimator.SmoothedRttMicros : _lastRttMicros;
+            return rttMicros <= 0 ? 0 : rttMicros;
+        }
+
+        private bool ShouldTriggerEarlyRetransmitUnsafe()
+        {
+            int inflightSegments = Math.Max(1, _config.MaxPayloadSize) <= 0 ? 0 : (int)Math.Ceiling(_flightBytes / (double)Math.Max(1, _config.MaxPayloadSize));
+            return inflightSegments > 0 && inflightSegments <= UcpConstants.EARLY_RETRANSMIT_MAX_INFLIGHT_SEGMENTS;
+        }
+
+        private double GetRetransmissionRatioUnsafe()
+        {
+            int total = _sentDataPackets + _retransmittedPackets;
+            return total == 0 ? 0d : _retransmittedPackets / (double)total;
+        }
+
+        private void TraceLogUnsafe(string message)
+        {
+            if (_config.EnableDebugLog)
+            {
+                Trace.WriteLine("[UCP PCB] " + message);
+            }
+        }
+
+        private void HandleData(UcpDataPacket dataPacket)
         {
             List<uint> missing = new List<uint>();
             List<byte[]> readyPayloads = new List<byte[]>();
@@ -937,18 +1051,27 @@ namespace Ucp.Internal
                         inbound.FragmentIndex = dataPacket.FragmentIndex;
                         inbound.Payload = dataPacket.Payload;
                         _recvBuffer[dataPacket.SequenceNumber] = inbound;
+                        _nakIssued.Remove(dataPacket.SequenceNumber);
+                        _missingSequenceCounts.Remove(dataPacket.SequenceNumber);
                     }
 
                     if (shouldStore && UcpSequenceComparer.IsAfter(dataPacket.SequenceNumber, _nextExpectedSequence))
                     {
                         uint current = _nextExpectedSequence;
-                        int remainingNakSlots = 32;
+                        int remainingNakSlots = UcpConstants.MAX_NAK_MISSING_SCAN;
                         while (current != dataPacket.SequenceNumber && remainingNakSlots > 0)
                         {
-                            if (!_nakIssued.Contains(current))
+                            if (!_recvBuffer.ContainsKey(current))
                             {
-                                _nakIssued.Add(current);
-                                missing.Add(current);
+                                int missingCount;
+                                _missingSequenceCounts.TryGetValue(current, out missingCount);
+                                missingCount++;
+                                _missingSequenceCounts[current] = missingCount;
+                                if (current == _nextExpectedSequence && missingCount >= UcpConstants.NAK_MISSING_THRESHOLD && !_nakIssued.Contains(current))
+                                {
+                                    _nakIssued.Add(current);
+                                    missing.Add(current);
+                                }
                             }
 
                             current = UcpSequenceComparer.Increment(current);
@@ -966,8 +1089,20 @@ namespace Ucp.Internal
 
                         _recvBuffer.Remove(_nextExpectedSequence);
                         _nakIssued.Remove(_nextExpectedSequence);
+                        _missingSequenceCounts.Remove(_nextExpectedSequence);
                         _nextExpectedSequence = UcpSequenceComparer.Increment(_nextExpectedSequence);
                         readyPayloads.Add(next.Payload);
+                    }
+
+                    if (_recvBuffer.Count > 0 && !_recvBuffer.ContainsKey(_nextExpectedSequence) && !_nakIssued.Contains(_nextExpectedSequence))
+                    {
+                        int missingCount;
+                        _missingSequenceCounts.TryGetValue(_nextExpectedSequence, out missingCount);
+                        if (missingCount >= UcpConstants.NAK_MISSING_THRESHOLD)
+                        {
+                            _nakIssued.Add(_nextExpectedSequence);
+                            missing.Add(_nextExpectedSequence);
+                        }
                     }
                 }
             }
@@ -990,7 +1125,7 @@ namespace Ucp.Internal
             ScheduleAck();
         }
 
-        private async Task HandleFinAsync(UcpControlPacket packet)
+        private void HandleFin(UcpControlPacket packet)
         {
             bool needSendOwnFin = false;
             lock (_sync)
@@ -1021,6 +1156,29 @@ namespace Ucp.Internal
             if (missing == null || missing.Count == 0)
             {
                 return;
+            }
+
+            lock (_sync)
+            {
+                long nowMicros = NowMicros();
+                long rttWindowMicros = _rtoEstimator.SmoothedRttMicros > 0 ? _rtoEstimator.SmoothedRttMicros : _config.DelayedAckTimeoutMicros;
+                if (rttWindowMicros <= 0)
+                {
+                    rttWindowMicros = UcpConstants.BBR_MIN_ROUND_DURATION_MICROS;
+                }
+
+                if (_lastNakWindowMicros == 0 || nowMicros - _lastNakWindowMicros >= rttWindowMicros)
+                {
+                    _lastNakWindowMicros = nowMicros;
+                    _naksSentThisRttWindow = 0;
+                }
+
+                if (_naksSentThisRttWindow >= UcpConstants.MAX_NAKS_PER_RTT)
+                {
+                    return;
+                }
+
+                _naksSentThisRttWindow++;
             }
 
             UcpNakPacket packet = new UcpNakPacket();
@@ -1078,6 +1236,12 @@ namespace Ucp.Internal
                 return;
             }
 
+            long ackDelayMicros = _config.DelayedAckTimeoutMicros;
+            if (_lastRttMicros > 30L * UcpConstants.MICROS_PER_MILLI)
+            {
+                ackDelayMicros = Math.Min(ackDelayMicros, UcpConstants.MICROS_PER_MILLI);
+            }
+
             lock (_sync)
             {
                 if (_ackDelayed)
@@ -1094,7 +1258,7 @@ namespace Ucp.Internal
                 {
                     try
                     {
-                        await Task.Delay((int)Math.Max(1L, _config.DelayedAckTimeoutMicros / 1000L), _cts.Token).ConfigureAwait(false);
+                        await Task.Delay((int)Math.Max(UcpConstants.MIN_TIMER_WAIT_MILLISECONDS, ackDelayMicros / UcpConstants.MICROS_PER_MILLI), _cts.Token).ConfigureAwait(false);
                         lock (_sync)
                         {
                             _ackDelayed = false;
@@ -1109,7 +1273,7 @@ namespace Ucp.Internal
                 return;
             }
 
-            _network.AddTimer(_network.CurrentTimeUs + _config.DelayedAckTimeoutMicros, delegate
+            _network.AddTimer(_network.CurrentTimeUs + ackDelayMicros, delegate
             {
                 lock (_sync)
                 {
@@ -1185,6 +1349,7 @@ namespace Ucp.Internal
                             }
 
                             segment.SendCount++;
+                            _bbr.OnPacketSent(nowMicros, segment.SendCount > 1);
                             segment.LastSendMicros = nowMicros;
                             _lastActivityMicros = nowMicros;
                             segmentsToSend.Add(segment);
@@ -1240,10 +1405,10 @@ namespace Ucp.Internal
             }
 
             _flushDelayed = true;
-            int delayMs = (int)Math.Ceiling(waitMicros / 1000d);
-            if (delayMs < 1)
+            int delayMs = (int)Math.Ceiling(waitMicros / (double)UcpConstants.MICROS_PER_MILLI);
+            if (delayMs < UcpConstants.MIN_TIMER_WAIT_MILLISECONDS)
             {
-                delayMs = 1;
+                delayMs = UcpConstants.MIN_TIMER_WAIT_MILLISECONDS;
             }
 
             if (_network == null)
@@ -1264,7 +1429,7 @@ namespace Ucp.Internal
                 return;
             }
 
-            _flushTimerId = _network.AddTimer(_network.NowMicroseconds + (delayMs * 1000L), delegate
+            _flushTimerId = _network.AddTimer(_network.NowMicroseconds + (delayMs * UcpConstants.MICROS_PER_MILLI), delegate
             {
                 _flushDelayed = false;
                 _flushTimerId = 0;
@@ -1363,7 +1528,7 @@ namespace Ucp.Internal
                 return;
             }
 
-            long intervalMicros = Math.Max(1, _config.TimerIntervalMilliseconds) * 1000L;
+            long intervalMicros = Math.Max(UcpConstants.MIN_TIMER_WAIT_MILLISECONDS, _config.TimerIntervalMilliseconds) * UcpConstants.MICROS_PER_MILLI;
             _timerId = _network.AddTimer(_network.NowMicroseconds + intervalMicros, delegate { OnTimer(null); });
         }
 
@@ -1378,9 +1543,12 @@ namespace Ucp.Internal
             bool sendKeepAlive = false;
             bool retransmitSynAck = false;
             bool maxRetransmissionsExceeded = false;
+            bool timedOutForCongestion = false;
+            bool tailLossProbe = false;
 
             lock (_sync)
             {
+                int inflightSegments = Math.Max(1, _config.MaxPayloadSize) <= 0 ? 0 : (int)Math.Ceiling(_flightBytes / (double)Math.Max(1, _config.MaxPayloadSize));
                 foreach (KeyValuePair<uint, OutboundSegment> pair in _sendBuffer)
                 {
                     OutboundSegment segment = pair.Value;
@@ -1400,12 +1568,38 @@ namespace Ucp.Internal
 
                         segment.NeedsRetransmit = true;
                         timedOut = true;
+                        timedOutForCongestion = timedOutForCongestion || IsCongestionLossUnsafe(0);
                         _timeoutRetransmissions++;
+                    }
+                }
+
+                if (!timedOut && !_tailLossProbePending && inflightSegments > 0 && inflightSegments <= UcpConstants.TLP_MAX_INFLIGHT_SEGMENTS)
+                {
+                    long tlpTimeoutMicros = _rtoEstimator.SmoothedRttMicros > 0
+                        ? (long)Math.Ceiling(_rtoEstimator.SmoothedRttMicros * UcpConstants.TLP_TIMEOUT_RTT_RATIO)
+                        : _rtoEstimator.CurrentRtoMicros;
+                    if (_lastAckReceivedMicros > 0 && nowMicros - _lastAckReceivedMicros >= tlpTimeoutMicros)
+                    {
+                        foreach (KeyValuePair<uint, OutboundSegment> pair in _sendBuffer)
+                        {
+                            OutboundSegment segment = pair.Value;
+                            if (segment.Acked || !segment.InFlight || segment.NeedsRetransmit)
+                            {
+                                continue;
+                            }
+
+                            segment.NeedsRetransmit = true;
+                            _tailLossProbePending = true;
+                            tailLossProbe = true;
+                            break;
+                        }
                     }
                 }
 
                 if (timedOut)
                 {
+                    _bbr.OnPacketLoss(nowMicros, GetRetransmissionRatioUnsafe(), timedOutForCongestion);
+                    TraceLogUnsafe("RTO loss congestion=" + timedOutForCongestion + " rto=" + _rtoEstimator.CurrentRtoMicros);
                     _rtoEstimator.Backoff();
                 }
 
@@ -1427,7 +1621,7 @@ namespace Ucp.Internal
                 return;
             }
 
-            if (timedOut)
+            if (timedOut || tailLossProbe)
             {
                 await FlushSendQueueAsync().ConfigureAwait(false);
             }
@@ -1565,7 +1759,7 @@ namespace Ucp.Internal
 
         private static uint NextConnectionId()
         {
-            byte[] bytes = new byte[4];
+            byte[] bytes = new byte[UcpConstants.CONNECTION_ID_SIZE];
             uint connectionId;
             do
             {

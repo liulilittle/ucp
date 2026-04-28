@@ -97,7 +97,7 @@ namespace Ucp
             Configuration = configuration == null ? new UcpConfiguration() : configuration.Clone();
             _transportAdapter = new NetworkTransportAdapter(this);
             _currentTimeUs = UcpTime.ReadStopwatchMicroseconds();
-            _currentTimeMs = _currentTimeUs / 1000L;
+            _currentTimeMs = _currentTimeUs / UcpConstants.MICROS_PER_MILLI;
         }
 
         public UcpConfiguration Configuration { get; private set; }
@@ -425,7 +425,7 @@ namespace Ucp
                 }
             }
 
-            if (hasTimer && nextExpireUs - CurrentTimeUs <= 1000)
+            if (hasTimer && nextExpireUs - CurrentTimeUs <= UcpConstants.MICROS_PER_MILLI)
             {
                 Thread.Yield();
                 return;
@@ -437,7 +437,7 @@ namespace Ucp
         private void UpdateCachedClock()
         {
             long stopwatchUs = UcpTime.ReadStopwatchMicroseconds();
-            long stopwatchMs = stopwatchUs / 1000L;
+            long stopwatchMs = stopwatchUs / UcpConstants.MICROS_PER_MILLI;
             long cachedMs = Volatile.Read(ref _currentTimeMs);
             if (stopwatchMs != cachedMs)
             {

@@ -28,7 +28,7 @@ namespace Ucp
             _minRtoMicros = config.EffectiveMinRtoMicros;
             _maxRtoMicros = config.EffectiveMaxRtoMicros;
             _backoffFactor = config.EffectiveRetransmitBackoffFactor;
-            CurrentRtoMicros = Math.Max(_minRtoMicros, 300000);
+            CurrentRtoMicros = Math.Max(_minRtoMicros, UcpConstants.INITIAL_RTO_MICROS);
         }
 
         public void Update(long sampleMicros)
@@ -41,16 +41,16 @@ namespace Ucp
             if (SmoothedRttMicros == 0)
             {
                 SmoothedRttMicros = sampleMicros;
-                RttVarianceMicros = sampleMicros / 2;
+                RttVarianceMicros = sampleMicros / UcpConstants.RTO_MAX_BACKOFF_MIN_RTO_MULTIPLIER;
             }
             else
             {
                 long delta = Math.Abs(SmoothedRttMicros - sampleMicros);
-                RttVarianceMicros = ((RttVarianceMicros * 3) + delta) / 4;
-                SmoothedRttMicros = ((SmoothedRttMicros * 7) + sampleMicros) / 8;
+                RttVarianceMicros = ((RttVarianceMicros * UcpConstants.RTT_VAR_PREVIOUS_WEIGHT) + delta) / UcpConstants.RTT_VAR_DENOM;
+                SmoothedRttMicros = ((SmoothedRttMicros * UcpConstants.RTT_SMOOTHING_PREVIOUS_WEIGHT) + sampleMicros) / UcpConstants.RTT_SMOOTHING_DENOM;
             }
 
-            long candidate = SmoothedRttMicros + (4 * RttVarianceMicros);
+            long candidate = SmoothedRttMicros + (UcpConstants.RTO_GAIN_MULTIPLIER * RttVarianceMicros);
             if (candidate < _minRtoMicros)
             {
                 candidate = _minRtoMicros;
@@ -67,6 +67,12 @@ namespace Ucp
         public void Backoff()
         {
             double backedOff = CurrentRtoMicros * _backoffFactor;
+            double maxBackoff = Math.Max(CurrentRtoMicros, _minRtoMicros * UcpConstants.RTO_MAX_BACKOFF_MIN_RTO_MULTIPLIER);
+            if (backedOff > maxBackoff)
+            {
+                backedOff = maxBackoff;
+            }
+
             if (backedOff > _maxRtoMicros)
             {
                 backedOff = _maxRtoMicros;

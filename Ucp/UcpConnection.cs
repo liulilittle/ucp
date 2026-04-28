@@ -440,6 +440,7 @@ namespace Ucp
             report.RttSamplesMicros.AddRange(diagnostics.RttSamplesMicros);
             report.CongestionWindowBytes = diagnostics.CongestionWindowBytes;
             report.PacingRateBytesPerSecond = diagnostics.PacingRateBytesPerSecond;
+            report.EstimatedLossPercent = diagnostics.EstimatedLossPercent;
             report.RemoteWindowBytes = diagnostics.RemoteWindowBytes;
             return report;
         }

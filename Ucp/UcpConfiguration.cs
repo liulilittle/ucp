@@ -7,37 +7,40 @@ namespace Ucp
     /// </summary>
     public class UcpConfiguration
     {
-        private int _sendBufferSize = 32 * 1024 * 1024;
-        private long _delayedAckTimeoutMicros = 2000;
-        private double _maxBandwidthWastePercent = 0.25d;
-        private long _minPacingIntervalMicros = 1000;
-        private long _pacingBucketDurationMicros = 1000000;
-        private int _bbrWindowRtRounds = 10;
-        private double _startupPacingGain = 2.0d;
-        private double _startupCwndGain = 2.0d;
-        private double _drainPacingGain = 0.75d;
-        private double _probeBwHighGain = 1.25d;
-        private double _probeBwLowGain = 0.75d;
-        private double _probeBwCwndGain = 2.0d;
-        public int Mss = 1220;
-        public int MaxRetransmissions = 10;
-        public long MinRtoMicros = 1000000;
-        public long MaxRtoMicros = 60000000;
-        public double RetransmitBackoffFactor = 1.5d;
-        public long ProbeRttIntervalMicros = 10000000;
-        public long ProbeRttDurationMicros = 200000;
-        public long KeepAliveIntervalMicros = 1000000;
-        public long DisconnectTimeoutMicros = 4000000;
-        public int TimerIntervalMilliseconds = 20;
-        public int FairQueueRoundMilliseconds = 10;
-        public int ServerBandwidthBytesPerSecond = 100000000 / 8;
-        public int ConnectTimeoutMilliseconds = 5000;
-        public long InitialBandwidthBytesPerSecond = 100000000 / 8;
-        public long MaxPacingRateBytesPerSecond = 100000000 / 8;
-        public int MaxCongestionWindowBytes = 64 * 1024 * 1024;
-        public int InitialCwndPackets = 10;
+        private int _sendBufferSize = UcpConstants.DEFAULT_SEND_BUFFER_BYTES;
+        private long _delayedAckTimeoutMicros = UcpConstants.DEFAULT_DELAYED_ACK_TIMEOUT_MICROS;
+        private double _maxBandwidthWastePercent = UcpConstants.DEFAULT_MAX_BANDWIDTH_WASTE_RATIO;
+        private double _maxBandwidthLossPercent = UcpConstants.DEFAULT_MAX_BANDWIDTH_LOSS_PERCENT;
+        private long _minPacingIntervalMicros = UcpConstants.DEFAULT_MIN_PACING_INTERVAL_MICROS;
+        private long _pacingBucketDurationMicros = UcpConstants.DEFAULT_PACING_BUCKET_DURATION_MICROS;
+        private int _bbrWindowRtRounds = UcpConstants.BBR_WINDOW_RTT_ROUNDS;
+        private double _startupPacingGain = UcpConstants.BBR_STARTUP_PACING_GAIN;
+        private double _startupCwndGain = UcpConstants.BBR_STARTUP_CWND_GAIN;
+        private double _drainPacingGain = UcpConstants.BBR_DRAIN_PACING_GAIN;
+        private double _probeBwHighGain = UcpConstants.BBR_PROBE_BW_HIGH_GAIN;
+        private double _probeBwLowGain = UcpConstants.BBR_PROBE_BW_LOW_GAIN;
+        private double _probeBwCwndGain = UcpConstants.BBR_PROBE_BW_CWND_GAIN;
+        public int Mss = UcpConstants.MSS;
+        public int MaxRetransmissions = UcpConstants.MAX_RETRANSMISSIONS;
+        public long MinRtoMicros = UcpConstants.DEFAULT_RTO_MICROS;
+        public long MaxRtoMicros = UcpConstants.DEFAULT_MAX_RTO_MICROS;
+        public double RetransmitBackoffFactor = UcpConstants.RTO_BACKOFF_FACTOR;
+        public long ProbeRttIntervalMicros = UcpConstants.BBR_PROBE_RTT_INTERVAL_MICROS;
+        public long ProbeRttDurationMicros = UcpConstants.BBR_PROBE_RTT_DURATION_MICROS;
+        public long KeepAliveIntervalMicros = UcpConstants.KEEP_ALIVE_INTERVAL_MICROS;
+        public long DisconnectTimeoutMicros = UcpConstants.DISCONNECT_TIMEOUT_MICROS;
+        public int TimerIntervalMilliseconds = UcpConstants.TIMER_INTERVAL_MILLISECONDS;
+        public int FairQueueRoundMilliseconds = UcpConstants.FAIR_QUEUE_ROUND_MILLISECONDS;
+        public int ServerBandwidthBytesPerSecond = UcpConstants.DEFAULT_SERVER_BANDWIDTH_BYTES_PER_SECOND;
+        public int ConnectTimeoutMilliseconds = UcpConstants.CONNECT_TIMEOUT_MILLISECONDS;
+        public long InitialBandwidthBytesPerSecond = UcpConstants.DEFAULT_INITIAL_BANDWIDTH_BYTES_PER_SECOND;
+        public long MaxPacingRateBytesPerSecond = UcpConstants.DEFAULT_MAX_PACING_RATE_BYTES_PER_SECOND;
+        public int MaxCongestionWindowBytes = UcpConstants.DEFAULT_MAX_CONGESTION_WINDOW_BYTES;
+        public int InitialCwndPackets = UcpConstants.INITIAL_CWND_PACKETS;
         public int RecvWindowPackets = 16384;
-        public int SendQuantumBytes = 1220;
+        public int SendQuantumBytes = UcpConstants.MSS;
+        public int AckSackBlockLimit = UcpConstants.DEFAULT_ACK_SACK_BLOCK_LIMIT;
+        public bool LossControlEnable = true;
         public bool EnableDebugLog = false;
 
         public int SendBufferSize
@@ -86,6 +89,12 @@ namespace Ucp
         {
             get { return _maxBandwidthWastePercent; }
             set { _maxBandwidthWastePercent = value; }
+        }
+
+        public double MaxBandwidthLossPercent
+        {
+            get { return _maxBandwidthLossPercent; }
+            set { _maxBandwidthLossPercent = value; }
         }
 
         public long MinPacingIntervalMicros
@@ -180,6 +189,25 @@ namespace Ucp
             get { return RetransmitBackoffFactor < 1.0d ? 1.0d : RetransmitBackoffFactor; }
         }
 
+        public double EffectiveMaxBandwidthLossPercent
+        {
+            get
+            {
+                double configuredValue = MaxBandwidthLossPercent;
+                if (configuredValue < UcpConstants.MIN_MAX_BANDWIDTH_LOSS_PERCENT)
+                {
+                    return UcpConstants.MIN_MAX_BANDWIDTH_LOSS_PERCENT;
+                }
+
+                if (configuredValue > UcpConstants.MAX_MAX_BANDWIDTH_LOSS_PERCENT)
+                {
+                    return UcpConstants.MAX_MAX_BANDWIDTH_LOSS_PERCENT;
+                }
+
+                return configuredValue;
+            }
+        }
+
         public int MaxPayloadSize
         {
             get { return Mss - UcpConstants.DataHeaderSize; }
@@ -187,7 +215,12 @@ namespace Ucp
 
         public int MaxAckSackBlocks
         {
-            get { return Math.Max(1, (Mss - UcpConstants.AckFixedSize) / 8); }
+            get
+            {
+                int encodedLimit = Math.Max(1, (Mss - UcpConstants.AckFixedSize) / UcpConstants.SACK_BLOCK_SIZE);
+                int configuredLimit = AckSackBlockLimit <= 0 ? encodedLimit : AckSackBlockLimit;
+                return Math.Max(1, Math.Min(configuredLimit, encodedLimit));
+            }
         }
 
         public uint ReceiveWindowBytes
@@ -207,6 +240,22 @@ namespace Ucp
             return clone;
         }
 
+        public static UcpConfiguration GetOptimizedConfig()
+        {
+            UcpConfiguration config = new UcpConfiguration();
+            config.MinRtoMicros = UcpConstants.DEFAULT_RTO_MICROS;
+            config.MaxRtoMicros = UcpConstants.DEFAULT_MAX_RTO_MICROS;
+            config.ProbeRttIntervalMicros = UcpConstants.BBR_PROBE_RTT_INTERVAL_MICROS;
+            config.ProbeRttDurationMicros = UcpConstants.BBR_PROBE_RTT_DURATION_MICROS;
+            config.RetransmitBackoffFactor = UcpConstants.RTO_BACKOFF_FACTOR;
+            config.InitialCwndPackets = UcpConstants.INITIAL_CWND_PACKETS;
+            config.ProbeBwLowGain = UcpConstants.BBR_PROBE_BW_LOW_GAIN;
+            config.AckSackBlockLimit = UcpConstants.DEFAULT_ACK_SACK_BLOCK_LIMIT;
+            config.MaxBandwidthLossPercent = UcpConstants.DEFAULT_MAX_BANDWIDTH_LOSS_PERCENT;
+            config.LossControlEnable = true;
+            return config;
+        }
+
         internal void CopyTo(UcpConfiguration target)
         {
             if (target == null)
@@ -218,6 +267,7 @@ namespace Ucp
             target._sendBufferSize = _sendBufferSize;
             target._delayedAckTimeoutMicros = _delayedAckTimeoutMicros;
             target._maxBandwidthWastePercent = _maxBandwidthWastePercent;
+            target._maxBandwidthLossPercent = _maxBandwidthLossPercent;
             target._minPacingIntervalMicros = _minPacingIntervalMicros;
             target._pacingBucketDurationMicros = _pacingBucketDurationMicros;
             target._bbrWindowRtRounds = _bbrWindowRtRounds;
@@ -245,6 +295,8 @@ namespace Ucp
             target.InitialCwndPackets = InitialCwndPackets;
             target.RecvWindowPackets = RecvWindowPackets;
             target.SendQuantumBytes = SendQuantumBytes;
+            target.AckSackBlockLimit = AckSackBlockLimit;
+            target.LossControlEnable = LossControlEnable;
             target.EnableDebugLog = EnableDebugLog;
         }
     }
