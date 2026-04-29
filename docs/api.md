@@ -1,4 +1,4 @@
-# UCP API 完全参考手册
+# UCP API 完全参考手册 / UCP API Reference
 
 ## 概述
 
@@ -164,6 +164,8 @@ public class UcpConnection : IUcpObject, IDisposable
 | 方法 | 作用 |
 |---|---|
 | `GetReport()` | 返回 `UcpTransferReport`，包含发送/接收字节数、包数、重传统计、RTT、CWND、Pacing 速率等 |
+
+`UcpTransferReport.RetransmissionRatio` 是发送端重传开销，不是网络物理丢包率。测试报告中的 `Loss%` 来自 `NetworkSimulator`，而不是 `GetReport()`。English: connection reports expose protocol-side counters; benchmark loss is measured by the simulator so loss and retransmission remain separate concepts.
 
 ---
 

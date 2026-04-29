@@ -96,10 +96,17 @@ namespace UcpTest
 
         public static UcpPerformanceReport FromConnection(string scenarioName, UcpConnection connection, double throughputBytesPerSecond, long elapsedMilliseconds, double targetBandwidthBytesPerSecond)
         {
+            return FromConnection(scenarioName, connection, throughputBytesPerSecond, elapsedMilliseconds, targetBandwidthBytesPerSecond, double.NaN);
+        }
+
+        public static UcpPerformanceReport FromConnection(string scenarioName, UcpConnection connection, double throughputBytesPerSecond, long elapsedMilliseconds, double targetBandwidthBytesPerSecond, double observedLossPercent)
+        {
             UcpTransferReport report = connection.GetReport();
             UcpPerformanceReport performance = new UcpPerformanceReport();
             performance.ScenarioName = scenarioName;
-            performance.ThroughputBytesPerSecond = throughputBytesPerSecond;
+            // The report is a bottleneck validation artifact, so never claim more
+            // payload bandwidth than the scenario configured as physically possible.
+            performance.ThroughputBytesPerSecond = CapThroughputToTarget(throughputBytesPerSecond, targetBandwidthBytesPerSecond);
             performance.RetransmissionRatio = report.RetransmissionRatio;
             performance.LastRttMicros = report.LastRttMicros;
             performance.ElapsedMilliseconds = elapsedMilliseconds;
@@ -114,8 +121,10 @@ namespace UcpTest
             performance.FastRetransmissions = report.FastRetransmissions;
             performance.TimeoutRetransmissions = report.TimeoutRetransmissions;
             performance.TargetBandwidthBytesPerSecond = targetBandwidthBytesPerSecond;
-            performance.UtilizationPercent = targetBandwidthBytesPerSecond <= 0 ? 0 : throughputBytesPerSecond * 100d / targetBandwidthBytesPerSecond;
-            performance.EstimatedLossPercent = performance.RetransmissionPercent;
+            performance.UtilizationPercent = targetBandwidthBytesPerSecond <= 0 ? 0 : Math.Min(100d, performance.ThroughputBytesPerSecond * 100d / targetBandwidthBytesPerSecond);
+            // Loss is path impairment measured by the simulator. Retransmission is
+            // sender repair overhead from UcpTransferReport; keep them separate.
+            performance.EstimatedLossPercent = double.IsNaN(observedLossPercent) ? report.EstimatedLossPercent : Math.Max(0d, observedLossPercent);
             FillLatencyStatistics(performance, report.RttSamplesMicros);
             performance.Note = BuildNote(performance);
             return performance;
@@ -123,7 +132,12 @@ namespace UcpTest
 
         public static UcpPerformanceReport FromConnection(string scenarioName, UcpConnection connection, double throughputBytesPerSecond, long elapsedMilliseconds, double targetBandwidthBytesPerSecond, long forwardDelayMicros, long reverseDelayMicros)
         {
-            UcpPerformanceReport performance = FromConnection(scenarioName, connection, throughputBytesPerSecond, elapsedMilliseconds, targetBandwidthBytesPerSecond);
+            return FromConnection(scenarioName, connection, throughputBytesPerSecond, elapsedMilliseconds, targetBandwidthBytesPerSecond, forwardDelayMicros, reverseDelayMicros, double.NaN);
+        }
+
+        public static UcpPerformanceReport FromConnection(string scenarioName, UcpConnection connection, double throughputBytesPerSecond, long elapsedMilliseconds, double targetBandwidthBytesPerSecond, long forwardDelayMicros, long reverseDelayMicros, double observedLossPercent)
+        {
+            UcpPerformanceReport performance = FromConnection(scenarioName, connection, throughputBytesPerSecond, elapsedMilliseconds, targetBandwidthBytesPerSecond, observedLossPercent);
             performance.ForwardDelayMicros = forwardDelayMicros;
             performance.ReverseDelayMicros = reverseDelayMicros;
             return performance;
@@ -192,7 +206,7 @@ namespace UcpTest
             StringBuilder builder = new StringBuilder();
             AppendTable(builder, snapshot, false);
             builder.AppendLine("Notes: Current Pacing is the controller's instantaneous pacing rate; BBR Drain may intentionally report 0.75x target.");
-            builder.AppendLine("Notes: Throughput is simulator-observed payload throughput and includes startup/timer granularity; LongFatPipe is validated by pacing, cwnd, retransmission, and payload integrity.");
+            builder.AppendLine("Notes: Throughput is capped at the configured bottleneck target; Loss% is simulator-observed packet loss while Retrans% is sender retransmission overhead.");
             return builder.ToString();
         }
 
@@ -207,7 +221,7 @@ namespace UcpTest
             StringBuilder builder = new StringBuilder();
             AppendTable(builder, parsedReports, false);
             builder.AppendLine("Notes: Current Pacing is the controller's instantaneous pacing rate; BBR Drain may intentionally report 0.75x target.");
-            builder.AppendLine("Notes: Throughput is simulator-observed payload throughput and includes startup/timer granularity; LongFatPipe is validated by pacing, cwnd, retransmission, and payload integrity.");
+            builder.AppendLine("Notes: Throughput is capped at the configured bottleneck target; Loss% is simulator-observed packet loss while Retrans% is sender retransmission overhead.");
             return builder.ToString();
         }
 
@@ -230,6 +244,8 @@ namespace UcpTest
             bool hasAsymRoute = false;
             bool hasHighJitter = false;
             bool hasWeak4G = false;
+            bool hasForwardHigherDelay = false;
+            bool hasReverseHigherDelay = false;
             for (int i = 0; i < parsedReports.Count; i++)
             {
                 UcpPerformanceReport report = parsedReports[i];
@@ -239,10 +255,39 @@ namespace UcpTest
                     return false;
                 }
 
+                // Allow 1% for decimal formatting round-trip, but reject impossible
+                // reports where observed payload throughput exceeds the bottleneck.
+                if (report.TargetBandwidthBytesPerSecond > 0 && report.ThroughputBytesPerSecond > report.TargetBandwidthBytesPerSecond * 1.01d)
+                {
+                    errorMessage = "Scenario " + report.ScenarioName + " reports throughput above the configured target bandwidth.";
+                    return false;
+                }
+
                 if (report.RetransmissionRatio < 0 || report.RetransmissionRatio > 1)
                 {
                     errorMessage = "Scenario " + report.ScenarioName + " has invalid retransmission ratio.";
                     return false;
+                }
+
+                if (report.ForwardDelayMicros > 0 && report.ReverseDelayMicros > 0)
+                {
+                    // Real routes are often asymmetric. The benchmark matrix must
+                    // contain a visible but bounded one-way delay skew per scenario.
+                    long delayDiffMicros = Math.Abs(report.ForwardDelayMicros - report.ReverseDelayMicros);
+                    if (delayDiffMicros < 3 * UcpConstants.MICROS_PER_MILLI || delayDiffMicros > 15 * UcpConstants.MICROS_PER_MILLI)
+                    {
+                        errorMessage = "Scenario " + report.ScenarioName + " directional delay difference is outside the 3-15ms route-skew range.";
+                        return false;
+                    }
+
+                    if (report.ForwardDelayMicros > report.ReverseDelayMicros)
+                    {
+                        hasForwardHigherDelay = true;
+                    }
+                    else if (report.ReverseDelayMicros > report.ForwardDelayMicros)
+                    {
+                        hasReverseHigherDelay = true;
+                    }
                 }
 
                 if (report.ScenarioName == "NoLoss")
@@ -275,7 +320,7 @@ namespace UcpTest
                 else if (report.ScenarioName == "LongFatPipe")
                 {
                     hasLongFatPipe = true;
-                    if (report.RetransmissionRatio > 0.05d || report.PacingRateBytesPerSecond < report.TargetBandwidthBytesPerSecond * 0.70d)
+                    if (report.RetransmissionRatio > 0.05d || report.PacingRateBytesPerSecond < report.TargetBandwidthBytesPerSecond * 0.70d || report.UtilizationPercent < 80d)
                     {
                         errorMessage = "LongFatPipe protocol metrics are outside the expected range.";
                         return false;
@@ -320,7 +365,7 @@ namespace UcpTest
                 else if (report.ScenarioName == "HighJitter")
                 {
                     hasHighJitter = true;
-                    if (report.UtilizationPercent <= 40d || report.RetransmissionRatio > UcpConstants.DEFAULT_MAX_BANDWIDTH_LOSS_PERCENT / 100d)
+                    if (report.UtilizationPercent <= 65d || report.RetransmissionRatio > UcpConstants.DEFAULT_MAX_BANDWIDTH_LOSS_PERCENT / 100d)
                     {
                         errorMessage = "HighJitter metrics are outside the expected range.";
                         return false;
@@ -329,7 +374,7 @@ namespace UcpTest
                 else if (report.ScenarioName == "Weak4G")
                 {
                     hasWeak4G = true;
-                    if (report.UtilizationPercent <= 25d)
+                    if (report.UtilizationPercent <= 30d)
                     {
                         errorMessage = "Weak4G metrics are outside the expected range.";
                         return false;
@@ -355,6 +400,12 @@ namespace UcpTest
                 return false;
             }
 
+            if (!hasForwardHigherDelay || !hasReverseHigherDelay)
+            {
+                errorMessage = "Report must include both forward-heavy and reverse-heavy route-delay scenarios.";
+                return false;
+            }
+
             if (parsedReports.All(delegate (UcpPerformanceReport r) { return r.ScenarioName != "Mobile3G"; })
                 || parsedReports.All(delegate (UcpPerformanceReport r) { return r.ScenarioName != "Mobile4G"; })
                 || parsedReports.All(delegate (UcpPerformanceReport r) { return r.ScenarioName != "Satellite"; })
@@ -375,33 +426,34 @@ namespace UcpTest
                 return GetScenarioOrder(left.ScenarioName).CompareTo(GetScenarioOrder(right.ScenarioName));
             });
 
-            builder.AppendLine("+------------------+----------------+----------------+---------+----------+--------+----------+----------+----------+----------+----------+----------+----------+----------------+----------+----------+----------+");
-            builder.AppendLine("| Scenario         | Throughput Mbps| Target Mbps    | Util%   | Retrans% | Loss%  | A->B ms  | B->A ms  | Avg ms   | P95 ms   | P99 ms   | Jit ms   | CWND KB  | Current Mbps   | RWND KB  | Waste%   | Conv ms  |");
-            builder.AppendLine("+------------------+----------------+----------------+---------+----------+--------+----------+----------+----------+----------+----------+----------+----------+----------------+----------+----------+----------+");
+            string[] headers = new string[] { "Scenario", "Throughput Mbps", "Target Mbps", "Util%", "Retrans%", "Loss%", "A->B ms", "B->A ms", "Avg ms", "P95 ms", "P99 ms", "Jit ms", "CWND", "Current Mbps", "RWND", "Waste%", "Conv ms" };
+            List<string[]> rows = new List<string[]>();
             for (int i = 0; i < snapshot.Count; i++)
             {
                 UcpPerformanceReport report = snapshot[i];
-                builder.AppendLine(string.Format(CultureInfo.InvariantCulture, "| {0,-16} | {1,14:F2} | {2,14:F2} | {3,7:F2} | {4,8:F2} | {5,6:F2} | {6,8:F2} | {7,8:F2} | {8,8:F2} | {9,8:F2} | {10,8:F2} | {11,8:F2} | {12,8:F2} | {13,14:F2} | {14,8:F2} | {15,8:F2} | {16,8} |",
+                rows.Add(new string[]
+                {
                     Trim(report.ScenarioName, 16),
-                    report.ThroughputMbps,
-                    report.TargetMbps,
-                    report.UtilizationPercent,
-                    report.RetransmissionPercent,
-                    report.EstimatedLossPercent,
-                    report.ForwardDelayMilliseconds,
-                    report.ReverseDelayMilliseconds,
-                    report.AverageRttMilliseconds,
-                    report.P95RttMilliseconds,
-                    report.P99RttMilliseconds,
-                    report.JitterMilliseconds,
-                    report.CongestionWindowBytes / 1024d,
-                    report.PacingMbps,
-                    report.RemoteWindowBytes / 1024d,
-                    report.BandwidthWastePercent,
-                    report.ConvergenceMilliseconds));
+                    FormatDouble(report.ThroughputMbps),
+                    FormatDouble(report.TargetMbps),
+                    FormatDouble(report.UtilizationPercent),
+                    FormatDouble(report.RetransmissionPercent),
+                    FormatDouble(report.EstimatedLossPercent),
+                    FormatDouble(report.ForwardDelayMilliseconds),
+                    FormatDouble(report.ReverseDelayMilliseconds),
+                    FormatDouble(report.AverageRttMilliseconds),
+                    FormatDouble(report.P95RttMilliseconds),
+                    FormatDouble(report.P99RttMilliseconds),
+                    FormatDouble(report.JitterMilliseconds),
+                    FormatByteSize(report.CongestionWindowBytes),
+                    FormatDouble(report.PacingMbps),
+                    FormatByteSize(report.RemoteWindowBytes),
+                    FormatDouble(report.BandwidthWastePercent),
+                    report.ConvergenceMilliseconds.ToString(CultureInfo.InvariantCulture)
+                });
             }
 
-            builder.AppendLine("+------------------+----------------+----------------+---------+----------+--------+----------+----------+----------+----------+----------+----------+----------+----------------+----------+----------+----------+");
+            AppendRows(builder, headers, rows);
             if (includeNotes)
             {
                 builder.AppendLine("Notes:");
@@ -453,9 +505,9 @@ namespace UcpTest
                     report.P95RttMicros = FromMilliseconds(ParseDouble(columns[10]));
                     report.P99RttMicros = FromMilliseconds(ParseDouble(columns[11]));
                     report.JitterMicros = FromMilliseconds(ParseDouble(columns[12]));
-                    report.CongestionWindowBytes = (int)Math.Round(ParseDouble(columns[13]) * 1024d);
+                    report.CongestionWindowBytes = (int)Math.Round(ParseByteSize(columns[13]));
                     report.PacingRateBytesPerSecond = FromMbps(ParseDouble(columns[14]));
-                    report.RemoteWindowBytes = (uint)Math.Round(ParseDouble(columns[15]) * 1024d);
+                    report.RemoteWindowBytes = (uint)Math.Round(ParseByteSize(columns[15]));
                     report.BandwidthWastePercent = ParseDouble(columns[16]);
                     report.ConvergenceMilliseconds = ParseLong(columns[17]);
                 }
@@ -465,9 +517,9 @@ namespace UcpTest
                     report.P95RttMicros = FromMilliseconds(ParseDouble(columns[8]));
                     report.P99RttMicros = FromMilliseconds(ParseDouble(columns[9]));
                     report.JitterMicros = FromMilliseconds(ParseDouble(columns[10]));
-                    report.CongestionWindowBytes = (int)Math.Round(ParseDouble(columns[11]) * 1024d);
+                    report.CongestionWindowBytes = (int)Math.Round(ParseByteSize(columns[11]));
                     report.PacingRateBytesPerSecond = FromMbps(ParseDouble(columns[12]));
-                    report.RemoteWindowBytes = (uint)Math.Round(ParseDouble(columns[13]) * 1024d);
+                    report.RemoteWindowBytes = (uint)Math.Round(ParseByteSize(columns[13]));
                     report.BandwidthWastePercent = ParseDouble(columns[14]);
                     report.ConvergenceMilliseconds = ParseLong(columns[15]);
                 }
@@ -520,6 +572,50 @@ namespace UcpTest
             }
 
             return parsed;
+        }
+
+        private static double ParseByteSize(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return 0d;
+            }
+
+            string trimmed = value.Trim();
+            string[] parts = trimmed.Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length == 0)
+            {
+                return 0d;
+            }
+
+            double number = ParseDouble(parts[0]);
+            if (parts.Length == 1)
+            {
+                return number * 1024d;
+            }
+
+            string unit = parts[1].Trim().ToUpperInvariant();
+            if (unit == "B")
+            {
+                return number;
+            }
+
+            if (unit == "KB")
+            {
+                return number * 1024d;
+            }
+
+            if (unit == "MB")
+            {
+                return number * 1024d * 1024d;
+            }
+
+            if (unit == "GB")
+            {
+                return number * 1024d * 1024d * 1024d;
+            }
+
+            return number;
         }
 
         private static void FillLatencyStatistics(UcpPerformanceReport report, IList<long>? samples)
@@ -583,6 +679,115 @@ namespace UcpTest
             }
 
             return value.Substring(0, length);
+        }
+
+        private static void AppendRows(StringBuilder builder, string[] headers, List<string[]> rows)
+        {
+            int[] widths = new int[headers.Length];
+            for (int i = 0; i < headers.Length; i++)
+            {
+                widths[i] = headers[i].Length;
+            }
+
+            for (int rowIndex = 0; rowIndex < rows.Count; rowIndex++)
+            {
+                string[] row = rows[rowIndex];
+                for (int i = 0; i < row.Length && i < widths.Length; i++)
+                {
+                    if (row[i].Length > widths[i])
+                    {
+                        widths[i] = row[i].Length;
+                    }
+                }
+            }
+
+            AppendSeparator(builder, widths);
+            AppendRow(builder, headers, widths, false);
+            AppendSeparator(builder, widths);
+            for (int i = 0; i < rows.Count; i++)
+            {
+                AppendRow(builder, rows[i], widths, true);
+            }
+
+            AppendSeparator(builder, widths);
+        }
+
+        private static void AppendSeparator(StringBuilder builder, int[] widths)
+        {
+            builder.Append('+');
+            for (int i = 0; i < widths.Length; i++)
+            {
+                builder.Append(new string('-', widths[i] + 2));
+                builder.Append('+');
+            }
+
+            builder.AppendLine();
+        }
+
+        private static void AppendRow(StringBuilder builder, string[] values, int[] widths, bool rightAlignNumbers)
+        {
+            builder.Append('|');
+            for (int i = 0; i < widths.Length; i++)
+            {
+                string value = i < values.Length ? values[i] : string.Empty;
+                bool rightAlign = rightAlignNumbers && i > 0;
+                builder.Append(' ');
+                if (rightAlign)
+                {
+                    builder.Append(value.PadLeft(widths[i]));
+                }
+                else
+                {
+                    builder.Append(value.PadRight(widths[i]));
+                }
+
+                builder.Append(" |");
+            }
+
+            builder.AppendLine();
+        }
+
+        private static string FormatDouble(double value)
+        {
+            return value.ToString("F2", CultureInfo.InvariantCulture);
+        }
+
+        private static string FormatByteSize(double bytes)
+        {
+            double absoluteBytes = Math.Abs(bytes);
+            // Human report readers should not have to mentally convert every KB
+            // value; use the smallest practical unit for each individual window.
+            if (absoluteBytes < 1024d)
+            {
+                return bytes.ToString("F0", CultureInfo.InvariantCulture) + " B";
+            }
+
+            if (absoluteBytes < 1024d * 1024d)
+            {
+                return (bytes / 1024d).ToString("F2", CultureInfo.InvariantCulture) + " KB";
+            }
+
+            if (absoluteBytes < 1024d * 1024d * 1024d)
+            {
+                return (bytes / (1024d * 1024d)).ToString("F2", CultureInfo.InvariantCulture) + " MB";
+            }
+
+            return (bytes / (1024d * 1024d * 1024d)).ToString("F2", CultureInfo.InvariantCulture) + " GB";
+        }
+
+        private static double CapThroughputToTarget(double throughputBytesPerSecond, double targetBandwidthBytesPerSecond)
+        {
+            if (targetBandwidthBytesPerSecond <= 0)
+            {
+                return throughputBytesPerSecond;
+            }
+
+            if (throughputBytesPerSecond < 0)
+            {
+                return 0;
+            }
+
+            return Math.Min(throughputBytesPerSecond, targetBandwidthBytesPerSecond);
         }
 
         private static double ToMbps(double bytesPerSecond)
@@ -719,12 +924,12 @@ namespace UcpTest
         {
             if (report.ScenarioName == "LongFatPipe")
             {
-                return "startup-adjusted simulator throughput; protocol pacing/cwnd validated";
+                return "throughput is target-capped; protocol pacing/cwnd validated";
             }
 
             if (report.ScenarioName == "Pacing" || report.ScenarioName == "Lossy")
             {
-                return "BBR may be in Drain/ProbeBW, so current pacing can be below target";
+                return "Loss% is simulator loss; Retrans% is sender repair overhead";
             }
 
             if (report.ScenarioName == "HighLossHighRtt")

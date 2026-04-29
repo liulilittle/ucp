@@ -1058,7 +1058,9 @@ namespace Ucp.Internal
                 return UcpConstants.SACK_FAST_RETRANSMIT_MIN_REORDER_GRACE_MICROS;
             }
 
-            return Math.Max(UcpConstants.SACK_FAST_RETRANSMIT_MIN_REORDER_GRACE_MICROS, rttMicros / 2);
+            // SACK fast retransmit follows a QUIC-style short packet-threshold
+            // path; receiver NAK still has the longer jitter guard.
+            return Math.Max(UcpConstants.SACK_FAST_RETRANSMIT_MIN_REORDER_GRACE_MICROS, rttMicros / 8);
         }
 
         private void UpdateDuplicateAckStateUnsafe(UcpAckPacket ackPacket, long nowMicros, out bool fastRetransmitTriggered)
@@ -1282,7 +1284,9 @@ namespace Ucp.Internal
         private long GetFastRetransmitAgeThresholdUnsafe()
         {
             long rttMicros = _rtoEstimator.SmoothedRttMicros > 0 ? _rtoEstimator.SmoothedRttMicros : _lastRttMicros;
-            return rttMicros <= 0 ? 0 : rttMicros;
+            // Duplicate ACK recovery should repair quickly after two observations
+            // without waiting a full RTT on high-BDP paths.
+            return rttMicros <= 0 ? 0 : Math.Max(UcpConstants.SACK_FAST_RETRANSMIT_MIN_REORDER_GRACE_MICROS, rttMicros / 8);
         }
 
         private bool ShouldTriggerEarlyRetransmitUnsafe()

@@ -84,11 +84,11 @@
 | 常量 | 值 | 说明 |
 |---|---|---|
 | `MAX_RETRANSMISSIONS` | 10 | 最大重传次数（超则断连） |
-| `DUPLICATE_ACK_THRESHOLD` | 8 | 重复 ACK 触发快速重传的阈值 |
+| `DUPLICATE_ACK_THRESHOLD` | 2 | 重复 ACK 触发快速重传的阈值，对齐“连续 2 次观察即可补洞”的 QUIC-style 策略 |
 | `SACK_FAST_RETRANSMIT_THRESHOLD` | 2 | SACK 快重传的最小观测次数 |
-| `SACK_FAST_RETRANSMIT_DISTANCE_THRESHOLD` | 20 | SACK 距离确认阈值（对标 QUIC kPacketThreshold） |
+| `SACK_FAST_RETRANSMIT_DISTANCE_THRESHOLD` | 2 | SACK 距离确认阈值，2 个后续包确认即可补洞 |
 | `SACK_FAST_RETRANSMIT_MIN_REORDER_GRACE_MICROS` | 5,000 | SACK 快重传的最短乱序保护时间 |
-| `NAK_MISSING_THRESHOLD` | 4 | 接收端缺口观测到几次才发 NAK |
+| `NAK_MISSING_THRESHOLD` | 2 | 接收端缺口观测到几次才发 NAK |
 | `NAK_REORDER_GRACE_MICROS` | 60,000 (60ms) | 缺口年龄超过此值才认为不是乱序 |
 | `NAK_REPEAT_INTERVAL_MICROS` | 250,000 (250ms) | 同一序号的 NAK 最小重发间隔 |
 | `MAX_NAKS_PER_RTT` | 1024 | 每 RTT 窗口最多发送的 NAK 数 |
@@ -126,10 +126,10 @@
 
 | 常量 | 值 | 说明 |
 |---|---|---|
-| `BBR_FAST_RECOVERY_PACING_GAIN` | 1.10 | 快恢复时的 pacing 增益（非拥塞丢包后略升） |
+| `BBR_FAST_RECOVERY_PACING_GAIN` | 1.25 | 快恢复时的 pacing 增益（非拥塞丢包后快速补洞） |
 | `BBR_MIN_CONGESTION_PACING_GAIN` | 0.92 | 拥塞丢包后的最低 pacing 增益 |
-| `BBR_CONGESTION_LOSS_REDUCTION` | 0.95 | 拥塞丢包时 pacing/cwnd 的乘法削减因子 |
-| `BBR_MIN_LOSS_CWND_GAIN` | 0.85 | 拥塞丢包后的最低 CWND 增益 |
+| `BBR_CONGESTION_LOSS_REDUCTION` | 0.98 | 拥塞丢包时 pacing/cwnd 的温和乘法削减因子 |
+| `BBR_MIN_LOSS_CWND_GAIN` | 0.95 | 拥塞丢包后的最低 CWND 增益 |
 
 ### 自适应增益（根据丢包率）
 
@@ -137,8 +137,8 @@
 |---|---|---|
 | `BBR_MODERATE_PROBE_GAIN` | 1.10 | 低丢包时的探测增益 |
 | `BBR_LIGHT_LOSS_PACING_GAIN` | 1.02 | 轻丢包时的 pacing 增益 |
-| `BBR_MEDIUM_LOSS_PACING_GAIN` | 0.98 | 中丢包时的 pacing 增益 |
-| `BBR_HIGH_LOSS_PACING_GAIN` | 0.95 | 高丢包时的最小 pacing 增益 |
+| `BBR_MEDIUM_LOSS_PACING_GAIN` | 1.00 | 中丢包时保持目标 pacing，避免随机丢包直接降速 |
+| `BBR_HIGH_LOSS_PACING_GAIN` | 0.98 | 高丢包时的最小 pacing 增益 |
 
 ### 丢包分级阈值
 
@@ -204,6 +204,8 @@
 | `BENCHMARK_10_GBPS_BYTES_PER_SECOND` | 1,250,000,000 | 10 Gbps |
 | `BENCHMARK_HIGH_BANDWIDTH_MSS` | 9000 | 高带宽基准用的 Jumbo MSS |
 
+English: report throughput is capped by these benchmark bottleneck rates. If a wall-clock run completes faster because the local scheduler batches work, the report still cannot exceed the configured target bandwidth.
+
 ### 基准 Payload
 
 | 场景 | Payload |
@@ -217,6 +219,17 @@
 | Weak4G | 1 MB |
 | LongFat 100M | 16 MB |
 | BurstLoss | 2 MB |
+
+### 路由与弱网场景 / Route And Weak-Network Scenarios
+
+| 常量 | 值 | 说明 |
+|---|---|---|
+| `BENCHMARK_ASYM_FORWARD_DELAY_MILLISECONDS` | 25 | AsymRoute A->B 单向基准延迟 |
+| `BENCHMARK_ASYM_BACKWARD_DELAY_MILLISECONDS` | 15 | AsymRoute B->A 单向基准延迟 |
+| `BENCHMARK_WEAK_4G_OUTAGE_PERIOD_MILLISECONDS` | 900 | Weak4G 单次中段 outage 触发时间 |
+| `BENCHMARK_WEAK_4G_OUTAGE_DURATION_MILLISECONDS` | 80 | Weak4G 单次 blackout 持续时间 |
+
+English: benchmark routes intentionally include both forward-heavy and reverse-heavy one-way delay profiles. The report validator requires a 3-15ms directional gap and rejects reports that only model one direction as slower.
 
 ### 断言阈值
 

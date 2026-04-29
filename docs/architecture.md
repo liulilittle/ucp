@@ -1,4 +1,6 @@
-# UCP 架构深度解析
+# UCP 架构深度解析 / UCP Architecture Deep Dive
+
+本文件从运行时架构角度解释 UCP。English notes are included so operational behavior, benchmark output, and maintenance responsibilities are explicit for mixed-language teams.
 
 ## 1. 总体分层
 
@@ -91,11 +93,13 @@ inflightLow = max(InitialCWND, BDP × BBR_INFLIGHT_LOW_GAIN)  // 1.10
 inflightHigh = max(inflightLow, BDP × BBR_INFLIGHT_HIGH_GAIN) // 1.50
 ```
 
-实际 CWND 会被限制在 `[inflightLow, inflightHigh]` 区间内。
+实际 CWND 会被限制在 `[inflightLow, inflightHigh]` 区间内。拥塞丢包时 CWND gain 不低于 0.95，ACK 到达后以 0.04/ACK 的步长恢复，避免随机丢包长期压低窗口。
+
+English: inflight guardrails are not a loss-based collapse mechanism. They keep enough pipe occupancy for BBR to recover quickly after transient loss, while still bounding queue growth when congestion evidence is real.
 
 ### 3.4 Loss-CWND 恢复
 
-每次 ACK 到达时，`lossCwndGain` 以 `BBR_LOSS_CWND_RECOVERY_STEP=0.01` 的步长向 1.0 恢复。这确保了非拥塞丢包后 CWND 不会永久缩小。
+每次 ACK 到达时，`lossCwndGain` 以 `BBR_LOSS_CWND_RECOVERY_STEP=0.04` 的步长向 1.0 恢复。这确保了非拥塞丢包后 CWND 不会永久缩小，也让弱网/outage 后恢复更快。
 
 ---
 
@@ -142,7 +146,9 @@ else → 随机丢包
 | 分类 | BBR 响应 | 重传动作 |
 |---|---|---|
 | 随机丢包 | 不降 pacing/cwnd | 立即重传 |
-| 拥塞丢包 | 降 pacing × 0.95, cwnd × 0.85 | 立即重传 |
+| 拥塞丢包 | 温和降 pacing × 0.98, cwnd gain 下限 0.95 | 立即重传 |
+
+English: UCP treats loss as a signal that must be classified. Random or route-induced loss repairs data without shrinking the pipe; only classified congestion applies a gentle reduction.
 
 ---
 
@@ -152,8 +158,8 @@ else → 随机丢包
 
 ```
 条件（任一满足且 EnableAggressiveSackRecovery=true）：
-1. 段序号 == firstMissingSequence && MissingAckCount ≥ 2 && age ≥ RTT/2
-2. highestSack - seq ≥ 20 && MissingAckCount ≥ 2 && age ≥ RTT/2
+1. 段序号 == firstMissingSequence && MissingAckCount ≥ 2 && age ≥ max(5ms, RTT/8)
+2. highestSack - seq ≥ 2 && MissingAckCount ≥ 2 && age ≥ max(5ms, RTT/8)
 ```
 
 `EnableAggressiveSackRecovery` 仅在 ≥1 Gbps + 有配置丢包的场景开启。
@@ -162,10 +168,12 @@ else → 随机丢包
 
 ```
 条件：
-1. missingCount ≥ NAK_MISSING_THRESHOLD (4)
+1. missingCount ≥ NAK_MISSING_THRESHOLD (2)
 2. now - firstSeenMicros ≥ NAK_REORDER_GRACE_MICROS (60ms)
 3. 未在此 RTT 窗口内发出过此序号的 NAK
 ```
+
+SACK 是快速补洞路径，NAK 是保守兜底路径。English: SACK provides QUIC-style fast retransmit after two observations, while NAK keeps a long reorder guard so high-jitter routes do not create artificial retransmission overhead.
 
 ---
 
@@ -198,6 +206,9 @@ NAK 包使用 `PostPriority` 插队到队列头部，确保补洞信号不被普
 - 独立调度线程 `SchedulerLoopAsync`
 - 带宽模型：`nextTransmitAvailableMicros += serializationMicros`
 - 逻辑时钟：无丢包 + ≥10 MB/s 带宽时启用虚拟时钟，排除线程调度噪声
+- 吞吐口径：报告吞吐被链路目标速率封顶，避免出现超过 `Target Mbps` 的不可信结果
+- 丢包口径：`Loss%` 来自仿真器实际 DATA 包丢弃比例，`Retrans%` 来自发送端重传比例，两者不再混用
+- 路由口径：A->B 与 B->A 独立建模，测试矩阵同时覆盖去程高和回程高，方向差保持 3-15ms
 
 ### 8.2 测试场景覆盖
 
@@ -214,6 +225,23 @@ NAK 包使用 `PostPriority` 插队到队列头部，确保补洞信号不被普
 - `summary.txt`：每场景一行 ASCII 表格，包含吞吐/利用率/重传/RTT/CWND/Pacing
 - `test_report.txt`：最终格式化的 20+ 行表格
 - 报告验证：`UcpPerformanceReport.ValidateReportFile()` 确保所有必选场景存在且指标在合法范围
+
+```mermaid
+sequenceDiagram
+    participant Sender as UcpPcb sender
+    participant Net as NetworkSimulator
+    participant Receiver as UcpPcb receiver
+    participant Report as UcpPerformanceReport
+    Sender->>Net: DATA seq=N
+    Net--xReceiver: configured data loss
+    Net->>Report: increment Loss%
+    Sender->>Net: DATA seq=N+1,N+2
+    Net->>Receiver: deliver later packets
+    Receiver->>Sender: ACK + SACK gap
+    Sender->>Sender: 2 observations + RTT/8 grace
+    Sender->>Net: retransmit seq=N
+    Sender->>Report: increment Retrans%
+```
 
 ---
 

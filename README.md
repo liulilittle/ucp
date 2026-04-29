@@ -2,6 +2,17 @@
 
 A production-grade, QUIC-inspired reliable transport protocol implemented in C# on top of UDP, featuring BBRv1 congestion control, token-bucket pacing, selective ACK (SACK), negative ACK (NAK), forward error correction (FEC), adaptive network classification, and a deterministic event-loop driver.
 
+## Documentation Index
+
+| Document | Description |
+|---|---|
+| [docs/index.md](docs/index.md) | Bilingual documentation index and maintenance map. |
+| [docs/performance.md](docs/performance.md) | Bilingual performance, reporting, route-model, and benchmark guide with Mermaid diagrams. |
+| [docs/protocol.md](docs/protocol.md) | Protocol internals: packet format, BBR, loss detection, SACK/NAK/FEC. |
+| [docs/architecture.md](docs/architecture.md) | Runtime architecture and state-machine deep dive. |
+| [docs/constants.md](docs/constants.md) | Constants reference for tuning and C++ portability. |
+| [docs/api.md](docs/api.md) | Public API reference and usage examples. |
+
 ## Quick Start
 
 ```csharp
@@ -57,7 +68,7 @@ Transport                   UDP Socket
 ## Key Design Decisions
 
 - **Loss is not congestion.** Random packet loss triggers retransmission only — pacing gain and congestion window are NOT reduced unless RTT inflation, delivery-rate drop, and sustained elevated loss are all confirmed.
-- **QUIC-style loss detection.** SACK-based: first missing sequence requires 2 observations and RTT/2 age. Distance confirmation: 20+ SACKed packets beyond the hole confirm it as lost. Time-based: 9/8 × smoothedRTT threshold for tail loss.
+- **QUIC-style loss detection.** SACK-based: first missing sequence requires 2 observations and a short RTT/8 reorder grace. Distance confirmation uses 2+ SACKed packets beyond the hole, while receiver-side NAK keeps a 60ms reorder guard to avoid false retransmits on high-jitter paths.
 - **BBR over loss-based CC.** BBR probes bandwidth via delivery rate estimation rather than reacting to loss events. The loss classifier distinguishes random from congestion loss using deduplicated sliding windows and RTT median analysis.
 - **Jumbo MSS for high-bandwidth paths.** Benchmark scenarios ≥ 1 Gbps use 9000-byte MSS to avoid control-plane packet amplification (3500+ packets for 4 MB at 1220-byte MSS vs. ~470 at 9000-byte).
 
@@ -139,6 +150,16 @@ All tuning parameters live in `UcpConfiguration`. Call `UcpConfiguration.GetOpti
 ## Benchmark Report
 
 Run `.\run-tests.ps1` to execute all 48 test scenarios and generate `reports/test_report.txt`.
+
+Report columns distinguish transport behavior from network impairment:
+
+| Column | Meaning |
+|---|---|
+| `Throughput Mbps` | Simulator-observed payload throughput capped at the configured target bottleneck. It must not exceed `Target Mbps`. |
+| `Retrans%` | Sender retransmission overhead: retransmitted data packets divided by original data packets. |
+| `Loss%` | Simulator-observed data-packet loss before recovery. This is independent from retransmission overhead. |
+| `A->B ms` / `B->A ms` | Directional one-way propagation model. The benchmark matrix includes both forward-heavy and reverse-heavy routes, each with a 3-15ms direction gap. |
+| `CWND` / `RWND` | Congestion and receive windows rendered with adaptive units (`B`, `KB`, `MB`, `GB`). |
 
 Coverage:
 - **Bandwidths**: 4 Mbps → 10 Gbps

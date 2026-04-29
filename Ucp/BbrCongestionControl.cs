@@ -626,7 +626,9 @@ namespace Ucp
 
             if (CurrentNetworkClass == NetworkClass.MobileUnstable)
             {
-                return UcpConstants.BBR_LIGHT_LOSS_PACING_GAIN;
+                // Mobile loss is usually random or route-induced; keep probing so
+                // recovery is fast unless congestion evidence appears elsewhere.
+                return UcpConstants.BBR_MODERATE_PROBE_GAIN;
             }
 
             if (CurrentNetworkClass == NetworkClass.LossyLongFat)

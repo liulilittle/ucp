@@ -229,25 +229,25 @@ namespace Ucp
         public const double BBR_LIGHT_LOSS_PACING_GAIN = 1.02d;
 
         /// <summary>BBR gentle pacing gain under medium loss.</summary>
-        public const double BBR_MEDIUM_LOSS_PACING_GAIN = 0.98d;
+        public const double BBR_MEDIUM_LOSS_PACING_GAIN = 1.00d;
 
         /// <summary>BBR severe loss pacing gain.</summary>
-        public const double BBR_HIGH_LOSS_PACING_GAIN = 0.95d;
+        public const double BBR_HIGH_LOSS_PACING_GAIN = 0.98d;
 
         /// <summary>BBR fast recovery pacing gain used after non-congestion loss recovery signals.</summary>
-        public const double BBR_FAST_RECOVERY_PACING_GAIN = 1.10d;
+        public const double BBR_FAST_RECOVERY_PACING_GAIN = 1.25d;
 
         /// <summary>Minimum BBR pacing gain after a congestion loss signal.</summary>
         public const double BBR_MIN_CONGESTION_PACING_GAIN = 0.92d;
 
         /// <summary>Multiplicative BBR reduction applied on a congestion loss signal.</summary>
-        public const double BBR_CONGESTION_LOSS_REDUCTION = 0.95d;
+        public const double BBR_CONGESTION_LOSS_REDUCTION = 0.98d;
 
         /// <summary>Minimum congestion window gain retained after congestion loss.</summary>
-        public const double BBR_MIN_LOSS_CWND_GAIN = 0.85d;
+        public const double BBR_MIN_LOSS_CWND_GAIN = 0.95d;
 
         /// <summary>Congestion window gain recovery step per ACK.</summary>
-        public const double BBR_LOSS_CWND_RECOVERY_STEP = 0.01d;
+        public const double BBR_LOSS_CWND_RECOVERY_STEP = 0.04d;
 
         /// <summary>Loss budget headroom below which probing may become more aggressive again.</summary>
         public const double BBR_LOSS_BUDGET_RECOVERY_RATIO = 0.80d;
@@ -466,10 +466,10 @@ namespace Ucp
         public const int BENCHMARK_BURST_LOSS_JITTER_MILLISECONDS = 4;
 
         /// <summary>Forward one-way delay for the asymmetric route benchmark, in milliseconds.</summary>
-        public const int BENCHMARK_ASYM_FORWARD_DELAY_MILLISECONDS = 30;
+        public const int BENCHMARK_ASYM_FORWARD_DELAY_MILLISECONDS = 25;
 
         /// <summary>Backward one-way delay for the asymmetric route benchmark, in milliseconds.</summary>
-        public const int BENCHMARK_ASYM_BACKWARD_DELAY_MILLISECONDS = 10;
+        public const int BENCHMARK_ASYM_BACKWARD_DELAY_MILLISECONDS = 15;
 
         /// <summary>Per-direction jitter for the asymmetric route benchmark, in milliseconds.</summary>
         public const int BENCHMARK_ASYM_JITTER_MILLISECONDS = 8;
@@ -502,10 +502,10 @@ namespace Ucp
         public const int BENCHMARK_WEAK_4G_DELAY_MILLISECONDS = 80;
 
         /// <summary>Weak 4G outage period, in milliseconds.</summary>
-        public const int BENCHMARK_WEAK_4G_OUTAGE_PERIOD_MILLISECONDS = 30000;
+        public const int BENCHMARK_WEAK_4G_OUTAGE_PERIOD_MILLISECONDS = 900;
 
         /// <summary>Weak 4G outage duration, in milliseconds.</summary>
-        public const int BENCHMARK_WEAK_4G_OUTAGE_DURATION_MILLISECONDS = 500;
+        public const int BENCHMARK_WEAK_4G_OUTAGE_DURATION_MILLISECONDS = 80;
 
         /// <summary>Number of recent statistics windows retained for network classification.</summary>
         public const int NETWORK_CLASSIFIER_WINDOW_COUNT = 8;
@@ -587,7 +587,7 @@ namespace Ucp
         public const double TLP_TIMEOUT_RTT_RATIO = 1.5d;
 
         /// <summary>Number of congestion loss events needed before entering ProbeRTT.</summary>
-        public const int BBR_PROBE_RTT_CONGESTION_LOSS_THRESHOLD = 3;
+        public const int BBR_PROBE_RTT_CONGESTION_LOSS_THRESHOLD = 5;
 
         /// <summary>Recent loss accounting bucket duration in microseconds.</summary>
         public const long BBR_LOSS_BUCKET_MICROS = 100000L;
@@ -602,19 +602,19 @@ namespace Ucp
         public const long BBR_DEFAULT_RATE_WINDOW_MICROS = MICROS_PER_SECOND;
 
         /// <summary>Duplicate ACK count needed to trigger fast retransmit.</summary>
-        public const int DUPLICATE_ACK_THRESHOLD = 8;
+        public const int DUPLICATE_ACK_THRESHOLD = 2;
 
         /// <summary>SACK observations needed before a missing hole is retransmitted without waiting for RTO.</summary>
         public const int SACK_FAST_RETRANSMIT_THRESHOLD = 2;
 
         /// <summary>Minimum SACK distance past a missing sequence before treating the hole as real loss.</summary>
-        public const int SACK_FAST_RETRANSMIT_DISTANCE_THRESHOLD = 20;
+        public const int SACK_FAST_RETRANSMIT_DISTANCE_THRESHOLD = 2;
 
         /// <summary>Lower bound for SACK-based reorder grace before fast retransmit, in microseconds.</summary>
         public const long SACK_FAST_RETRANSMIT_MIN_REORDER_GRACE_MICROS = 5000L;
 
         /// <summary>Missing observation count needed before the receiver sends a NAK.</summary>
-        public const int NAK_MISSING_THRESHOLD = 4;
+        public const int NAK_MISSING_THRESHOLD = 2;
 
         /// <summary>Minimum packet-age delay before receiver NAKs a missing sequence, in microseconds.</summary>
         public const long NAK_REORDER_GRACE_MICROS = 60000L;
@@ -623,13 +623,13 @@ namespace Ucp
         public const int NAK_HIGH_CONFIDENCE_MISSING_THRESHOLD = 256;
 
         /// <summary>Minimum packet-age delay for high-confidence missing gaps, in microseconds.</summary>
-        public const long NAK_HIGH_CONFIDENCE_REORDER_GRACE_MICROS = 5000L;
+        public const long NAK_HIGH_CONFIDENCE_REORDER_GRACE_MICROS = 60000L;
 
         /// <summary>Missing observation count that makes a gap more likely to be real loss than jitter.</summary>
         public const int NAK_MEDIUM_CONFIDENCE_MISSING_THRESHOLD = 64;
 
         /// <summary>Minimum packet-age delay for medium-confidence missing gaps, in microseconds.</summary>
-        public const long NAK_MEDIUM_CONFIDENCE_REORDER_GRACE_MICROS = 20000L;
+        public const long NAK_MEDIUM_CONFIDENCE_REORDER_GRACE_MICROS = 60000L;
 
         /// <summary>Minimum interval before the receiver may re-emit a NAK for the same missing sequence.</summary>
         public const long NAK_REPEAT_INTERVAL_MICROS = 250000L;

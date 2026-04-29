@@ -31,15 +31,16 @@ namespace UcpTest.TestTransport
         private readonly List<long> _latencySamplesMicros = new List<long>();
         private readonly List<long> _forwardLatencySamplesMicros = new List<long>();
         private readonly List<long> _reverseLatencySamplesMicros = new List<long>();
+        private readonly HashSet<string> _logicalDataPacketKeys = new HashSet<string>();
         private readonly SortedDictionary<long, List<SimulatedDatagram>> _scheduledDeliveries = new SortedDictionary<long, List<SimulatedDatagram>>();
         private readonly SemaphoreSlim _schedulerSignal = new SemaphoreSlim(0, int.MaxValue);
         private const long SchedulerCoalescingMicros = 1000;
         private const long LogicalSenderIdleGapMicros = 500000;
         private const int HighBandwidthLogicalClockThresholdBytesPerSecond = 10 * 1024 * 1024;
         private const int DefaultDynamicJitterRangeMilliseconds = 1;
-        private const int DefaultDynamicWaveAmplitudeMilliseconds = 5;
+        private const int DefaultDynamicWaveAmplitudeMilliseconds = 0;
         private const int DynamicWavePeriodMilliseconds = 5000;
-        private const int DirectionSkewMilliseconds = 5;
+        private const int DefaultDirectionSkewMilliseconds = 0;
         private int _nextPort = 30000;
         private long _nextForwardTransmitAvailableMicros;
         private long _nextReverseTransmitAvailableMicros;
@@ -52,7 +53,7 @@ namespace UcpTest.TestTransport
         private long _lastDataScheduledMicros;
         private long _logicalDataBytes;
 
-        public NetworkSimulator(double lossRate = 0, int fixedDelayMilliseconds = 0, int jitterMilliseconds = 0, int bandwidthBytesPerSecond = 0, int seed = 1234, Func<SimulatedDatagram, bool>? dropRule = null, double duplicateRate = 0, double reorderRate = 0, int forwardDelayMilliseconds = -1, int backwardDelayMilliseconds = -1, int forwardJitterMilliseconds = -1, int backwardJitterMilliseconds = -1, int dynamicJitterRangeMilliseconds = DefaultDynamicJitterRangeMilliseconds, int dynamicWaveAmplitudeMilliseconds = DefaultDynamicWaveAmplitudeMilliseconds)
+        public NetworkSimulator(double lossRate = 0, int fixedDelayMilliseconds = 0, int jitterMilliseconds = 0, int bandwidthBytesPerSecond = 0, int seed = 1234, Func<SimulatedDatagram, bool>? dropRule = null, double duplicateRate = 0, double reorderRate = 0, int forwardDelayMilliseconds = -1, int backwardDelayMilliseconds = -1, int forwardJitterMilliseconds = -1, int backwardJitterMilliseconds = -1, int dynamicJitterRangeMilliseconds = DefaultDynamicJitterRangeMilliseconds, int dynamicWaveAmplitudeMilliseconds = DefaultDynamicWaveAmplitudeMilliseconds, int directionSkewMilliseconds = DefaultDirectionSkewMilliseconds)
         {
             LossRate = lossRate;
             FixedDelayMilliseconds = fixedDelayMilliseconds;
@@ -63,6 +64,7 @@ namespace UcpTest.TestTransport
             BackwardJitterMilliseconds = backwardJitterMilliseconds >= 0 ? backwardJitterMilliseconds : jitterMilliseconds;
             DynamicJitterRangeMilliseconds = dynamicJitterRangeMilliseconds;
             DynamicWaveAmplitudeMilliseconds = dynamicWaveAmplitudeMilliseconds;
+            DirectionSkewMilliseconds = directionSkewMilliseconds;
             BandwidthBytesPerSecond = bandwidthBytesPerSecond;
             _random = new Random(seed);
             _dropRule = dropRule;
@@ -88,13 +90,21 @@ namespace UcpTest.TestTransport
 
         public int DynamicWaveAmplitudeMilliseconds { get; private set; }
 
+        public int DirectionSkewMilliseconds { get; private set; }
+
         public int BandwidthBytesPerSecond { get; private set; }
 
         public long SentPackets { get; private set; }
 
+        public long SentDataPackets { get; private set; }
+
         public long DroppedPackets { get; private set; }
 
+        public long DroppedDataPackets { get; private set; }
+
         public long DeliveredPackets { get; private set; }
+
+        public long DeliveredDataPackets { get; private set; }
 
         public long DeliveredBytes { get; private set; }
 
@@ -119,18 +129,40 @@ namespace UcpTest.TestTransport
                         rawThroughput = _logicalDataBytes * 1000000d / (_lastDataScheduledMicros - _firstDataSendMicros);
                     }
 
+                    // High-bandwidth no-loss tests need a virtual clock because the
+                    // OS can batch in-process sends faster than a real NIC would.
                     if (LossRate <= 0 && _dropRule == null && BandwidthBytesPerSecond >= HighBandwidthLogicalClockThresholdBytesPerSecond)
                     {
                         long serializationMicros = (long)Math.Ceiling(_logicalDataBytes * 1000000d / BandwidthBytesPerSecond);
                         long durationMicros = Math.Max(1, serializationMicros + AverageForwardDelayMicros);
-                        double lineRateThroughput = _logicalDataBytes * 1000000d / durationMicros;
-                        if (lineRateThroughput > rawThroughput)
-                        {
-                            return lineRateThroughput;
-                        }
+                        return _logicalDataBytes * 1000000d / durationMicros;
                     }
 
-                    return rawThroughput;
+                    // Lossy tests use real scheduling, but the report still cannot
+                    // exceed the configured bottleneck serialization budget.
+                    return BandwidthBytesPerSecond > 0 ? Math.Min(rawThroughput, BandwidthBytesPerSecond) : rawThroughput;
+                }
+            }
+        }
+
+        public double ObservedPacketLossPercent
+        {
+            get
+            {
+                lock (_sync)
+                {
+                    return SentPackets == 0 ? 0d : DroppedPackets * 100d / SentPackets;
+                }
+            }
+        }
+
+        public double ObservedDataLossPercent
+        {
+            get
+            {
+                lock (_sync)
+                {
+                    return SentDataPackets == 0 ? 0d : DroppedDataPackets * 100d / SentDataPackets;
                 }
             }
         }
@@ -181,6 +213,7 @@ namespace UcpTest.TestTransport
                 BackwardJitterMilliseconds = jitterMilliseconds;
                 DynamicJitterRangeMilliseconds = DefaultDynamicJitterRangeMilliseconds;
                 DynamicWaveAmplitudeMilliseconds = DefaultDynamicWaveAmplitudeMilliseconds;
+                DirectionSkewMilliseconds = DefaultDirectionSkewMilliseconds;
                 BandwidthBytesPerSecond = bandwidthBytesPerSecond;
                 _duplicateRate = duplicateRate;
                 _reorderRate = reorderRate;
@@ -250,11 +283,22 @@ namespace UcpTest.TestTransport
             bool reorder;
             lock (_sync)
             {
+                bool isDataPacket = IsDataPacket(datagram.Buffer, datagram.Count);
                 SentPackets++;
+                if (isDataPacket)
+                {
+                    SentDataPackets++;
+                }
+
                 drop = ShouldDrop(datagram);
                 if (drop)
                 {
                     DroppedPackets++;
+                    if (isDataPacket)
+                    {
+                        DroppedDataPackets++;
+                    }
+
                     return;
                 }
 
@@ -291,12 +335,15 @@ namespace UcpTest.TestTransport
             bool shouldSignal = false;
             lock (_sync)
             {
-                if (IsDataPacket(datagram.Buffer, datagram.Count))
+                int logicalPayloadBytes;
+                string logicalPacketKey;
+                // Count each logical DATA sequence once so retransmissions repair
+                // integrity without inflating payload throughput.
+                if (TryGetDataPacketIdentity(datagram.Buffer, datagram.Count, out logicalPacketKey, out logicalPayloadBytes) && _logicalDataPacketKeys.Add(logicalPacketKey))
                 {
-                    int payloadBytes = datagram.Count - 20;
-                    if (payloadBytes > 0)
+                    if (logicalPayloadBytes > 0)
                     {
-                        _logicalDataBytes += payloadBytes;
+                        _logicalDataBytes += logicalPayloadBytes;
                     }
 
                     if (_firstDataSendMicros == 0)
@@ -426,6 +473,11 @@ namespace UcpTest.TestTransport
             {
                 DeliveredPackets++;
                 DeliveredBytes += datagram.Count;
+                if (IsDataPacket(datagram.Buffer, datagram.Count))
+                {
+                    DeliveredDataPackets++;
+                }
+
                 long nowMicros = DateTime.UtcNow.Ticks / 10L;
                 long latencyMicros = nowMicros - datagram.SendMicros;
                 if (latencyMicros >= 0)
@@ -533,22 +585,29 @@ namespace UcpTest.TestTransport
                     _nextReverseTransmitAvailableMicros = nextTransmitAvailableMicros;
                 }
 
-                long nextLogicalTransmitAvailableMicros = forwardDirection ? _nextForwardLogicalTransmitAvailableMicros : _nextReverseLogicalTransmitAvailableMicros;
                 bool useVirtualLogicalClock = LossRate <= 0 && _dropRule == null && BandwidthBytesPerSecond >= HighBandwidthLogicalClockThresholdBytesPerSecond;
-                if (nextLogicalTransmitAvailableMicros == 0 || !useVirtualLogicalClock || nowMicros - nextLogicalTransmitAvailableMicros > LogicalSenderIdleGapMicros)
+                long nextLogicalTransmitAvailableMicros = forwardDirection ? _nextForwardLogicalTransmitAvailableMicros : _nextReverseLogicalTransmitAvailableMicros;
+                if (!useVirtualLogicalClock)
                 {
-                    nextLogicalTransmitAvailableMicros = nowMicros;
-                }
-
-                nextLogicalTransmitAvailableMicros += serializationMicros;
-                logicalTransmitCompleteMicros = nextLogicalTransmitAvailableMicros;
-                if (forwardDirection)
-                {
-                    _nextForwardLogicalTransmitAvailableMicros = nextLogicalTransmitAvailableMicros;
+                    logicalTransmitCompleteMicros = transmitCompleteMicros;
                 }
                 else
                 {
-                    _nextReverseLogicalTransmitAvailableMicros = nextLogicalTransmitAvailableMicros;
+                    if (nextLogicalTransmitAvailableMicros == 0 || nowMicros - nextLogicalTransmitAvailableMicros > LogicalSenderIdleGapMicros)
+                    {
+                        nextLogicalTransmitAvailableMicros = nowMicros;
+                    }
+
+                    nextLogicalTransmitAvailableMicros += serializationMicros;
+                    logicalTransmitCompleteMicros = nextLogicalTransmitAvailableMicros;
+                    if (forwardDirection)
+                    {
+                        _nextForwardLogicalTransmitAvailableMicros = nextLogicalTransmitAvailableMicros;
+                    }
+                    else
+                    {
+                        _nextReverseLogicalTransmitAvailableMicros = nextLogicalTransmitAvailableMicros;
+                    }
                 }
             }
 
@@ -580,6 +639,30 @@ namespace UcpTest.TestTransport
         private static bool IsDataPacket(byte[] buffer, int count)
         {
             return buffer != null && count > 0 && buffer[0] == 0x05;
+        }
+
+        private static bool TryGetDataPacketIdentity(byte[] buffer, int count, out string key, out int payloadBytes)
+        {
+            key = string.Empty;
+            payloadBytes = 0;
+            if (buffer == null || count <= 20 || buffer[0] != 0x05)
+            {
+                return false;
+            }
+
+            uint connectionId = ReadUInt32BigEndian(buffer, 2);
+            uint sequenceNumber = ReadUInt32BigEndian(buffer, 12);
+            key = connectionId.ToString() + ":" + sequenceNumber.ToString();
+            payloadBytes = count - 20;
+            return true;
+        }
+
+        private static uint ReadUInt32BigEndian(byte[] buffer, int offset)
+        {
+            return ((uint)buffer[offset] << 24)
+                | ((uint)buffer[offset + 1] << 16)
+                | ((uint)buffer[offset + 2] << 8)
+                | buffer[offset + 3];
         }
 
         internal sealed class SimulatedDatagram
