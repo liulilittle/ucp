@@ -5,6 +5,12 @@ namespace Ucp
     /// <summary>
     /// Wrap-around aware 32-bit sequence comparer. It assumes active windows stay below 2^31.
     /// </summary>
+    /// <summary>
+    /// Wrap-around aware 32-bit sequence number comparer.
+    /// Assumes active windows stay below 2^31 (half the sequence space).
+    /// Provides static helpers: IsAfter, IsBefore, IsBeforeOrEqual,
+    /// IsAfterOrEqual, Increment, IsInForwardRange, IsForwardDistanceAtMost.
+    /// </summary>
     internal sealed class UcpSequenceComparer : IComparer<uint>
     {
         public static readonly UcpSequenceComparer Instance = new UcpSequenceComparer();

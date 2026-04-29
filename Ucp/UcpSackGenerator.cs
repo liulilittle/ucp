@@ -5,6 +5,12 @@ namespace Ucp
     /// <summary>
     /// Builds continuous SACK ranges from the receive buffer.
     /// </summary>
+    /// <summary>
+    /// Builds contiguous SACK (Selective Acknowledgment) blocks from the
+    /// receive buffer. Merges consecutive sequence numbers into Start/End
+    /// ranges. Limited to <c>maxBlocks</c> to fit within the MSS-constrained
+    /// ACK packet.
+    /// </summary>
     internal sealed class UcpSackGenerator
     {
         public List<SackBlock> Generate(uint nextExpectedSequence, IEnumerable<uint> receivedSequences, int maxBlocks)

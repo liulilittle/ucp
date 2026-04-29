@@ -1,70 +1,227 @@
-# UCP 架构说明
+# UCP 架构深度解析
 
-## 分层
+## 1. 总体分层
 
-- 用户层：`UcpServer`、`UcpConnection`
-- 协议层：`UcpPcb`
-- 执行层：`SerialQueue`
-- 网络驱动层：`UcpNetwork`、`UcpDatagramNetwork`
-- 兼容传输层：`ITransport`
+```
+┌─────────────────────────────────────┐
+│           应用层 (App)              │
+│   UcpServer / UcpConnection         │
+├─────────────────────────────────────┤
+│           协议核心 (Core)           │
+│   UcpPcb (传输控制块)               │
+│   ├─ BbrCongestionControl           │
+│   ├─ PacingController               │
+│   ├─ UcpRtoEstimator                │
+│   ├─ UcpSackGenerator               │
+│   ├─ UcpFecCodec                    │
+│   └─ 接收/发送状态机                │
+├─────────────────────────────────────┤
+│           序列化层 (Codec)          │
+│   UcpPacketCodec (大端序编解码)     │
+├─────────────────────────────────────┤
+│           执行层 (Execution)        │
+│   SerialQueue (每连接串行)          │
+├─────────────────────────────────────┤
+│           网络驱动层 (Network)      │
+│   UcpNetwork (抽象事件循环)         │
+│   UcpDatagramNetwork (UDP 实现)     │
+├─────────────────────────────────────┤
+│           传输层 (Transport)        │
+│   UdpSocketTransport / ITransport   │
+└─────────────────────────────────────┘
+```
 
-## UcpNetwork 驱动模型
+---
 
-`UcpNetwork` 是新的协议栈入口：
+## 2. UcpPcb — 传输控制块
 
-- `Input(byte[] datagram, IPEndPoint remote)` 注入收到的 UDP 数据报。
-- `Output(byte[] datagram, IPEndPoint remote, IUcpObject sender)` 由派生类实现实际发送，并可读取发送方连接元数据。
-- `DoEvents()` 驱动到期计时器、延迟 flush、RTO 检查和服务端 FQ 调度。
-- `AddTimer()` 使用 `SortedDictionary<long, List<Action>>` 按微秒时间维护计时器堆。
-- `NowMicroseconds` 使用全局 1ms 缓存单调时钟，减少高频时间查询成本。
+`UcpPcb` 是每个连接的核心状态机，维护：
 
-`IUcpObject` 是网络层可见的发送方契约，公开 `ConnectionId` 与 `Network`。`UcpServer`、`UcpConnection` 和内部 transport adapter 均实现该契约，避免网络派生类依赖未类型化的 `object sender`。
+### 2.1 发送端状态
 
-`UcpDatagramNetwork` 是默认 UDP 派生类。它使用一个 UDP Socket 接收和发送数据报，同一网络对象上的多个连接通过公共头 `ConnectionId` 区分，不会为每个连接创建独立 Socket。
+| 数据结构 | 类型 | 用途 |
+|---|---|---|
+| `_sendBuffer` | `SortedDictionary<uint, OutboundSegment>` | 按序号排序的待确认分段 |
+| `_flightBytes` | int | 当前在途字节数 |
+| `_nextSendSequence` | uint | 下一个发送序号（32 位环绕） |
+| `_sentDataPackets` / `_retransmittedPackets` | int | 统计计数器 |
 
-## Strand 模型
+### 2.2 接收端状态
 
-每个连接拥有自己的 `SerialQueue`：
+| 数据结构 | 类型 | 用途 |
+|---|---|---|
+| `_recvBuffer` | `SortedDictionary<uint, InboundSegment>` | 乱序缓冲区 |
+| `_nextExpectedSequence` | uint | 期望的下一个有序序号 |
+| `_receiveQueue` | `Queue<ReceiveChunk>` | 有序待交付数据 |
+| `_missingSequenceCounts` | `Dictionary<uint, int>` | 缺口观测计数（用于 NAK 触发） |
+| `_missingFirstSeenMicros` | `Dictionary<uint, long>` | 缺口首次发现时间 |
+| `_nakIssued` | `HashSet<uint>` | 已发出的 NAK 序列号（避免重复） |
 
-- 用户 API 调用先进入 strand
-- 入站数据报解析后也投递到同一 strand
-- 这样同一连接无锁串行，不同连接仍可并行
+### 2.3 有序交付
 
-通过 `UcpNetwork` 创建连接时，网络层只负责按数据报注入，实际包处理仍投递到对应连接的 strand，避免同一连接的 API 调用、ACK、DATA、重传检查并发修改 PCB 状态。
+`HandleData()` 收到数据包后：
+1. 若包序号 == `_nextExpectedSequence`，直接放入 `_receiveQueue` 并调用 `EnqueuePayload()` 触发 `OnData` 事件
+2. 若包序号 > `_nextExpectedSequence`，存入 `_recvBuffer`
+3. 然后扫描 `_recvBuffer`，发现连续就绪的包后批量取出并交付
+4. 交付后立即触发 `_receiveSignal`，唤醒阻塞的 `ReadAsync`/`ReceiveAsync`
 
-## 拥塞控制与调度
+---
 
-- `BbrCongestionControl` 负责测量带宽、最小 RTT、模式转换
-- `PacingController` 负责令牌桶节奏控制
-- `UcpServer` 负责面向多连接的 FQ 调度
+## 3. BBR 拥塞控制深度剖析
 
-在新驱动模型下，Pacing 延迟 flush、PCB 周期检查和 FQ 轮次都注册到 `UcpNetwork` 计时器，只有调用 `DoEvents()` 时才推进。旧式 `ITransport` API 仍保留后台 `System.Threading.Timer`，用于兼容已有调用方式。
+### 3.1 带宽估计
 
-## 统计系统
+```
+deliveryRate = deliveredBytes / intervalMicros
+btl_bw = max(deliveryRate over window of BBR_WINDOW_RTT_ROUNDS × MinRtt)
+```
 
-`UcpPcb` 内部实时统计：
+带宽增长受限于 `BBR_STARTUP_BANDWIDTH_GROWTH_PER_ROUND=2.0`（Startup）或 1.25（稳态），防止 ACK 压缩样本导致的虚假飙升。
 
-- 发送字节数
-- 接收字节数
-- ACK / NAK / 重传包数
-- 最后 RTT
-- 当前 CWND
-- 当前 pacing rate（内部为 bytes/second，报告展示为 Mbps）
-- loss-control 估算损失率
-- fast retransmit / timeout retransmit 计数
+### 3.2 RTT 追踪
 
-这些统计通过 `UcpConnection.GetReport()` 暴露给上层和测试。
+- `MinRtt`: 维护最近 `ProbeRttIntervalMicros`（30s）内的最小值
+- RTT 滤波器：`SRTT = 7/8 * SRTT + 1/8 * sample`，`RTTVAR = 3/4 * RTTVAR + 1/4 * |sample - SRTT|`
+- Karn 保护：恢复期（RTO 超时后）的过期样本被 `RTT_RECOVERY_SAMPLE_MAX_RTO_MULTIPLIER=1.0` 过滤
 
-## 测试项目
+### 3.3 Inflight 护栏
 
-`UcpTest` 使用 `NetworkSimulator` 模拟：
+```
+inflightLow = max(InitialCWND, BDP × BBR_INFLIGHT_LOW_GAIN)  // 1.10
+inflightHigh = max(inflightLow, BDP × BBR_INFLIGHT_HIGH_GAIN) // 1.50
+```
 
-- 丢包
-- 延迟
-- 抖动
-- 带宽瓶颈
-- 规则型选择性丢包
+实际 CWND 会被限制在 `[inflightLow, inflightHigh]` 区间内。
 
-测试过程中会把性能快照写入 `reports/summary.txt`，并生成对齐纯文本表格 `reports/test_report.txt`。报告中的吞吐、目标带宽和当前 pacing 使用 Mbps，RTT/Jitter 使用毫秒，重传率、估算损失率、利用率和浪费率使用百分比。`run-tests.ps1` 会在测试结束后读取并校验报告，报告缺失或关键指标异常会导致脚本失败。
+### 3.4 Loss-CWND 恢复
 
-性能基准覆盖 100Mbps、1Gbps 和 10Gbps 档位。集成测试验证实际传输、pacing 收敛、随机丢包预算和突发丢包恢复；控制器级测试验证不设置 pacing 上限时从较低初始带宽探测到瓶颈带宽的收敛行为。
+每次 ACK 到达时，`lossCwndGain` 以 `BBR_LOSS_CWND_RECOVERY_STEP=0.01` 的步长向 1.0 恢复。这确保了非拥塞丢包后 CWND 不会永久缩小。
+
+---
+
+## 4. Pacing 控制器
+
+### 4.1 令牌桶机制
+
+```
+容量 = PacingRate × BucketDuration / 1s  // 默认 10ms 窗口
+速率 = PacingRate bytes/s
+```
+
+每微秒按比例补充令牌。发送前必须消耗对应包大小的令牌。
+
+### 4.2 等待时间计算
+
+```
+deficit = bytes - tokens
+waitMicros = deficit / PacingRate * 1s
+waitMicros = max(waitMicros, MinPacingIntervalMicros)  // 默认 1ms 下限
+```
+
+---
+
+## 5. 丢包分类器（UcpPcb 端）
+
+### 5.1 滑动窗口
+
+```
+窗口长度 = 2 × MinRtt（至少 1ms）
+去重方式：HashSet<uint> 记录已分类的序列号
+```
+
+### 5.2 分类规则
+
+```
+if (去重丢包数 ≤ 2 && 最大连续丢包 < 3) → 随机丢包
+else if (去重丢包数 > 3 || 最大连续 ≥ 3) && RTT中位数 > MinRTT × 1.1 → 拥塞丢包
+else → 随机丢包
+```
+
+### 5.3 动作差异
+
+| 分类 | BBR 响应 | 重传动作 |
+|---|---|---|
+| 随机丢包 | 不降 pacing/cwnd | 立即重传 |
+| 拥塞丢包 | 降 pacing × 0.95, cwnd × 0.85 | 立即重传 |
+
+---
+
+## 6. NAK / SACK 快速重传
+
+### 6.1 SACK 快速重传（发送端）
+
+```
+条件（任一满足且 EnableAggressiveSackRecovery=true）：
+1. 段序号 == firstMissingSequence && MissingAckCount ≥ 2 && age ≥ RTT/2
+2. highestSack - seq ≥ 20 && MissingAckCount ≥ 2 && age ≥ RTT/2
+```
+
+`EnableAggressiveSackRecovery` 仅在 ≥1 Gbps + 有配置丢包的场景开启。
+
+### 6.2 NAK 生成（接收端）
+
+```
+条件：
+1. missingCount ≥ NAK_MISSING_THRESHOLD (4)
+2. now - firstSeenMicros ≥ NAK_REORDER_GRACE_MICROS (60ms)
+3. 未在此 RTT 窗口内发出过此序号的 NAK
+```
+
+---
+
+## 7. 串行队列（SerialQueue）
+
+### 7.1 实现
+
+```csharp
+Queue<Func<Task>> _queue;  // FIFO
+bool _processing;           // 防止重复启动处理循环
+```
+
+`ProcessLoopAsync()` 在一个 `Task.Run` 中循环消费队列，直到队列为空。
+
+### 7.2 优先级调度
+
+```csharp
+PostPriority(Func<Task> action)
+```
+
+NAK 包使用 `PostPriority` 插队到队列头部，确保补洞信号不被普通 ACK 阻塞。
+
+---
+
+## 8. 测试架构
+
+### 8.1 NetworkSimulator
+
+- `SortedDictionary<long, List<SimulatedDatagram>>` 按到期时间排序
+- 独立调度线程 `SchedulerLoopAsync`
+- 带宽模型：`nextTransmitAvailableMicros += serializationMicros`
+- 逻辑时钟：无丢包 + ≥10 MB/s 带宽时启用虚拟时钟，排除线程调度噪声
+
+### 8.2 测试场景覆盖
+
+| 维度 | 覆盖 |
+|---|---|
+| 带宽 | 500 KB/s → 10 Gbps |
+| 延迟 | 0ms → 300ms |
+| 抖动 | 0ms → 30ms |
+| 丢包率 | 0% → 10% |
+| 网络类型 | LAN, DataCenter, Enterprise, Mobile 3G/4G, Satellite, VPN, LongFat, Asymmetric, Burst, Weak4G, HighJitter |
+
+### 8.3 报告生成
+
+- `summary.txt`：每场景一行 ASCII 表格，包含吞吐/利用率/重传/RTT/CWND/Pacing
+- `test_report.txt`：最终格式化的 20+ 行表格
+- 报告验证：`UcpPerformanceReport.ValidateReportFile()` 确保所有必选场景存在且指标在合法范围
+
+---
+
+## 9. FQ 公平队列
+
+服务端 `UcpServer` 维护多连接公平调度：
+
+- 每 `FairQueueRoundMilliseconds`（10ms）触发一轮
+- 按每连接的 `CurrentPacingRateBytesPerSecond` 占比分配信用
+- 信用上限为 `MaxBufferedFairQueueRounds=2` 轮的预算
+- 调度按轮询索引 `_fairQueueStartIndex` 保证公平

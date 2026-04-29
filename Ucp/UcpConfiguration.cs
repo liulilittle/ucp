@@ -3,7 +3,13 @@ using System;
 namespace Ucp
 {
     /// <summary>
-    /// Runtime configuration for congestion control, windows, retransmission, pacing, and scheduling.
+    /// Runtime configuration for UCP connections and servers.
+    /// Controls all protocol behavior: MSS, retransmission limits, RTO bounds,
+    /// BBR congestion control gains, pacing token-bucket parameters, FEC redundancy,
+    /// loss-control budget, fair-queue scheduling, and keepalive/disconnect timeouts.
+    ///
+    /// Use <see cref="GetOptimizedConfig"/> for a production-ready default.
+    /// All public members use .NET PascalCase naming.
     /// </summary>
     public class UcpConfiguration
     {

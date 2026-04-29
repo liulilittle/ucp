@@ -4,7 +4,24 @@ using System.Diagnostics;
 namespace Ucp
 {
     /// <summary>
-    /// Engineering-oriented BBRv1 controller that implements core state transitions and rate/window estimates.
+    /// BBRv1 congestion control engine implementing core state transitions,
+    /// rate estimation, window computation, and loss classification.
+    ///
+    /// States: Startup → Drain → ProbeBW ↔ ProbeRTT
+    ///
+    /// Key estimates:
+    /// - BtlBw (bottleneck bandwidth): max delivery rate over recent RTT window
+    /// - MinRtt (minimum RTT): floor of observed RTT samples
+    /// - PacingRate = BtlBw × PacingGain
+    /// - CongestionWindow = BDP × CwndGain, bounded by inflight guardrails
+    ///
+    /// The loss classifier distinguishes random loss (no pacing/cwnd reduction)
+    /// from congestion loss (multiplicative reduction). A separate network
+    /// classifier categorizes the path into: LowLatencyLAN, MobileUnstable,
+    /// LossyLongFat, CongestedBottleneck, SymmetricVPN, or Default.
+    ///
+    /// Public methods are called by UcpPcb on each ACK, packet send, fast
+    /// retransmit, and packet loss event.
     /// </summary>
     internal sealed class BbrCongestionControl
     {
@@ -121,6 +138,9 @@ namespace Ucp
             RecalculateModel(UcpTime.NowMicroseconds());
         }
 
+        /// Called by UcpPcb on each received ACK.
+        /// Processes delivered bytes, RTT samples, advances round tracking,
+        /// updates bandwidth estimate, and handles state transitions.
         public void OnAck(long nowMicros, int deliveredBytes, long sampleRttMicros, int flightBytes)
         {
             bool minRttExpired = MinRttMicros > 0 && nowMicros - _minRttTimestampMicros >= _config.ProbeRttIntervalMicros;

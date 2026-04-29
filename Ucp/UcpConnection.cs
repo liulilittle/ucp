@@ -6,6 +6,12 @@ using Ucp.Transport;
 
 namespace Ucp
 {
+    /// <summary>
+    /// Client-side UCP connection. Provides connect, send, receive, and close
+    /// operations. Internally wraps a <see cref="UcpPcb"/> for protocol logic.
+    /// Supports both callback-based (<c>OnData</c> event) and stream-based
+    /// (<c>ReadAsync</c>/<c>WriteAsync</c>) APIs.
+    /// </summary>
     public class UcpConnection : IUcpObject, IDisposable
     {
         private readonly object _sync = new object();

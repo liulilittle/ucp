@@ -8,6 +8,13 @@ namespace Ucp.Internal
     /// Lightweight serial execution queue used to implement a per-connection strand.
     /// All posted work is processed in logical order to avoid concurrent protocol-state mutation.
     /// </summary>
+    /// <summary>
+    /// Lightweight serial execution queue implementing a per-connection strand.
+    /// All posted work (sync actions, async delegates, prioritized items) is
+    /// processed sequentially in FIFO order (or priority-first for NAK packets).
+    /// This eliminates lock contention on per-connection state while allowing
+    /// different connections to execute concurrently on separate threads.
+    /// </summary>
     internal sealed class SerialQueue
     {
         private readonly object _sync = new object();

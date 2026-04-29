@@ -8,6 +8,20 @@ using Ucp.Transport;
 
 namespace UcpTest.TestTransport
 {
+    /// <summary>
+    /// Deterministic in-process network simulator for UCP integration tests.
+    ///
+    /// Simulates: bidirectional delay with independent forward/reverse paths,
+    /// per-packet random jitter, sinusoidal wave jitter for route fluctuation,
+    /// bandwidth serialization (token-bucket at byte granularity), packet loss
+    /// (uniform random + custom drop rules), duplication, and reordering.
+    ///
+    /// For high-bandwidth (>10 MB/s) no-loss scenarios, a virtual logical clock
+    /// is used to compute throughput independently of OS thread scheduling jitter.
+    ///
+    /// Multiple SimulatedTransport instances share the same simulator, enabling
+    /// multi-connection tests on a single logical network.
+    /// </summary>
     internal sealed class NetworkSimulator
     {
         private readonly object _sync = new object();

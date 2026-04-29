@@ -8,6 +8,11 @@ using Ucp.Transport;
 
 namespace Ucp
 {
+    /// <summary>
+    /// Server-side UCP listener. Accepts incoming connections via
+    /// <c>AcceptAsync()</c>. Manages fair-queue scheduling across all
+    /// active connections on a configurable round interval.
+    /// </summary>
     public class UcpServer : IUcpObject, IDisposable
     {
         private sealed class ConnectionEntry

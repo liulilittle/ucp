@@ -5,6 +5,10 @@ namespace Ucp
     /// <summary>
     /// Encodes and decodes protocol packets in big-endian byte order.
     /// </summary>
+    /// <summary>
+    /// Encodes and decodes UCP protocol packets in big-endian byte order.
+    /// Supports all packet types: Data, Ack, Nak, FecRepair, Control (Syn/SynAck/Fin/Rst).
+    /// </summary>
     internal static class UcpPacketCodec
     {
         public static byte[] Encode(UcpPacket packet)

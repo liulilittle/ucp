@@ -5,6 +5,11 @@ namespace Ucp
     /// <summary>
     /// RFC6298-style RTO estimator with a configurable default 1.5x backoff factor.
     /// </summary>
+    /// <summary>
+    /// RFC 6298 style RTO estimator with configurable min/max bounds,
+    /// exponential backoff, and Karn-style sample protection during recovery.
+    /// Uses SRTT + 4*RTTVAR with 1/8 and 1/4 smoothing weights respectively.
+    /// </summary>
     internal sealed class UcpRtoEstimator
     {
         private readonly long _minRtoMicros;

@@ -1,243 +1,194 @@
-# UCP 协议说明
+# UCP 协议深度解析
 
-## 概览
+## 1. 设计哲学
 
-UCP 是运行在 UDP 之上的可靠传输协议，当前工程实现具备：
+### 1.1 丢包不是拥塞
 
-- 固定公共头格式，大端序编码。
-- DATA / ACK / NAK / SYN / SYN-ACK / FIN / RST。
-- 累积确认、SACK、NAK、快速重传、RTO 超时重传。
-- RTT 时间戳回显。
-- BBRv1 风格拥塞控制。
-- Pacing 令牌桶。
-- 服务端 FQ 公平队列。
-- 每连接 strand 串行化处理。
-- `UcpNetwork.DoEvents()` 事件循环驱动模式。
+UCP 的核心设计原则是：**随机丢包只触发重传，不触发降速**。降速仅在三重信号同时满足时发生：
+- 网络分类器判定当前处于拥塞状态（RTT 持续高于 MinRTT × 1.1）
+- 去重后的滑动窗口丢包数超过阈值（>2 次孤立丢包或 ≥3 连续丢包）
+- `EstimatedLossPercent` 超过配置的 `MaxBandwidthLossPercent`
 
-## 架构分层图
+这一设计使得 UCP 在有随机丢包的链路上吞吐显著优于传统 TCP（TCP Cubic 会在丢包时直接减半 CWND）。
 
-```mermaid
-flowchart TB
-    App[Application] --> Conn[UcpConnection]
-    App --> Server[UcpServer]
-    Conn --> Pcb[UcpPcb]
-    Server --> Pcb
-    Pcb --> Bbr[BbrCongestionControl]
-    Pcb --> Pacing[PacingController]
-    Pcb --> Codec[UcpPacketCodec]
-    Codec --> Network[UcpNetwork]
-    Network --> Datagram[UcpDatagramNetwork]
-    Datagram --> Udp[UDP Socket]
+### 1.2 QUIC 式丢包检测
+
+借鉴 RFC 9002 的设计，UCP 使用双层丢包检测：
+
+**基于 SACK 的包计数检测（kPacketThreshold）**：
+- 首个缺失序号需 `MissingAckCount ≥ 2`（两次 SACK 观测）且包龄 ≥ `RTT/2`
+- 首个缺失序号后方有 ≥ 20 个包被 SACK 确认（`kPacketThreshold = 20`），直接判定为丢包
+
+**基于时间的丢包检测（kTimeThreshold）**：
+- 包龄 ≥ `9/8 × smoothedRTT` 且后续有包被 SACK，判定为丢包
+
+### 1.3 接收端 NAK 状态机
+
+接收端维护缺口追踪状态：
+- 每收到一个乱序数据包，对缺口之间的所有序列号递增 `missingCount`
+- 当 `missingCount ≥ NAK_MISSING_THRESHOLD`（4 次）且缺口年龄 ≥ `NAK_REORDER_GRACE_MICROS`（60ms），发出 NAK
+- 已发出的 NAK 序列号进入 `_nakIssued` 集合，同 RTT 窗口内不再重复
+
+---
+
+## 2. 包格式
+
+### 2.1 公共头（12 字节，大端序）
+
+| 偏移 | 字段 | 大小 | 说明 |
+|---|---|---|---|
+| 0 | Type | 1B | 0x01=SYN, 0x02=SYNACK, 0x03=ACK, 0x04=NAK, 0x05=DATA, 0x06=FIN, 0x07=RST, 0x08=FecRepair |
+| 1 | Flags | 1B | 0x01=NeedAck, 0x02=Retransmit, 0x04=FinAck |
+| 2 | ConnId | 4B | 连接标识符，UDP 多路复用的关键 |
+| 6 | Timestamp | 6B | 发送方本地单调微秒时钟，用于 RTT 回显 |
+
+### 2.2 DATA 包
+
+| 偏移 | 字段 | 大小 |
+|---|---|---|
+| 12 | SeqNum | 4B |
+| 16 | FragTotal | 2B |
+| 18 | FragIndex | 2B |
+| 20 | Payload | ≤ MSS-20 |
+
+### 2.3 ACK 包
+
+| 偏移 | 字段 | 大小 |
+|---|---|---|
+| 12 | AckNumber | 4B |
+| 16 | SackCount | 2B |
+| 18 | SackBlocks[] | N×8B |
+| — | WindowSize | 4B |
+| — | EchoTimestamp | 6B |
+
+### 2.4 NAK 包
+
+| 偏移 | 字段 | 大小 |
+|---|---|---|
+| 12 | MissingCount | 2B |
+| 14 | MissingSeqs[] | N×4B |
+
+### 2.5 FecRepair 包
+
+| 偏移 | 字段 | 大小 |
+|---|---|---|
+| 12 | GroupId | 4B |
+| 16 | GroupIndex | 1B |
+| 17 | Payload | 变长 |
+
+---
+
+## 3. 连接状态机
+
+```
+INIT → HandshakeSynSent (ActiveOpen/SYN)
+INIT → HandshakeSynReceived (Passive/SYN-ACK)
+HandshakeSynSent → Established (SYN-ACK received)
+HandshakeSynReceived → Established (ACK received)
+Established → ClosingFinSent (Local close)
+Established → ClosingFinReceived (Peer FIN)
+ClosingFinSent → Closed (FIN ACKed)
+ClosingFinReceived → Closed (FIN ACKed)
+Closed → [terminal]
 ```
 
-## 包结构
+---
 
-```mermaid
-packet-beta
-0-7: "Type"
-8-15: "Flags"
-16-47: "ConnectionId"
-48-95: "Timestamp48"
-96-127: "Seq/Ack/Count"
-128-143: "FragmentTotal or SackCount"
-144-159: "FragmentIndex or Window"
-160-255: "Payload or SACK blocks"
+## 4. BBRv1 拥塞控制
+
+### 4.1 状态机
+
+```
+Startup → Drain → ProbeBW ↔ ProbeRTT
 ```
 
-### 公共头 12B
+- **Startup**: pacing_gain=2.0, cwnd_gain=2.0，快速探测瓶颈带宽。当 `fullBandwidthRounds ≥ 3` 时进入 Drain
+- **Drain**: pacing_gain=0.75，排空 Startup 期间堆积的队列。当 inflight ≤ BDP 时进入 ProbeBW
+- **ProbeBW**: 8 相位增益循环 [1.25, 0.75, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]，动态调整探测强度
+- **ProbeRTT**: pacing_gain=0.85，CWND 减半，刷新 MinRTT。周期 30s，至少持续 100ms
 
-| 字段 | 大小 | 说明 |
-| --- | --- | --- |
-| Type | 1B | SYN / SYN-ACK / ACK / NAK / DATA / FIN / RST |
-| Flags | 1B | NeedAck / Retransmit / FinAck |
-| ConnId | 4B | 连接标识 |
-| Timestamp | 6B | 本地单调微秒时间 |
+### 4.2 关键估计量
 
-`Timestamp` 来自全局 1ms 缓存单调时钟，协议只要求本地单调递增，不要求与对端时钟同步。
+| 估计量 | 计算方法 | 用途 |
+|---|---|---|
+| `btl_bw` | 最近 10 个 RTT 窗口内的最大 delivery rate | Pacing 速率基准 |
+| `MinRtt` | 最近 30s 内的最小 RTT 样本 | BDP 计算分母 |
+| `BDP` | `btl_bw × MinRtt` | 目标飞行字节数 |
+| `PacingRate` | `btl_bw × PacingGain` | 发送速率 |
+| `CWND` | `BDP × CwndGain` | 拥塞窗口 |
 
-### DATA
+### 4.3 丢包分类器
 
-| 字段 | 大小 | 说明 |
-| --- | --- | --- |
-| SeqNum | 4B | 32 位环绕序号 |
-| FragTotal | 2B | 总分片数 |
-| FragIdx | 2B | 分片索引 |
-| Payload | 变长 | 单包不超过 MSS |
+`ClassifyNetworkCondition()` 使用多信号评分：
 
-### ACK
+| 信号 | 阈值 | 得分 |
+|---|---|---|
+| 投递率下降 | ≤ -15% | +1 |
+| RTT 增长 | ≥ 20% | +1 |
+| 丢包 + RTT 增长 | ≥ 3% loss + ≥ 10% RTT | +1 |
 
-| 字段 | 大小 | 说明 |
-| --- | --- | --- |
-| AckNumber | 4B | 累积确认号 |
-| SackBlockCount | 2B | SACK 块数量 |
-| SackBlocks | N * 8B | Start + End |
-| WindowSize | 4B | 接收窗口大小，字节 |
-| EchoTimestamp | 6B | 回显最近 DATA 的发送时间 |
+总分 ≥ 2 → 判定为拥塞。孤立丢包 + RTT 无增长 → 判定为随机丢包。
 
-### NAK
+### 4.4 网络分类器（NetworkClass）
 
-| 字段 | 大小 | 说明 |
-| --- | --- | --- |
-| MissingCount | 2B | 缺失序号数 |
-| MissingList | N * 4B | 缺失序号列表 |
+协议在每 200ms 的统计窗口内积累 RTT/丢包/抖动/吞吐比，然后用 8 窗口滑动平均判定网络类型：
 
-## 握手与序号同步
+| 类型 | 条件 | 策略调整 |
+|---|---|---|
+| LowLatencyLAN | RTT<5ms, Loss<0.1%, Jitter<3ms | 激进增益 `ProbeBwHighGain` |
+| MobileUnstable | Loss>3% 或 Jitter>20ms | 保守增益 `BBR_LIGHT_LOSS_PACING_GAIN=1.02` |
+| LossyLongFat | RTT>80ms, Loss>1% | 跳过 ProbeRTT，保持管道满载 |
+| CongestedBottleneck | 吞吐下降+RTT上升 | 传统拥塞响应，降 pacing_gain |
+| SymmetricVPN | RTT>30ms | 标准 BBR 行为 |
 
-SYN / SYN-ACK 会额外携带本端初始发送序号。
+---
 
-这样双方在连接建立前就同步了彼此数据流起点，避免序号接近回绕边界时，首批 DATA 包被错误当作旧包或未来包。
+## 5. FEC 前向纠错
 
-## 连接状态机
+### 5.1 工作原理
 
-```mermaid
-stateDiagram-v2
-    [*] --> INIT
-    INIT --> HANDSHAKE_SYN_SENT : ActiveOpenSYN
-    INIT --> HANDSHAKE_SYN_RCVD : PassiveSynSynAck
-    HANDSHAKE_SYN_SENT --> ESTABLISHED : SynAckAck
-    HANDSHAKE_SYN_RCVD --> ESTABLISHED : AckReceived
-    ESTABLISHED --> CLOSING_FIN_SENT : LocalCloseFin
-    ESTABLISHED --> CLOSING_FIN_RCVD : PeerFin
-    CLOSING_FIN_SENT --> CLOSED : AckAndPeerFin
-    CLOSING_FIN_RCVD --> CLOSED : FinAcked
-    CLOSED --> [*]
+每组 N 个（默认 8 个）数据包的 payload 进行按位 XOR 生成 1 个修复包。接收端在组内缺失恰好 1 个包且修复包已到达时，通过 XOR 恢复。
+
+### 5.2 编码流程
+
+```
+发送端:
+  1. 维护 _sendBuffer[N]，每发一个数据包填充一个槽位
+  2. 组满后 XOR 所有 payload → repair
+  3. 发送 FecRepair 包（GroupId=组首序列号）
+  4. 清空缓冲区
+
+接收端:
+  1. HandleData 调用 FeedDataPacket(seq, payload) 存入分组缓冲
+  2. HandleFecRepair 调用 TryRecoverFromRepair(repair, groupBase)
+  3. 若组内缺 1 包 → XOR 恢复 → 插入 _recvBuffer → 触发有序交付
 ```
 
-## 数据传输时序
+---
 
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant S as Server
-    C->>S: SYN
-    S->>C: SYN-ACK
-    C->>S: ACK
-    C->>S: DATA seq=1 timestamp=t1
-    C->>S: DATA seq=3 timestamp=t3
-    S-->>C: NAK missing=2
-    S-->>C: ACK ack=1 sack=3 echo=t3
-    C->>S: DATA seq=2 retransmit
-    S-->>C: ACK ack=3 echo=t2
-```
+## 6. Strand 串行模型
 
-## RTT 测量
+每个连接有一个 `SerialQueue`（单消费者队列），所有协议操作都在此队列中串行执行：
 
-发送 DATA 时写入本地单调微秒时间到 `Timestamp`。
+- 用户 API 调用 → `_strand.EnqueueAsync(...)`
+- 入站数据报 → `_strand.Post(async () => HandleInboundAsync(packet))`
+- NAK 包使用 `PostPriority` 插队到队列头部，保证补洞信号优先处理
 
-接收端发送 ACK 时，把最近收到 DATA 的 `Timestamp` 拷贝到 `EchoTimestamp`。
+这一设计避免了锁竞争，同时保持协议状态的一致性。
 
-发送端收到 ACK 后：
+---
 
-- `RTT = now_local - EchoTimestamp`
-- 不依赖对端时钟同步。
+## 7. 网络模拟器
 
-## 可靠传输
+`NetworkSimulator` 提供可配置的测试环境：
 
-- ACK 负责累积确认连续到达的数据。
-- SACK 报告乱序区间，避免冗余重传。
-- NAK 在同一最早缺口被多次观测后上报，避免乱序场景中的 NAK 风暴。
-- 三次重复 ACK 或三次 SACK 越过触发快速重传，并使用 RTT 包龄门限降低误重传。
-- RTO 采用 `SRTT + 4 * RTTVAR`，退避因子可配置，默认 1.2，并对退避上限做温和限制。
-
-## BBRv1 与 Pacing
-
-当前实现为更接近生产行为的工程版：
-
-- `btl_bw` 使用最近窗口最大 delivery rate，并对 ACK 压缩样本和单轮增长幅度做上限约束。
-- `min_rtt` 使用时间窗口内最小 RTT。
-- Startup 在多轮带宽不再显著增长时退出。
-- ProbeBW 使用动态 pacing gain，根据近期重传率、RTT 抬升程度和轻量分类器调整探测强度。
-- ProbeRTT 周期性触发，至少持续配置时长，并在收到接近最小 RTT 的样本后退出；随机丢包不会触发 ProbeRTT。
-- Loss-control 使用 15% 到 35% 的可配置损失预算。只有分类为拥塞时才会收缩 pacing/cwnd，随机丢包优先走快速恢复和 NAK/SACK 修复路径。
-- RTT/RTO 更新遵循 Karn 风格保护，恢复期的过期 echo 样本不会污染 RTT 过滤器。
-- Pacing 使用令牌桶，速率上限可配置。
-
-```mermaid
-stateDiagram-v2
-    [*] --> Startup
-    Startup --> Drain : BandwidthPlateau
-    Drain --> ProbeBW : InflightBelowBDP
-    ProbeBW --> ProbeRTT : MinRttExpired
-    ProbeRTT --> ProbeBW : ProbeDone
-```
-
-## 令牌桶 Pacing
-
-```mermaid
-flowchart LR
-    Clock[CachedClock] --> Fill[FillTokens]
-    Rate[PacingRate] --> Fill
-    Fill --> Bucket[TokenBucket]
-    Data[PendingSegments] --> Check{EnoughTokens}
-    Bucket --> Check
-    Check -->|Yes| Send[OutputPacket]
-    Check -->|No| Timer[AddReadyTimer]
-    Timer --> Clock
-```
-
-## FQ 公平调度
-
-服务端每轮按连接 pacing rate 分配信用：
-
-- 仅对仍有待发送数据的连接发额度。
-- 信用按速率占比分配。
-- 同时裁剪到公平份额上限，避免单连接瞬时霸占带宽。
-
-```mermaid
-flowchart TD
-    Tick[FQTimer] --> Scan[ScanActiveConnections]
-    Scan --> Share[ComputeFairShare]
-    Share --> Credit[GrantCredits]
-    Credit --> Rotate[RoundRobinStartIndex]
-    Rotate --> Flush[RequestFlushPerConnection]
-```
-
-## 网络驱动
-
-`UcpNetwork` 把协议推进从具体 Socket 中解耦：
-
-- `Input()` 接收一整个 UDP 数据报并按 `ConnectionId` 分发。
-- `Output()` 由派生网络实现，默认 `UcpDatagramNetwork` 使用 UDP Socket 发送；发送方通过 `IUcpObject` 暴露 `ConnectionId` 与 `Network`。
-- `DoEvents()` 运行到期计时器，驱动 RTO、keepalive、pacing 延迟 flush 和 FQ 调度。
-- 计时器内部使用 `SortedDictionary<long, List<Action>>`，键为到期微秒时间。
-- 无到期事件时，`DoEvents()` 会 `Thread.Yield()` 或 `Thread.Sleep(1)`，避免空转占满 CPU。
-
-旧式 `UcpServer` / `UcpConnection` 直接构造仍可使用，内部保留后台计时器兼容行为；新代码建议由 `UcpNetwork` 创建对象并显式轮询 `DoEvents()`。
-
-## 可配置项
-
-`UcpConfiguration` 目前覆盖：
-
-- MSS
-- 窗口大小
-- RTO 上下界
-- 退避因子
-- 初始带宽
-- 最大 pacing 速率
-- 初始拥塞窗口
-- loss-control 开关和最大带宽损失预算
-- keepalive / 超时 / ProbeRTT / 定时器粒度
-- FQ 轮转周期和服务器出口带宽
-
-配置 API 只有 `UcpConfiguration` 一个类型，公开配置成员采用 .NET PascalCase 命名。
-
-## 性能指标单位
-
-协议内部带宽、pacing 和 delivery rate 使用 bytes/second。测试报告和用户可读表格统一转换为 Mbps，RTT/Jitter 使用毫秒，重传率、估算损失率、利用率和带宽浪费率统一显示为百分比。
-
-## 统计与报告
-
-`UcpConnection.GetReport()` 可返回：
-
-- 发送字节数
-- 接收字节数
-- 数据包数
-- 重传比
-- RTT
-- CWND
-- Pacing 速率
-- 远端窗口大小
-- 估算损失率
-- 快速重传和超时重传计数
-
-测试项目会把关键场景性能数据写到 `reports/summary.txt`，并生成对齐的纯文本表格 `reports/test_report.txt`。测试脚本会读取并校验该报告，确保基础场景、100Mbps/1G/10G 基准、随机丢包预算、突发丢包恢复、pacing 与窗口指标没有缺失或明显异常。
+| 功能 | 参数 |
+|---|---|
+| 双向延迟 | `ForwardDelayMs` / `BackwardDelayMs`，独立配置 |
+| 抖动 | `ForwardJitterMs` / `BackwardJitterMs`，均匀分布 |
+| 动态波 | `DynamicWaveAmplitudeMs=5`，正弦波，周期 5s，相位偏移 π/2 |
+| 方向偏置 | `DirectionSkewMs=5`，创建 A→B 与 B→A 的固定差异 |
+| 带宽序列化 | `BandwidthBytesPerSecond` 限制链路速率 |
+| 丢包 | `LossRate` 基础丢包率 + `DropRule` 自定义规则 |
+| 乱序/重复 | `ReorderRate` / `DuplicateRate` |
+| 逻辑时钟 | 高带宽无丢包场景启用虚拟逻辑时钟，排除 OS 线程调度噪声 |

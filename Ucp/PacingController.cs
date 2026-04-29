@@ -5,6 +5,13 @@ namespace Ucp
     /// <summary>
     /// Token-bucket based pacing controller. Tokens are measured in bytes.
     /// </summary>
+    /// <summary>
+    /// Token-bucket pacing controller. Tokens are measured in bytes and
+    /// refilled proportionally to the elapsed time and current pacing rate.
+    /// Capacity = rate × bucketDuration / 1s. Provides TryConsume for
+    /// non-blocking send eligibility checks and GetWaitTime for delayed flush
+    /// scheduling when tokens are insufficient.
+    /// </summary>
     internal sealed class PacingController
     {
         private readonly int _sendQuantumBytes;

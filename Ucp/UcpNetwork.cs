@@ -11,6 +11,17 @@ namespace Ucp
     /// UCP network engine. External transports feed UDP datagrams through Input,
     /// while concrete network implementations send encoded packets through Output.
     /// </summary>
+    /// <summary>
+    /// Abstract event-loop network driver that decouples the UCP protocol engine
+    /// from socket I/O. Call <c>DoEvents()</c> in a loop to drive all timers,
+    /// delayed flushes, RTO checks, and fair-queue rounds.
+    ///
+    /// <c>Input(byte[], IPEndPoint)</c> injects received datagrams.
+    /// <c>Output(byte[], IPEndPoint, IUcpObject)</c> must be implemented by the
+    /// derived class to send encoded packets to the network.
+    ///
+    /// The default UDP implementation is <see cref="UcpDatagramNetwork"/>.
+    /// </summary>
     public abstract class UcpNetwork : IDisposable
     {
         private sealed class TimerRegistration

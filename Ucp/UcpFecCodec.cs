@@ -3,6 +3,17 @@ using System.Collections.Generic;
 
 namespace Ucp
 {
+    /// <summary>
+    /// XOR-based Forward Error Correction encoder/decoder.
+    ///
+    /// Encoder buffers N payloads and generates one XOR repair packet per group.
+    /// Decoder buffers received packets per group (keyed by the first sequence
+    /// number of the group) and recovers a single missing packet per group when
+    /// the repair packet arrives.
+    ///
+    /// Group size is configurable via <see cref="UcpConfiguration.FecGroupSize"/>.
+    /// FEC is enabled when <see cref="UcpConfiguration.FecRedundancy"/> > 0.
+    /// </summary>
     internal sealed class UcpFecCodec
     {
         private readonly int _groupSize;

@@ -9,8 +9,23 @@ using Ucp.Transport;
 
 namespace Ucp.Internal
 {
+    /// <summary>
+    /// UCP Protocol Control Block — the per-connection state machine.
+    ///
+    /// Manages the send buffer (sorted by sequence number), receive reorder buffer,
+    /// NAK gap tracking, SACK-based fast retransmit, RTO timer recovery, BBR
+    /// congestion control, token-bucket pacing, fair-queue credit, and FEC encoding.
+    ///
+    /// All protocol state mutation happens under <c>_sync</c> lock.
+    /// Inbound packet processing is dispatched through the per-connection
+    /// SerialQueue to avoid lock contention between API calls and network events.
+    ///
+    /// Data delivery to the application fires the DataReceived event when
+    /// consecutive in-order segments become available (no batching delay).
+    /// </summary>
     internal sealed class UcpPcb : IDisposable
     {
+        /// <summary>Tracks a single outbound data segment in the send buffer.</summary>
         private sealed class OutboundSegment
         {
             public uint SequenceNumber;
@@ -20,11 +35,15 @@ namespace Ucp.Internal
             public bool InFlight;
             public bool Acked;
             public bool NeedsRetransmit;
+            /// <summary>Count of times this segment was seen as missing in SACK blocks.</summary>
             public int MissingAckCount;
+            /// <summary>Number of times transmitted (0 = never sent).</summary>
             public int SendCount;
+            /// <summary>Microsecond timestamp of the most recent send.</summary>
             public long LastSendMicros;
         }
 
+        /// <summary>Deduplicated loss event tracked for congestion classification.</summary>
         private sealed class LossEvent
         {
             public uint SequenceNumber;
