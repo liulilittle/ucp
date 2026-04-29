@@ -29,6 +29,11 @@ namespace Ucp
                 return EncodeNak((UcpNakPacket)packet);
             }
 
+            if (packet is UcpFecRepairPacket)
+            {
+                return EncodeFecRepair((UcpFecRepairPacket)packet);
+            }
+
             if (packet is UcpControlPacket)
             {
                 return EncodeControl((UcpControlPacket)packet);
@@ -57,6 +62,8 @@ namespace Ucp
                     return TryDecodeData(buffer, offset, count, header, out packet);
                 case UcpPacketType.Ack:
                     return TryDecodeAck(buffer, offset, count, header, out packet);
+                case UcpPacketType.FecRepair:
+                    return TryDecodeFecRepair(buffer, offset, count, header, out packet);
                 case UcpPacketType.Nak:
                     return TryDecodeNak(buffer, offset, count, header, out packet);
                 case UcpPacketType.Syn:
@@ -331,6 +338,53 @@ namespace Ucp
                 | ((ulong)buffer[offset + 4] << UcpConstants.BYTE_BITS)
                 | buffer[offset + 5];
             return (long)value;
+        }
+
+        private static byte[] EncodeFecRepair(UcpFecRepairPacket packet)
+        {
+            int payloadLen = packet.Payload == null ? 0 : packet.Payload.Length;
+            byte[] bytes = new byte[UcpConstants.CommonHeaderSize + sizeof(uint) + sizeof(byte) + payloadLen];
+            WriteCommonHeader(packet.Header, bytes, 0);
+            WriteUInt32(packet.GroupId, bytes, UcpConstants.CommonHeaderSize);
+            bytes[UcpConstants.CommonHeaderSize + sizeof(uint)] = packet.GroupIndex;
+            if (payloadLen > 0)
+            {
+                Buffer.BlockCopy(packet.Payload, 0, bytes, UcpConstants.CommonHeaderSize + sizeof(uint) + sizeof(byte), payloadLen);
+            }
+
+            return bytes;
+        }
+
+        private static bool TryDecodeFecRepair(byte[] buffer, int offset, int count, UcpCommonHeader header, out UcpPacket packet)
+        {
+            packet = null;
+            if (count < UcpConstants.CommonHeaderSize + sizeof(uint) + sizeof(byte))
+            {
+                return false;
+            }
+
+            UcpFecRepairPacket repair = new UcpFecRepairPacket();
+            repair.Header = header;
+            repair.GroupId = ReadUInt32(buffer, offset + UcpConstants.CommonHeaderSize);
+            repair.GroupIndex = buffer[offset + UcpConstants.CommonHeaderSize + sizeof(uint)];
+            int payloadLen = count - (UcpConstants.CommonHeaderSize + sizeof(uint) + sizeof(byte));
+            if (payloadLen < 0)
+            {
+                return false;
+            }
+
+            if (payloadLen > 0)
+            {
+                repair.Payload = new byte[payloadLen];
+                Buffer.BlockCopy(buffer, offset + UcpConstants.CommonHeaderSize + sizeof(uint) + sizeof(byte), repair.Payload, 0, payloadLen);
+            }
+            else
+            {
+                repair.Payload = null;
+            }
+
+            packet = repair;
+            return true;
         }
     }
 }

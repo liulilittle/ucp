@@ -43,6 +43,8 @@ namespace Ucp
         public bool LossControlEnable = true;
         public bool EnableDebugLog = false;
         internal bool EnableAggressiveSackRecovery = false;
+        public double FecRedundancy = 0.0d;
+        public int FecGroupSize = 8;
 
         public int SendBufferSize
         {
@@ -300,6 +302,8 @@ namespace Ucp
             target.LossControlEnable = LossControlEnable;
             target.EnableDebugLog = EnableDebugLog;
             target.EnableAggressiveSackRecovery = EnableAggressiveSackRecovery;
+            target.FecRedundancy = FecRedundancy;
+            target.FecGroupSize = FecGroupSize;
         }
     }
 

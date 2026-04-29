@@ -47,4 +47,11 @@ namespace Ucp
     {
         public List<uint> MissingSequences = new List<uint>();
     }
+
+    internal sealed class UcpFecRepairPacket : UcpPacket
+    {
+        public uint GroupId;
+        public byte GroupIndex;
+        public byte[] Payload;
+    }
 }

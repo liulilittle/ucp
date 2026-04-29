@@ -355,6 +355,15 @@ namespace UcpTest
                 return false;
             }
 
+            if (parsedReports.All(delegate (UcpPerformanceReport r) { return r.ScenarioName != "Mobile3G"; })
+                || parsedReports.All(delegate (UcpPerformanceReport r) { return r.ScenarioName != "Mobile4G"; })
+                || parsedReports.All(delegate (UcpPerformanceReport r) { return r.ScenarioName != "Satellite"; })
+                || parsedReports.All(delegate (UcpPerformanceReport r) { return r.ScenarioName != "VpnTunnel"; }))
+            {
+                errorMessage = "Report is missing one or more production mobile/satellite/VPN scenarios.";
+                return false;
+            }
+
             errorMessage = string.Empty;
             return true;
         }
@@ -671,6 +680,26 @@ namespace UcpTest
             if (scenarioName == "Weak4G")
             {
                 return 150;
+            }
+
+            if (scenarioName == "Mobile3G")
+            {
+                return 160;
+            }
+
+            if (scenarioName == "Mobile4G")
+            {
+                return 170;
+            }
+
+            if (scenarioName == "Satellite")
+            {
+                return 180;
+            }
+
+            if (scenarioName == "VpnTunnel")
+            {
+                return 190;
             }
 
             return 1000;

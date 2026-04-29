@@ -522,6 +522,18 @@ namespace Ucp
         /// <summary>Jitter threshold (ms) for classifying mobile/unstable networks.</summary>
         public const double NETWORK_CLASSIFIER_MOBILE_JITTER_MS = 20d;
 
+        /// <summary>Port offset for the mobile 3G benchmark.</summary>
+        public const int BENCHMARK_PORT_OFFSET_MOBILE_3G = 14;
+
+        /// <summary>Port offset for the mobile 4G high-jitter benchmark.</summary>
+        public const int BENCHMARK_PORT_OFFSET_MOBILE_4G = 15;
+
+        /// <summary>Port offset for the satellite benchmark.</summary>
+        public const int BENCHMARK_PORT_OFFSET_SATELLITE = 16;
+
+        /// <summary>Port offset for the VPN dual-congestion benchmark.</summary>
+        public const int BENCHMARK_PORT_OFFSET_VPN = 17;
+
         /// <summary>RTT threshold (ms) for classifying low-latency LAN.</summary>
         public const double NETWORK_CLASSIFIER_LAN_RTT_MS = 5d;
 
@@ -698,6 +710,9 @@ namespace Ucp
 
         /// <summary>Encoded UCP FIN packet type value.</summary>
         public const byte UCP_FIN_TYPE_VALUE = 0x06;
+
+        /// <summary>Encoded UCP FEC repair packet type value.</summary>
+        public const byte UCP_FEC_REPAIR_TYPE_VALUE = 0x08;
 
         /// <summary>Encoded UCP RST packet type value.</summary>
         public const byte UCP_RST_TYPE_VALUE = 0x07;

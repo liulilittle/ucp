@@ -9,6 +9,7 @@ namespace Ucp
         Ack = UcpConstants.UCP_ACK_TYPE_VALUE,
         Nak = UcpConstants.UCP_NAK_TYPE_VALUE,
         Data = UcpConstants.UCP_DATA_TYPE_VALUE,
+        FecRepair = 0x08,
         Fin = UcpConstants.UCP_FIN_TYPE_VALUE,
         Rst = UcpConstants.UCP_RST_TYPE_VALUE
     }
