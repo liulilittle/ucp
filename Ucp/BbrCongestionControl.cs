@@ -323,14 +323,12 @@ namespace Ucp
                 return;
             }
 
-            PacingGain = Math.Max(UcpConstants.BBR_MIN_CONGESTION_PACING_GAIN, PacingGain * UcpConstants.BBR_CONGESTION_LOSS_REDUCTION);
-            _lossCwndGain = Math.Max(UcpConstants.BBR_MIN_LOSS_CWND_GAIN, _lossCwndGain * UcpConstants.BBR_CONGESTION_LOSS_REDUCTION);
             if (Mode == BbrMode.ProbeBw)
             {
-                PacingGain = Math.Min(PacingGain, CalculatePacingGain(nowMicros));
+                PacingGain = Math.Max(PacingGain, CalculatePacingGain(nowMicros));
             }
 
-            TraceLog("CongestionLoss lossRate=" + lossRate.ToString("F4") + " pacingGain=" + PacingGain.ToString("F2"));
+            TraceLog("LossSignal lossRate=" + lossRate.ToString("F4") + " pacingGain=" + PacingGain.ToString("F2"));
             RecalculateModel(nowMicros);
         }
 

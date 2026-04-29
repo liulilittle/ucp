@@ -702,6 +702,16 @@ namespace UcpTest
                 return 190;
             }
 
+            if (scenarioName == "DataCenter")
+            {
+                return 200;
+            }
+
+            if (scenarioName == "Enterprise")
+            {
+                return 210;
+            }
+
             return 1000;
         }
 

@@ -1020,6 +1020,14 @@ namespace Ucp.Internal
                 return true;
             }
 
+            uint distancePastHole = unchecked(highestSack - segment.SequenceNumber);
+            if (distancePastHole >= UcpConstants.SACK_FAST_RETRANSMIT_DISTANCE_THRESHOLD
+                && segment.SequenceNumber == firstMissingSequence
+                && segment.MissingAckCount >= UcpConstants.SACK_FAST_RETRANSMIT_THRESHOLD)
+            {
+                return true;
+            }
+
             return false;
         }
 

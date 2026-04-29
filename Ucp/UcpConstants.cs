@@ -534,6 +534,10 @@ namespace Ucp
         /// <summary>Port offset for the VPN dual-congestion benchmark.</summary>
         public const int BENCHMARK_PORT_OFFSET_VPN = 17;
 
+        public const int BENCHMARK_PORT_OFFSET_DATACENTER = 18;
+
+        public const int BENCHMARK_PORT_OFFSET_ENTERPRISE = 19;
+
         /// <summary>RTT threshold (ms) for classifying low-latency LAN.</summary>
         public const double NETWORK_CLASSIFIER_LAN_RTT_MS = 5d;
 
@@ -604,7 +608,7 @@ namespace Ucp
         public const int SACK_FAST_RETRANSMIT_THRESHOLD = 2;
 
         /// <summary>Minimum SACK distance past a missing sequence before treating the hole as real loss.</summary>
-        public const int SACK_FAST_RETRANSMIT_DISTANCE_THRESHOLD = 3;
+        public const int SACK_FAST_RETRANSMIT_DISTANCE_THRESHOLD = 20;
 
         /// <summary>Lower bound for SACK-based reorder grace before fast retransmit, in microseconds.</summary>
         public const long SACK_FAST_RETRANSMIT_MIN_REORDER_GRACE_MICROS = 5000L;

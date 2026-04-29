@@ -1140,6 +1140,44 @@ namespace UcpTest
         }
 
         [Fact]
+        public async Task Integration_DataCenter_LowLatencyHighBW()
+        {
+            UcpPerformanceReport report = await RunLineRateBenchmarkAsync(
+                "DataCenter",
+                UcpConstants.BENCHMARK_BASE_PORT + UcpConstants.BENCHMARK_PORT_OFFSET_DATACENTER,
+                UcpConstants.BENCHMARK_10_GBPS_BYTES_PER_SECOND,
+                UcpConstants.BENCHMARK_10G_PAYLOAD_BYTES,
+                0,
+                0,
+                0d,
+                UcpConstants.DEFAULT_MAX_BANDWIDTH_LOSS_PERCENT,
+                false,
+                0,
+                null);
+
+            Assert.True(report.UtilizationPercent > 40d);
+        }
+
+        [Fact]
+        public async Task Integration_EnterpriseBroadband_ModerateRtt()
+        {
+            UcpPerformanceReport report = await RunLineRateBenchmarkAsync(
+                "Enterprise",
+                UcpConstants.BENCHMARK_BASE_PORT + UcpConstants.BENCHMARK_PORT_OFFSET_ENTERPRISE,
+                UcpConstants.BENCHMARK_1_GBPS_BYTES_PER_SECOND,
+                UcpConstants.BENCHMARK_1G_PAYLOAD_BYTES,
+                15,
+                3,
+                0.001d,
+                UcpConstants.DEFAULT_MAX_BANDWIDTH_LOSS_PERCENT,
+                false,
+                20260606,
+                CreateInitialDataDropRule(0.001d, 20260606));
+
+            Assert.True(report.UtilizationPercent > 30d);
+        }
+
+        [Fact]
         public async Task SendAsync_MayReturnPartialWhenSendBufferIsFull()
         {
             UcpConfiguration config = new UcpConfiguration();
