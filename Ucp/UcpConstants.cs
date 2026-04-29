@@ -132,6 +132,9 @@ namespace Ucp
         /// <summary>Maximum retransmission attempts per outbound segment.</summary>
         public const int MAX_RETRANSMISSIONS = 10;
 
+        /// <summary>Maximum timeout retransmits armed by one timer tick.</summary>
+        public const int RTO_RETRANSMIT_BUDGET_PER_TICK = 1;
+
         /// <summary>RTT variance EWMA denominator for RFC6298-style smoothing.</summary>
         public const int RTT_VAR_DENOM = 4;
 
@@ -276,6 +279,9 @@ namespace Ucp
         /// <summary>Classifier score assigned to moderate recent loss while RTT is also growing.</summary>
         public const int BBR_CONGESTION_LOSS_SCORE = 1;
 
+        /// <summary>Maximum rate-derived loss contribution beyond measured retransmission loss.</summary>
+        public const double BBR_RATE_LOSS_HINT_MAX_RATIO = 0.05d;
+
         /// <summary>Maximum startup delivery-rate sample multiplier relative to the active pacing rate.</summary>
         public const double BBR_STARTUP_ACK_AGGREGATION_RATE_CAP_GAIN = 4.0d;
 
@@ -283,10 +289,16 @@ namespace Ucp
         public const double BBR_STEADY_ACK_AGGREGATION_RATE_CAP_GAIN = 1.50d;
 
         /// <summary>Maximum bottleneck-bandwidth growth per RTT while in Startup.</summary>
-        public const double BBR_STARTUP_BANDWIDTH_GROWTH_PER_ROUND = 1.50d;
+        public const double BBR_STARTUP_BANDWIDTH_GROWTH_PER_ROUND = 2.0d;
 
         /// <summary>Maximum bottleneck-bandwidth growth per RTT after Startup.</summary>
-        public const double BBR_STEADY_BANDWIDTH_GROWTH_PER_ROUND = 1.15d;
+        public const double BBR_STEADY_BANDWIDTH_GROWTH_PER_ROUND = 1.25d;
+
+        /// <summary>RTT multiplier above which a loss signal is eligible for congestion classification.</summary>
+        public const double BBR_CONGESTION_LOSS_RTT_MULTIPLIER = 1.10d;
+
+        /// <summary>Minimum missing packet count in one loss report before NAK loss is treated as clustered.</summary>
+        public const int BBR_CONGESTION_LOSS_BURST_THRESHOLD = 3;
 
         /// <summary>Fallback bandwidth-growth interval before a valid RTT sample is available.</summary>
         public const long BBR_BANDWIDTH_GROWTH_FALLBACK_INTERVAL_MICROS = 10000L;
@@ -328,10 +340,10 @@ namespace Ucp
         public const int BENCHMARK_NO_LOSS_INITIAL_CWND_BANDWIDTH_DIVISOR = 16;
 
         /// <summary>Initial congestion-window gain relative to estimated BDP for lossy benchmarks.</summary>
-        public const double BENCHMARK_LOSS_INITIAL_CWND_BDP_GAIN = 0.25d;
+        public const double BENCHMARK_LOSS_INITIAL_CWND_BDP_GAIN = 1.0d;
 
         /// <summary>Maximum initial congestion window used by random-loss benchmarks, in bytes.</summary>
-        public const int BENCHMARK_MAX_LOSS_INITIAL_CWND_BYTES = 512 * 1024;
+        public const int BENCHMARK_MAX_LOSS_INITIAL_CWND_BYTES = 4 * 1024 * 1024;
 
         /// <summary>Minimum RTO used by long-fat-pipe benchmarks to avoid simulator serialization false positives.</summary>
         public const long BENCHMARK_LONG_FAT_MIN_RTO_MICROS = MICROS_PER_SECOND;
@@ -390,6 +402,9 @@ namespace Ucp
         /// <summary>Port offset for the burst-loss benchmark.</summary>
         public const int BENCHMARK_PORT_OFFSET_BURST_LOSS = 5;
 
+        /// <summary>Port offset for the asymmetric route benchmark.</summary>
+        public const int BENCHMARK_PORT_OFFSET_ASYM_ROUTE = 6;
+
         /// <summary>Fixed one-way delay for the 100 Mbps benchmark, in milliseconds.</summary>
         public const int BENCHMARK_100M_DELAY_MILLISECONDS = 5;
 
@@ -422,6 +437,21 @@ namespace Ucp
 
         /// <summary>Jitter for the burst-loss benchmark, in milliseconds.</summary>
         public const int BENCHMARK_BURST_LOSS_JITTER_MILLISECONDS = 4;
+
+        /// <summary>Forward one-way delay for the asymmetric route benchmark, in milliseconds.</summary>
+        public const int BENCHMARK_ASYM_FORWARD_DELAY_MILLISECONDS = 30;
+
+        /// <summary>Backward one-way delay for the asymmetric route benchmark, in milliseconds.</summary>
+        public const int BENCHMARK_ASYM_BACKWARD_DELAY_MILLISECONDS = 10;
+
+        /// <summary>Per-direction jitter for the asymmetric route benchmark, in milliseconds.</summary>
+        public const int BENCHMARK_ASYM_JITTER_MILLISECONDS = 8;
+
+        /// <summary>Random data loss rate used by the asymmetric route benchmark.</summary>
+        public const double BENCHMARK_ASYM_RANDOM_LOSS_RATE = 0.005d;
+
+        /// <summary>Deterministic random seed used by asymmetric route benchmark data drops.</summary>
+        public const int BENCHMARK_ASYM_RANDOM_LOSS_SEED = 20260503;
 
         /// <summary>Light random data loss rate used by benchmark scenarios.</summary>
         public const double BENCHMARK_LIGHT_RANDOM_LOSS_RATE = 0.01d;
@@ -481,10 +511,22 @@ namespace Ucp
         public const int DUPLICATE_ACK_THRESHOLD = 5;
 
         /// <summary>Missing observation count needed before the receiver sends a NAK.</summary>
-        public const int NAK_MISSING_THRESHOLD = 12;
+        public const int NAK_MISSING_THRESHOLD = 4;
 
         /// <summary>Minimum packet-age delay before receiver NAKs a missing sequence, in microseconds.</summary>
-        public const long NAK_REORDER_GRACE_MICROS = 20000L;
+        public const long NAK_REORDER_GRACE_MICROS = 60000L;
+
+        /// <summary>Missing observation count that makes a gap high-confidence despite reorder grace.</summary>
+        public const int NAK_HIGH_CONFIDENCE_MISSING_THRESHOLD = 256;
+
+        /// <summary>Minimum packet-age delay for high-confidence missing gaps, in microseconds.</summary>
+        public const long NAK_HIGH_CONFIDENCE_REORDER_GRACE_MICROS = 5000L;
+
+        /// <summary>Missing observation count that makes a gap more likely to be real loss than jitter.</summary>
+        public const int NAK_MEDIUM_CONFIDENCE_MISSING_THRESHOLD = 64;
+
+        /// <summary>Minimum packet-age delay for medium-confidence missing gaps, in microseconds.</summary>
+        public const long NAK_MEDIUM_CONFIDENCE_REORDER_GRACE_MICROS = 20000L;
 
         /// <summary>Minimum interval before the receiver may re-emit a NAK for the same missing sequence.</summary>
         public const long NAK_REPEAT_INTERVAL_MICROS = 250000L;
@@ -493,13 +535,16 @@ namespace Ucp
         public const int MAX_NAK_MISSING_SCAN = 4096;
 
         /// <summary>Maximum missing sequences included in one NAK packet.</summary>
-        public const int MAX_NAK_SEQUENCES_PER_PACKET = 4;
+        public const int MAX_NAK_SEQUENCES_PER_PACKET = 64;
 
         /// <summary>Maximum SACK blocks emitted by default.</summary>
         public const int DEFAULT_ACK_SACK_BLOCK_LIMIT = 32;
 
         /// <summary>Receive-buffer occupancy that forces an immediate ACK, measured in packets.</summary>
         public const int IMMEDIATE_ACK_REORDERED_PACKET_THRESHOLD = 4;
+
+        /// <summary>Minimum spacing between immediate reordered-data ACKs, in microseconds.</summary>
+        public const long REORDERED_ACK_MIN_INTERVAL_MICROS = 2000L;
 
         /// <summary>Default keep-alive interval in microseconds.</summary>
         public const long KEEP_ALIVE_INTERVAL_MICROS = MICROS_PER_SECOND;

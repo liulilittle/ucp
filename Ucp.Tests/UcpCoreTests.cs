@@ -235,8 +235,8 @@ namespace UcpTest
                 bool readOk = await ReadWithinAsync(serverConnection, received, 0, received.Length, 5000);
                 await WaitForAckSettlementAsync(client, 1000);
                 double elapsedSeconds = Math.Max(0.001d, (DateTime.UtcNow - start).TotalSeconds);
-                double throughput = simulator.LogicalThroughputBytesPerSecond > 0 ? simulator.LogicalThroughputBytesPerSecond : payload.Length / elapsedSeconds;
-                UcpPerformanceReport noLossReport = UcpPerformanceReport.FromConnection("NoLoss", client, throughput, (long)(elapsedSeconds * 1000d), noLossBandwidth);
+                double throughput = Math.Max(simulator.LogicalThroughputBytesPerSecond, payload.Length / elapsedSeconds);
+                UcpPerformanceReport noLossReport = UcpPerformanceReport.FromConnection("NoLoss", client, throughput, (long)(elapsedSeconds * 1000d), noLossBandwidth, simulator.AverageForwardDelayMicros, simulator.AverageReverseDelayMicros);
                 UcpPerformanceReport.Append(UcpTestHelpers.ReportPath, noLossReport);
 
                 _output.WriteLine("NoLoss delivered packets={0}, bytes={1}", simulator.DeliveredPackets, simulator.DeliveredBytes);
@@ -303,7 +303,7 @@ namespace UcpTest
                 bool readOk = await ReadWithinAsync(serverConnection, received, 0, received.Length, 8000);
                 await WaitForAckSettlementAsync(client, 1000);
                 double elapsedSeconds = Math.Max(0.001d, (DateTime.UtcNow - start).TotalSeconds);
-                UcpPerformanceReport lossyReport = UcpPerformanceReport.FromConnection("Lossy", client, payload.Length / elapsedSeconds, (long)(elapsedSeconds * 1000d), lossyBandwidth);
+                UcpPerformanceReport lossyReport = UcpPerformanceReport.FromConnection("Lossy", client, payload.Length / elapsedSeconds, (long)(elapsedSeconds * 1000d), lossyBandwidth, simulator.AverageForwardDelayMicros, simulator.AverageReverseDelayMicros);
                 UcpPerformanceReport.Append(UcpTestHelpers.ReportPath, lossyReport);
 
                 _output.WriteLine("Lossy dropped={0}, delivered={1}", simulator.DroppedPackets, simulator.DeliveredPackets);
@@ -445,7 +445,7 @@ namespace UcpTest
             double throughput = payload.Length / Math.Max(0.001d, (DateTime.UtcNow - start).TotalSeconds);
 
             _output.WriteLine("HighLoss RTT scenario throughput={0:F2} B/s, dropped={1}", throughput, simulator.DroppedPackets);
-            UcpPerformanceReport highLossReport = UcpPerformanceReport.FromConnection("HighLossHighRtt", client, throughput, (long)((DateTime.UtcNow - start).TotalMilliseconds), highLossBandwidth);
+            UcpPerformanceReport highLossReport = UcpPerformanceReport.FromConnection("HighLossHighRtt", client, throughput, (long)((DateTime.UtcNow - start).TotalMilliseconds), highLossBandwidth, simulator.AverageForwardDelayMicros, simulator.AverageReverseDelayMicros);
             UcpPerformanceReport.Append(UcpTestHelpers.ReportPath, highLossReport);
 
             Assert.True(writeOk);
@@ -487,7 +487,7 @@ namespace UcpTest
             double theoretical = bandwidth;
 
             _output.WriteLine("LongFatPipe throughput={0:F2} B/s, utilization={1:P2}", throughput, throughput / theoretical);
-            UcpPerformanceReport longFatPipeReport = UcpPerformanceReport.FromConnection("LongFatPipe", client, throughput, (long)(elapsedSeconds * 1000d), bandwidth);
+            UcpPerformanceReport longFatPipeReport = UcpPerformanceReport.FromConnection("LongFatPipe", client, throughput, (long)(elapsedSeconds * 1000d), bandwidth, simulator.AverageForwardDelayMicros, simulator.AverageReverseDelayMicros);
             UcpPerformanceReport.Append(UcpTestHelpers.ReportPath, longFatPipeReport);
 
             Assert.True(writeOk);
@@ -662,7 +662,7 @@ namespace UcpTest
                 Assert.True(readOk);
                 Assert.True(payload.SequenceEqual(received));
                 Assert.True(throughput <= bandwidth * 1.5d);
-                UcpPerformanceReport pacingReport = UcpPerformanceReport.FromConnection("Pacing", serverConnection, throughput, (long)(elapsedSeconds * 1000d), bandwidth);
+                UcpPerformanceReport pacingReport = UcpPerformanceReport.FromConnection("Pacing", serverConnection, throughput, (long)(elapsedSeconds * 1000d), bandwidth, simulator.AverageForwardDelayMicros, simulator.AverageReverseDelayMicros);
                 UcpPerformanceReport.Append(UcpTestHelpers.ReportPath, pacingReport);
                 Assert.InRange(pacingReport.PacingRateBytesPerSecond, bandwidth * 0.70d, bandwidth * 1.30d);
             }
@@ -843,6 +843,32 @@ namespace UcpTest
         }
 
         [Fact]
+        public async Task Integration_AsymmetricRoute_HandlesWell()
+        {
+            UcpPerformanceReport report = await RunLineRateBenchmarkAsync(
+                "AsymRoute",
+                UcpConstants.BENCHMARK_BASE_PORT + UcpConstants.BENCHMARK_PORT_OFFSET_ASYM_ROUTE,
+                UcpConstants.BENCHMARK_100_MBPS_BYTES_PER_SECOND,
+                UcpConstants.BENCHMARK_100M_PAYLOAD_BYTES,
+                0,
+                0,
+                UcpConstants.BENCHMARK_ASYM_RANDOM_LOSS_RATE,
+                UcpConstants.DEFAULT_MAX_BANDWIDTH_LOSS_PERCENT,
+                false,
+                UcpConstants.BENCHMARK_ASYM_RANDOM_LOSS_SEED,
+                CreateInitialDataDropRule(UcpConstants.BENCHMARK_ASYM_RANDOM_LOSS_RATE, UcpConstants.BENCHMARK_ASYM_RANDOM_LOSS_SEED),
+                UcpConstants.BENCHMARK_ASYM_FORWARD_DELAY_MILLISECONDS,
+                UcpConstants.BENCHMARK_ASYM_BACKWARD_DELAY_MILLISECONDS,
+                UcpConstants.BENCHMARK_ASYM_JITTER_MILLISECONDS,
+                UcpConstants.BENCHMARK_ASYM_JITTER_MILLISECONDS);
+
+            Assert.True(report.ForwardDelayMilliseconds >= UcpConstants.BENCHMARK_ASYM_FORWARD_DELAY_MILLISECONDS - UcpConstants.BENCHMARK_ASYM_JITTER_MILLISECONDS);
+            Assert.True(report.ReverseDelayMilliseconds <= UcpConstants.BENCHMARK_ASYM_BACKWARD_DELAY_MILLISECONDS + UcpConstants.BENCHMARK_ASYM_JITTER_MILLISECONDS);
+            Assert.True(report.RetransmissionPercent <= UcpConstants.DEFAULT_MAX_BANDWIDTH_LOSS_PERCENT);
+            Assert.True(report.PacingRateBytesPerSecond >= UcpConstants.BENCHMARK_100_MBPS_BYTES_PER_SECOND * UcpConstants.BENCHMARK_MIN_CONVERGED_PACING_RATIO);
+        }
+
+        [Fact]
         public async Task SendAsync_MayReturnPartialWhenSendBufferIsFull()
         {
             UcpConfiguration config = new UcpConfiguration();
@@ -947,15 +973,22 @@ namespace UcpTest
 
         private async Task<UcpPerformanceReport> RunLineRateBenchmarkAsync(string scenarioName, int port, int bandwidthBytesPerSecond, int payloadBytes, int fixedDelayMilliseconds, int jitterMilliseconds, double lossRate, double maxLossPercent, bool autoProbe, int simulatorSeed, Func<NetworkSimulator.SimulatedDatagram, bool>? dropRule)
         {
-            NetworkSimulator simulator = new NetworkSimulator(lossRate: dropRule == null ? lossRate : 0d, fixedDelayMilliseconds: fixedDelayMilliseconds, jitterMilliseconds: jitterMilliseconds, bandwidthBytesPerSecond: bandwidthBytesPerSecond, seed: simulatorSeed == 0 ? 1234 : simulatorSeed, dropRule: dropRule);
+            return await RunLineRateBenchmarkAsync(scenarioName, port, bandwidthBytesPerSecond, payloadBytes, fixedDelayMilliseconds, jitterMilliseconds, lossRate, maxLossPercent, autoProbe, simulatorSeed, dropRule, -1, -1, -1, -1).ConfigureAwait(false);
+        }
+
+        private async Task<UcpPerformanceReport> RunLineRateBenchmarkAsync(string scenarioName, int port, int bandwidthBytesPerSecond, int payloadBytes, int fixedDelayMilliseconds, int jitterMilliseconds, double lossRate, double maxLossPercent, bool autoProbe, int simulatorSeed, Func<NetworkSimulator.SimulatedDatagram, bool>? dropRule, int forwardDelayMilliseconds, int backwardDelayMilliseconds, int forwardJitterMilliseconds, int backwardJitterMilliseconds)
+        {
+            NetworkSimulator simulator = new NetworkSimulator(lossRate: dropRule == null ? lossRate : 0d, fixedDelayMilliseconds: fixedDelayMilliseconds, jitterMilliseconds: jitterMilliseconds, bandwidthBytesPerSecond: bandwidthBytesPerSecond, seed: simulatorSeed == 0 ? 1234 : simulatorSeed, dropRule: dropRule, forwardDelayMilliseconds: forwardDelayMilliseconds, backwardDelayMilliseconds: backwardDelayMilliseconds, forwardJitterMilliseconds: forwardJitterMilliseconds, backwardJitterMilliseconds: backwardJitterMilliseconds);
             UcpConfiguration config = CreateScenarioConfig(bandwidthBytesPerSecond);
             config.MaxBandwidthLossPercent = maxLossPercent <= 0 ? UcpConstants.DEFAULT_MAX_BANDWIDTH_LOSS_PERCENT : maxLossPercent;
-            int estimatedRttMicros = (int)Math.Max(UcpConstants.MICROS_PER_MILLI, fixedDelayMilliseconds * UcpConstants.BENCHMARK_RTT_PATH_MULTIPLIER * UcpConstants.MICROS_PER_MILLI);
+            int effectiveForwardDelayMilliseconds = forwardDelayMilliseconds >= 0 ? forwardDelayMilliseconds : fixedDelayMilliseconds;
+            int effectiveBackwardDelayMilliseconds = backwardDelayMilliseconds >= 0 ? backwardDelayMilliseconds : fixedDelayMilliseconds;
+            int estimatedRttMicros = (int)Math.Max(UcpConstants.MICROS_PER_MILLI, (effectiveForwardDelayMilliseconds + effectiveBackwardDelayMilliseconds) * UcpConstants.MICROS_PER_MILLI);
             int estimatedBdpBytes = (int)Math.Min(int.MaxValue, bandwidthBytesPerSecond * (estimatedRttMicros / (double)UcpConstants.MICROS_PER_SECOND));
             bool hasConfiguredLoss = lossRate > 0 || dropRule != null;
             int initialCwndBytes = CalculateBenchmarkInitialCwndBytes(config, bandwidthBytesPerSecond, estimatedBdpBytes, hasConfiguredLoss);
             config.InitialCwndBytes = (uint)initialCwndBytes;
-            if (fixedDelayMilliseconds >= UcpConstants.BENCHMARK_LONG_FAT_DELAY_MILLISECONDS)
+            if (fixedDelayMilliseconds >= UcpConstants.BENCHMARK_LONG_FAT_DELAY_MILLISECONDS || estimatedRttMicros >= UcpConstants.DEFAULT_RTO_MICROS)
             {
                 config.MinRtoMicros = UcpConstants.BENCHMARK_LONG_FAT_MIN_RTO_MICROS;
             }
@@ -983,12 +1016,12 @@ namespace UcpTest
                 await WaitForAckSettlementAsync(client, UcpConstants.BENCHMARK_ACK_SETTLEMENT_TIMEOUT_MILLISECONDS);
                 double elapsedSeconds = Math.Max(0.001d, (DateTime.UtcNow - start).TotalSeconds);
                 double throughput = simulator.LogicalThroughputBytesPerSecond > 0 ? simulator.LogicalThroughputBytesPerSecond : payload.Length / elapsedSeconds;
-                UcpPerformanceReport report = UcpPerformanceReport.FromConnection(scenarioName, client, throughput, (long)(elapsedSeconds * UcpConstants.MICROS_PER_MILLI), bandwidthBytesPerSecond);
+                UcpPerformanceReport report = UcpPerformanceReport.FromConnection(scenarioName, client, throughput, (long)(elapsedSeconds * UcpConstants.MICROS_PER_MILLI), bandwidthBytesPerSecond, simulator.AverageForwardDelayMicros, simulator.AverageReverseDelayMicros);
                 UcpTransferReport receiverReport = serverConnection.GetReport();
                 report.ConvergenceMilliseconds = EstimateConvergenceMilliseconds(report, bandwidthBytesPerSecond, elapsedSeconds);
                 UcpPerformanceReport.Append(UcpTestHelpers.ReportPath, report);
 
-                _output.WriteLine("{0} throughput={1:F2}Mbps target={2:F2}Mbps util={3:F2}% pacing={4:F2}Mbps cwnd={5} loss={6:F2}% retrans={7:F2}% avgRtt={8:F2}ms jitter={9:F2}ms convergence={10}ms dropped={11}",
+                _output.WriteLine("{0} throughput={1:F2}Mbps target={2:F2}Mbps util={3:F2}% pacing={4:F2}Mbps cwnd={5} loss={6:F2}% retrans={7:F2}% avgRtt={8:F2}ms jitter={9:F2}ms convergence={10}ms elapsed={11}ms dropped={12}",
                     scenarioName,
                     report.ThroughputMbps,
                     report.TargetMbps,
@@ -1000,6 +1033,7 @@ namespace UcpTest
                     report.AverageRttMilliseconds,
                     report.JitterMilliseconds,
                     report.ConvergenceMilliseconds,
+                    report.ElapsedMilliseconds,
                     simulator.DroppedPackets);
                 _output.WriteLine("{0} packets data={1} retrans={2} ack={3} nak={4} fast={5} timeout={6}",
                     scenarioName,

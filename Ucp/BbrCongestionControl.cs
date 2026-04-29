@@ -242,10 +242,18 @@ namespace Ucp
 
             double recentLossRate = GetRecentLossRatio(nowMicros);
             lossRate = isCongestion ? Math.Max(lossRate, recentLossRate) : recentLossRate;
+            _networkCondition = ClassifyNetworkCondition(nowMicros);
             UpdateEstimatedLossPercent(nowMicros, lossRate * 100d);
-            if (!isCongestion)
+            if (!ShouldTreatLossAsCongestion(nowMicros, isCongestion))
             {
                 TraceLog("RandomLoss lossRate=" + lossRate.ToString("F4"));
+                _fastRecoveryEnteredMicros = nowMicros;
+                if (Mode == BbrMode.ProbeBw)
+                {
+                    PacingGain = Math.Max(PacingGain, CalculatePacingGain(nowMicros));
+                    RecalculateModel(nowMicros);
+                }
+
                 return;
             }
 
@@ -556,6 +564,21 @@ namespace Ucp
                 return UcpConstants.BBR_PROBE_RTT_PACING_GAIN;
             }
 
+            if (_networkCondition == NetworkCondition.RandomLoss)
+            {
+                if (rttIncrease < UcpConstants.BBR_LOW_RTT_INCREASE_RATIO)
+                {
+                    return _config.ProbeBwHighGain;
+                }
+
+                if (rttIncrease < UcpConstants.BBR_MODERATE_RTT_INCREASE_RATIO)
+                {
+                    return UcpConstants.BBR_MODERATE_PROBE_GAIN;
+                }
+
+                return 1d;
+            }
+
             if (lossRatio < UcpConstants.BBR_LOW_LOSS_RATIO && rttIncrease < UcpConstants.BBR_LOW_RTT_INCREASE_RATIO)
             {
                 return _config.ProbeBwHighGain;
@@ -618,7 +641,8 @@ namespace Ucp
 
             double actualRate = _deliveryRateBytesPerSecond;
             double lossFromRate = Math.Max(0d, 1d - (actualRate / targetRate));
-            return Math.Max(lossFromRate, retransmissionLoss) * 100d;
+            double rateLossHint = Math.Min(lossFromRate, retransmissionLoss + UcpConstants.BBR_RATE_LOSS_HINT_MAX_RATIO);
+            return Math.Max(rateLossHint, retransmissionLoss) * 100d;
         }
 
         private NetworkCondition ClassifyNetworkCondition(long nowMicros)
@@ -667,6 +691,23 @@ namespace Ucp
             }
 
             return NetworkCondition.Idle;
+        }
+
+        private bool ShouldTreatLossAsCongestion(long nowMicros, bool isCongestionSignal)
+        {
+            if (!isCongestionSignal)
+            {
+                return false;
+            }
+
+            if (_networkCondition == NetworkCondition.Congested)
+            {
+                return true;
+            }
+
+            double rttIncrease = GetAverageRttIncreaseRatio();
+            double lossRatio = GetRecentLossRatio(nowMicros);
+            return rttIncrease >= UcpConstants.BBR_MODERATE_RTT_INCREASE_RATIO && lossRatio >= UcpConstants.BBR_MODERATE_LOSS_RATIO;
         }
 
         private double GetAverageRttIncreaseRatio()

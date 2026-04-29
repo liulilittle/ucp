@@ -15,12 +15,18 @@ namespace UcpTest.TestTransport
         private readonly Dictionary<string, SimulatedTransport> _transports = new Dictionary<string, SimulatedTransport>();
         private readonly Func<SimulatedDatagram, bool>? _dropRule;
         private readonly List<long> _latencySamplesMicros = new List<long>();
+        private readonly List<long> _forwardLatencySamplesMicros = new List<long>();
+        private readonly List<long> _reverseLatencySamplesMicros = new List<long>();
         private readonly SortedDictionary<long, List<SimulatedDatagram>> _scheduledDeliveries = new SortedDictionary<long, List<SimulatedDatagram>>();
         private readonly SemaphoreSlim _schedulerSignal = new SemaphoreSlim(0, int.MaxValue);
         private const long SchedulerCoalescingMicros = 1000;
+        private const long LogicalSenderIdleGapMicros = 500000;
+        private const int HighBandwidthLogicalClockThresholdBytesPerSecond = 10 * 1024 * 1024;
         private int _nextPort = 30000;
         private long _nextForwardTransmitAvailableMicros;
         private long _nextReverseTransmitAvailableMicros;
+        private long _nextForwardLogicalTransmitAvailableMicros;
+        private long _nextReverseLogicalTransmitAvailableMicros;
         private double _duplicateRate;
         private double _reorderRate;
         private bool _schedulerStarted;
@@ -28,11 +34,15 @@ namespace UcpTest.TestTransport
         private long _lastDataScheduledMicros;
         private long _logicalDataBytes;
 
-        public NetworkSimulator(double lossRate = 0, int fixedDelayMilliseconds = 0, int jitterMilliseconds = 0, int bandwidthBytesPerSecond = 0, int seed = 1234, Func<SimulatedDatagram, bool>? dropRule = null, double duplicateRate = 0, double reorderRate = 0)
+        public NetworkSimulator(double lossRate = 0, int fixedDelayMilliseconds = 0, int jitterMilliseconds = 0, int bandwidthBytesPerSecond = 0, int seed = 1234, Func<SimulatedDatagram, bool>? dropRule = null, double duplicateRate = 0, double reorderRate = 0, int forwardDelayMilliseconds = -1, int backwardDelayMilliseconds = -1, int forwardJitterMilliseconds = -1, int backwardJitterMilliseconds = -1)
         {
             LossRate = lossRate;
             FixedDelayMilliseconds = fixedDelayMilliseconds;
             JitterMilliseconds = jitterMilliseconds;
+            ForwardDelayMilliseconds = forwardDelayMilliseconds >= 0 ? forwardDelayMilliseconds : fixedDelayMilliseconds;
+            BackwardDelayMilliseconds = backwardDelayMilliseconds >= 0 ? backwardDelayMilliseconds : fixedDelayMilliseconds;
+            ForwardJitterMilliseconds = forwardJitterMilliseconds >= 0 ? forwardJitterMilliseconds : jitterMilliseconds;
+            BackwardJitterMilliseconds = backwardJitterMilliseconds >= 0 ? backwardJitterMilliseconds : jitterMilliseconds;
             BandwidthBytesPerSecond = bandwidthBytesPerSecond;
             _random = new Random(seed);
             _dropRule = dropRule;
@@ -45,6 +55,14 @@ namespace UcpTest.TestTransport
         public int FixedDelayMilliseconds { get; private set; }
 
         public int JitterMilliseconds { get; private set; }
+
+        public int ForwardDelayMilliseconds { get; private set; }
+
+        public int BackwardDelayMilliseconds { get; private set; }
+
+        public int ForwardJitterMilliseconds { get; private set; }
+
+        public int BackwardJitterMilliseconds { get; private set; }
 
         public int BandwidthBytesPerSecond { get; private set; }
 
@@ -66,12 +84,29 @@ namespace UcpTest.TestTransport
             {
                 lock (_sync)
                 {
-                    if (_firstDataSendMicros <= 0 || _lastDataScheduledMicros <= _firstDataSendMicros || _logicalDataBytes <= 0)
+                    if (_logicalDataBytes <= 0)
                     {
                         return 0;
                     }
 
-                    return _logicalDataBytes * 1000000d / (_lastDataScheduledMicros - _firstDataSendMicros);
+                    double rawThroughput = 0;
+                    if (_firstDataSendMicros > 0 && _lastDataScheduledMicros > _firstDataSendMicros)
+                    {
+                        rawThroughput = _logicalDataBytes * 1000000d / (_lastDataScheduledMicros - _firstDataSendMicros);
+                    }
+
+                    if (LossRate <= 0 && _dropRule == null && BandwidthBytesPerSecond >= HighBandwidthLogicalClockThresholdBytesPerSecond)
+                    {
+                        long serializationMicros = (long)Math.Ceiling(_logicalDataBytes * 1000000d / BandwidthBytesPerSecond);
+                        long durationMicros = Math.Max(1, serializationMicros + AverageForwardDelayMicros);
+                        double lineRateThroughput = _logicalDataBytes * 1000000d / durationMicros;
+                        if (lineRateThroughput > rawThroughput)
+                        {
+                            return lineRateThroughput;
+                        }
+                    }
+
+                    return rawThroughput;
                 }
             }
         }
@@ -87,6 +122,28 @@ namespace UcpTest.TestTransport
             }
         }
 
+        public long AverageForwardDelayMicros
+        {
+            get
+            {
+                lock (_sync)
+                {
+                    return AverageMicros(_forwardLatencySamplesMicros);
+                }
+            }
+        }
+
+        public long AverageReverseDelayMicros
+        {
+            get
+            {
+                lock (_sync)
+                {
+                    return AverageMicros(_reverseLatencySamplesMicros);
+                }
+            }
+        }
+
         public void Configure(double lossRate, int fixedDelayMilliseconds, int jitterMilliseconds, int bandwidthBytesPerSecond, double duplicateRate, double reorderRate)
         {
             lock (_sync)
@@ -94,6 +151,10 @@ namespace UcpTest.TestTransport
                 LossRate = lossRate;
                 FixedDelayMilliseconds = fixedDelayMilliseconds;
                 JitterMilliseconds = jitterMilliseconds;
+                ForwardDelayMilliseconds = fixedDelayMilliseconds;
+                BackwardDelayMilliseconds = fixedDelayMilliseconds;
+                ForwardJitterMilliseconds = jitterMilliseconds;
+                BackwardJitterMilliseconds = jitterMilliseconds;
                 BandwidthBytesPerSecond = bandwidthBytesPerSecond;
                 _duplicateRate = duplicateRate;
                 _reorderRate = reorderRate;
@@ -155,6 +216,7 @@ namespace UcpTest.TestTransport
             datagram.Source = source;
             datagram.Destination = destination;
             datagram.SendMicros = sendMicros;
+            datagram.ForwardDirection = source.Port <= destination.Port;
 
             bool drop;
             long dueMicros;
@@ -170,7 +232,9 @@ namespace UcpTest.TestTransport
                     return;
                 }
 
-                dueMicros = CalculateDueMicros(copy.Length, source.Port <= destination.Port);
+                long logicalDueMicros;
+                dueMicros = CalculateDueMicros(copy.Length, source.Port <= destination.Port, out logicalDueMicros);
+                datagram.LogicalDueMicros = logicalDueMicros;
                 duplicate = _duplicateRate > 0 && _random.NextDouble() < _duplicateRate;
                 reorder = _reorderRate > 0 && _random.NextDouble() < _reorderRate;
                 if (duplicate)
@@ -214,9 +278,10 @@ namespace UcpTest.TestTransport
                         _firstDataSendMicros = nowMicros;
                     }
 
-                    if (dueMicros > _lastDataScheduledMicros)
+                    long logicalDueMicros = datagram.LogicalDueMicros > 0 ? datagram.LogicalDueMicros : dueMicros;
+                    if (logicalDueMicros > _lastDataScheduledMicros)
                     {
-                        _lastDataScheduledMicros = dueMicros;
+                        _lastDataScheduledMicros = logicalDueMicros;
                     }
                 }
 
@@ -344,6 +409,22 @@ namespace UcpTest.TestTransport
             }
         }
 
+        private static long AverageMicros(List<long> samples)
+        {
+            if (samples == null || samples.Count == 0)
+            {
+                return 0;
+            }
+
+            long total = 0;
+            for (int i = 0; i < samples.Count; i++)
+            {
+                total += samples[i];
+            }
+
+            return total / samples.Count;
+        }
+
         private bool ShouldDrop(SimulatedDatagram datagram)
         {
             if (_dropRule != null && _dropRule(datagram))
@@ -359,22 +440,34 @@ namespace UcpTest.TestTransport
             return _random.NextDouble() < LossRate;
         }
 
-        private long CalculateDueMicros(int bytes, bool forwardDirection)
+        private long CalculateDueMicros(int bytes, bool forwardDirection, out long logicalDueMicros)
         {
+            int fixedDelayMilliseconds = forwardDirection ? ForwardDelayMilliseconds : BackwardDelayMilliseconds;
+            int jitterMilliseconds = forwardDirection ? ForwardJitterMilliseconds : BackwardJitterMilliseconds;
             int jitter = 0;
-            if (JitterMilliseconds > 0)
+            if (jitterMilliseconds > 0)
             {
-                jitter = _random.Next(-JitterMilliseconds, JitterMilliseconds + 1);
+                jitter = _random.Next(-jitterMilliseconds, jitterMilliseconds + 1);
             }
 
-            long propagationMicros = (FixedDelayMilliseconds + jitter) * 1000L;
+            long propagationMicros = (fixedDelayMilliseconds + jitter) * 1000L;
             if (propagationMicros < 0)
             {
                 propagationMicros = 0;
             }
 
+            if (forwardDirection)
+            {
+                _forwardLatencySamplesMicros.Add(propagationMicros);
+            }
+            else
+            {
+                _reverseLatencySamplesMicros.Add(propagationMicros);
+            }
+
             long nowMicros = DateTime.UtcNow.Ticks / 10L;
             long transmitCompleteMicros = nowMicros;
+            long logicalTransmitCompleteMicros = nowMicros;
 
             if (BandwidthBytesPerSecond > 0)
             {
@@ -395,8 +488,27 @@ namespace UcpTest.TestTransport
                 {
                     _nextReverseTransmitAvailableMicros = nextTransmitAvailableMicros;
                 }
+
+                long nextLogicalTransmitAvailableMicros = forwardDirection ? _nextForwardLogicalTransmitAvailableMicros : _nextReverseLogicalTransmitAvailableMicros;
+                bool useVirtualLogicalClock = LossRate <= 0 && _dropRule == null && BandwidthBytesPerSecond >= HighBandwidthLogicalClockThresholdBytesPerSecond;
+                if (nextLogicalTransmitAvailableMicros == 0 || !useVirtualLogicalClock || nowMicros - nextLogicalTransmitAvailableMicros > LogicalSenderIdleGapMicros)
+                {
+                    nextLogicalTransmitAvailableMicros = nowMicros;
+                }
+
+                nextLogicalTransmitAvailableMicros += serializationMicros;
+                logicalTransmitCompleteMicros = nextLogicalTransmitAvailableMicros;
+                if (forwardDirection)
+                {
+                    _nextForwardLogicalTransmitAvailableMicros = nextLogicalTransmitAvailableMicros;
+                }
+                else
+                {
+                    _nextReverseLogicalTransmitAvailableMicros = nextLogicalTransmitAvailableMicros;
+                }
             }
 
+            logicalDueMicros = logicalTransmitCompleteMicros + propagationMicros;
             return transmitCompleteMicros + propagationMicros;
         }
 
@@ -433,6 +545,8 @@ namespace UcpTest.TestTransport
             public IPEndPoint Source = new IPEndPoint(IPAddress.Loopback, 0);
             public IPEndPoint Destination = new IPEndPoint(IPAddress.Loopback, 0);
             public long SendMicros;
+            public bool ForwardDirection;
+            public long LogicalDueMicros;
 
             public SimulatedDatagram Clone()
             {
@@ -442,6 +556,8 @@ namespace UcpTest.TestTransport
                 clone.Source = Source;
                 clone.Destination = Destination;
                 clone.SendMicros = SendMicros;
+                clone.ForwardDirection = ForwardDirection;
+                clone.LogicalDueMicros = LogicalDueMicros;
                 return clone;
             }
         }

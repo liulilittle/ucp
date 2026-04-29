@@ -116,6 +116,7 @@ namespace Ucp.Internal
         private long _lastNakWindowMicros;
         private int _naksSentThisRttWindow;
         private long _lastAckReceivedMicros;
+        private long _lastReorderedAckSentMicros;
         private bool _tailLossProbePending;
 
         public UcpPcb(ITransport transport, IPEndPoint remoteEndPoint, bool isServerSide, bool useFairQueue, Action<UcpPcb> closedCallback, uint? connectionId, UcpConfiguration config)
@@ -878,7 +879,7 @@ namespace Ucp.Internal
                     OutboundSegment segment;
                     if (_sendBuffer.TryGetValue(sequence, out segment))
                     {
-                        if (!segment.NeedsRetransmit && !segment.Acked)
+                        if (!segment.NeedsRetransmit && !segment.Acked && ShouldAcceptRetransmitRequestUnsafe(segment, nowMicros))
                         {
                             segment.NeedsRetransmit = true;
                             _tailLossProbePending = false;
@@ -889,7 +890,7 @@ namespace Ucp.Internal
 
                 if (notifiedLoss)
                 {
-                    bool isCongestionLoss = IsCongestionLossUnsafe(0);
+                    bool isCongestionLoss = nakPacket.MissingSequences.Count >= UcpConstants.BBR_CONGESTION_LOSS_BURST_THRESHOLD && IsCongestionLossUnsafe(0);
                     _bbr.OnPacketLoss(nowMicros, GetRetransmissionRatioUnsafe(), isCongestionLoss);
                     TraceLogUnsafe("NAK loss congestion=" + isCongestionLoss + " count=" + nakPacket.MissingSequences.Count);
                 }
@@ -993,7 +994,7 @@ namespace Ucp.Internal
                 return false;
             }
 
-            return currentRttMicros > (long)(smoothedRttMicros * 1.1d);
+            return currentRttMicros > (long)(smoothedRttMicros * UcpConstants.BBR_CONGESTION_LOSS_RTT_MULTIPLIER);
         }
 
         private long GetFastRetransmitAgeThresholdUnsafe()
@@ -1006,6 +1007,22 @@ namespace Ucp.Internal
         {
             int inflightSegments = Math.Max(1, _config.MaxPayloadSize) <= 0 ? 0 : (int)Math.Ceiling(_flightBytes / (double)Math.Max(1, _config.MaxPayloadSize));
             return inflightSegments > 0 && inflightSegments <= UcpConstants.EARLY_RETRANSMIT_MAX_INFLIGHT_SEGMENTS;
+        }
+
+        private bool ShouldAcceptRetransmitRequestUnsafe(OutboundSegment segment, long nowMicros)
+        {
+            if (segment == null || segment.SendCount <= 1 || segment.LastSendMicros <= 0)
+            {
+                return true;
+            }
+
+            long graceMicros = _rtoEstimator.SmoothedRttMicros > 0 ? _rtoEstimator.SmoothedRttMicros : _rtoEstimator.CurrentRtoMicros;
+            if (graceMicros <= 0)
+            {
+                return true;
+            }
+
+            return nowMicros - segment.LastSendMicros >= graceMicros;
         }
 
         private double GetRetransmissionRatioUnsafe()
@@ -1067,7 +1084,7 @@ namespace Ucp.Internal
 
                     if (shouldStore && UcpSequenceComparer.IsAfter(dataPacket.SequenceNumber, _nextExpectedSequence))
                     {
-                        sendImmediateAck = true;
+                        sendImmediateAck = ShouldSendImmediateReorderedAckUnsafe(NowMicros());
                         uint current = _nextExpectedSequence;
                         int remainingNakSlots = UcpConstants.MAX_NAK_MISSING_SCAN;
                         while (current != dataPacket.SequenceNumber && remainingNakSlots > 0)
@@ -1079,7 +1096,7 @@ namespace Ucp.Internal
                                 missingCount++;
                                 _missingSequenceCounts[current] = missingCount;
                                 long firstSeenMicros = GetMissingFirstSeenMicrosUnsafe(current);
-                                bool missingAgeExpired = NowMicros() - firstSeenMicros >= UcpConstants.NAK_REORDER_GRACE_MICROS;
+                                bool missingAgeExpired = HasNakReorderGraceExpiredUnsafe(missingCount, firstSeenMicros, NowMicros());
                                 bool missingRepeatedEnough = missingCount >= UcpConstants.NAK_MISSING_THRESHOLD;
                                 if (missing.Count < UcpConstants.MAX_NAK_SEQUENCES_PER_PACKET && missingRepeatedEnough && missingAgeExpired && ShouldIssueNakUnsafe(current))
                                 {
@@ -1112,7 +1129,7 @@ namespace Ucp.Internal
 
                     if (_recvBuffer.Count > 0 && !_recvBuffer.ContainsKey(_nextExpectedSequence))
                     {
-                        if (_recvBuffer.Count >= UcpConstants.IMMEDIATE_ACK_REORDERED_PACKET_THRESHOLD)
+                        if (_recvBuffer.Count >= UcpConstants.IMMEDIATE_ACK_REORDERED_PACKET_THRESHOLD && ShouldSendImmediateReorderedAckUnsafe(NowMicros()))
                         {
                             sendImmediateAck = true;
                         }
@@ -1120,7 +1137,7 @@ namespace Ucp.Internal
                         int missingCount;
                         _missingSequenceCounts.TryGetValue(_nextExpectedSequence, out missingCount);
                         long firstSeenMicros = GetMissingFirstSeenMicrosUnsafe(_nextExpectedSequence);
-                        if (missing.Count < UcpConstants.MAX_NAK_SEQUENCES_PER_PACKET && missingCount >= UcpConstants.NAK_MISSING_THRESHOLD && NowMicros() - firstSeenMicros >= UcpConstants.NAK_REORDER_GRACE_MICROS && ShouldIssueNakUnsafe(_nextExpectedSequence))
+                        if (missing.Count < UcpConstants.MAX_NAK_SEQUENCES_PER_PACKET && missingCount >= UcpConstants.NAK_MISSING_THRESHOLD && HasNakReorderGraceExpiredUnsafe(missingCount, firstSeenMicros, NowMicros()) && ShouldIssueNakUnsafe(_nextExpectedSequence))
                         {
                             MarkNakIssuedUnsafe(_nextExpectedSequence);
                             missing.Add(_nextExpectedSequence);
@@ -1157,6 +1174,27 @@ namespace Ucp.Internal
         private bool ShouldIssueNakUnsafe(uint sequenceNumber)
         {
             return !_nakIssued.Contains(sequenceNumber);
+        }
+
+        private bool ShouldSendImmediateReorderedAckUnsafe(long nowMicros)
+        {
+            if (_lastReorderedAckSentMicros == 0 || nowMicros - _lastReorderedAckSentMicros >= UcpConstants.REORDERED_ACK_MIN_INTERVAL_MICROS)
+            {
+                _lastReorderedAckSentMicros = nowMicros;
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool HasNakReorderGraceExpiredUnsafe(int missingCount, long firstSeenMicros, long nowMicros)
+        {
+            long graceMicros = missingCount >= UcpConstants.NAK_HIGH_CONFIDENCE_MISSING_THRESHOLD
+                ? UcpConstants.NAK_HIGH_CONFIDENCE_REORDER_GRACE_MICROS
+                : missingCount >= UcpConstants.NAK_MEDIUM_CONFIDENCE_MISSING_THRESHOLD
+                    ? UcpConstants.NAK_MEDIUM_CONFIDENCE_REORDER_GRACE_MICROS
+                : UcpConstants.NAK_REORDER_GRACE_MICROS;
+            return nowMicros - firstSeenMicros >= graceMicros;
         }
 
         private void MarkNakIssuedUnsafe(uint sequenceNumber)
@@ -1602,16 +1640,22 @@ namespace Ucp.Internal
             lock (_sync)
             {
                 int inflightSegments = Math.Max(1, _config.MaxPayloadSize) <= 0 ? 0 : (int)Math.Ceiling(_flightBytes / (double)Math.Max(1, _config.MaxPayloadSize));
+                int rtoRetransmitBudget = UcpConstants.RTO_RETRANSMIT_BUDGET_PER_TICK;
                 foreach (KeyValuePair<uint, OutboundSegment> pair in _sendBuffer)
                 {
                     OutboundSegment segment = pair.Value;
-                    if (!segment.InFlight || segment.Acked)
+                    if (!segment.InFlight || segment.Acked || segment.NeedsRetransmit)
                     {
                         continue;
                     }
 
                     if (nowMicros - segment.LastSendMicros >= _rtoEstimator.CurrentRtoMicros)
                     {
+                        if (rtoRetransmitBudget <= 0)
+                        {
+                            break;
+                        }
+
                         if (segment.SendCount >= _config.MaxRetransmissions)
                         {
                             _timeoutRetransmissions++;
@@ -1621,6 +1665,7 @@ namespace Ucp.Internal
 
                         segment.NeedsRetransmit = true;
                         timedOut = true;
+                        rtoRetransmitBudget--;
                         timedOutForCongestion = timedOutForCongestion || IsCongestionLossUnsafe(0);
                         _timeoutRetransmissions++;
                     }
@@ -1637,6 +1682,11 @@ namespace Ucp.Internal
                         {
                             OutboundSegment segment = pair.Value;
                             if (segment.Acked || !segment.InFlight || segment.NeedsRetransmit)
+                            {
+                                continue;
+                            }
+
+                            if (nowMicros - segment.LastSendMicros < tlpTimeoutMicros)
                             {
                                 continue;
                             }
@@ -1742,7 +1792,7 @@ namespace Ucp.Internal
                     long firstSeenMicros = GetMissingFirstSeenMicrosUnsafe(current);
                     int missingCount;
                     _missingSequenceCounts.TryGetValue(current, out missingCount);
-                    if (missingCount >= UcpConstants.NAK_MISSING_THRESHOLD && nowMicros - firstSeenMicros >= UcpConstants.NAK_REORDER_GRACE_MICROS && ShouldIssueNakUnsafe(current))
+                    if (missingCount >= UcpConstants.NAK_MISSING_THRESHOLD && HasNakReorderGraceExpiredUnsafe(missingCount, firstSeenMicros, nowMicros) && ShouldIssueNakUnsafe(current))
                     {
                         MarkNakIssuedUnsafe(current);
                         missing.Add(current);
