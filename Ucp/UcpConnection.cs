@@ -536,7 +536,27 @@ namespace Ucp
                 return;
             }
 
+            if (packet.Header.Type == UcpPacketType.Nak)
+            {
+                DispatchPriorityPacket(packet, remoteEndPoint);
+                return;
+            }
+
             DispatchPacket(packet, remoteEndPoint);
+        }
+
+        private void DispatchPriorityPacket(UcpPacket packet, IPEndPoint remoteEndPoint)
+        {
+            if (packet == null || _pcb == null)
+            {
+                return;
+            }
+
+            _strand.PostPriority(async delegate
+            {
+                _pcb.SetRemoteEndPoint(remoteEndPoint);
+                await _pcb.HandleInboundAsync(packet).ConfigureAwait(false);
+            });
         }
 
         private void CleanupTransport()

@@ -235,7 +235,7 @@ namespace Ucp
         public const double BBR_HIGH_LOSS_PACING_GAIN = 0.95d;
 
         /// <summary>BBR fast recovery pacing gain used after non-congestion loss recovery signals.</summary>
-        public const double BBR_FAST_RECOVERY_PACING_GAIN = 1.05d;
+        public const double BBR_FAST_RECOVERY_PACING_GAIN = 1.10d;
 
         /// <summary>Minimum BBR pacing gain after a congestion loss signal.</summary>
         public const double BBR_MIN_CONGESTION_PACING_GAIN = 0.92d;
@@ -297,6 +297,12 @@ namespace Ucp
         /// <summary>RTT multiplier above which a loss signal is eligible for congestion classification.</summary>
         public const double BBR_CONGESTION_LOSS_RTT_MULTIPLIER = 1.10d;
 
+        /// <summary>Deduplicated loss events at or below this count are treated as random in one loss window.</summary>
+        public const int BBR_RANDOM_LOSS_MAX_DEDUPED_EVENTS = 2;
+
+        /// <summary>Deduplicated loss events above this count need RTT inflation before congestion response.</summary>
+        public const int BBR_CONGESTION_LOSS_WINDOW_THRESHOLD = 3;
+
         /// <summary>Minimum missing packet count in one loss report before NAK loss is treated as clustered.</summary>
         public const int BBR_CONGESTION_LOSS_BURST_THRESHOLD = 3;
 
@@ -304,10 +310,10 @@ namespace Ucp
         public const long BBR_BANDWIDTH_GROWTH_FALLBACK_INTERVAL_MICROS = 10000L;
 
         /// <summary>Maximum ratio used for the lower inflight guardrail relative to BDP.</summary>
-        public const double BBR_INFLIGHT_LOW_GAIN = 0.90d;
+        public const double BBR_INFLIGHT_LOW_GAIN = 1.10d;
 
         /// <summary>Maximum ratio used for the upper inflight guardrail relative to BDP.</summary>
-        public const double BBR_INFLIGHT_HIGH_GAIN = 1.25d;
+        public const double BBR_INFLIGHT_HIGH_GAIN = 1.50d;
 
         /// <summary>Delivery-rate sample history length used by the lightweight classifier.</summary>
         public const int BBR_DELIVERY_RATE_HISTORY_COUNT = 5;
@@ -363,11 +369,26 @@ namespace Ucp
         /// <summary>Payload size used by 100 Mbps benchmark scenarios, in bytes.</summary>
         public const int BENCHMARK_100M_PAYLOAD_BYTES = 4 * 1024 * 1024;
 
+        /// <summary>Payload size used by asymmetric route benchmark scenarios, in bytes.</summary>
+        public const int BENCHMARK_ASYM_PAYLOAD_BYTES = 8 * 1024 * 1024;
+
+        /// <summary>Payload size used by high-jitter weak-network benchmark scenarios, in bytes.</summary>
+        public const int BENCHMARK_HIGH_JITTER_PAYLOAD_BYTES = 2 * 1024 * 1024;
+
+        /// <summary>Payload size used by 4G weak-network benchmark scenarios, in bytes.</summary>
+        public const int BENCHMARK_WEAK_4G_PAYLOAD_BYTES = 1024 * 1024;
+
         /// <summary>Payload size used by the 100 Mbps long-fat-pipe benchmark, in bytes.</summary>
         public const int BENCHMARK_LONG_FAT_100M_PAYLOAD_BYTES = 16 * 1024 * 1024;
 
         /// <summary>Payload size used by 1 Gbps benchmark scenarios, in bytes.</summary>
         public const int BENCHMARK_1G_PAYLOAD_BYTES = 4 * 1024 * 1024;
+
+        /// <summary>Payload size used by 1 Gbps random-loss benchmark scenarios, in bytes.</summary>
+        public const int BENCHMARK_1G_LOSS_PAYLOAD_BYTES = 8 * 1024 * 1024;
+
+        /// <summary>Jumbo MSS used by high-bandwidth benchmark paths to avoid control-plane packet amplification.</summary>
+        public const int BENCHMARK_HIGH_BANDWIDTH_MSS = 9000;
 
         /// <summary>Payload size used by 10 Gbps benchmark scenarios, in bytes.</summary>
         public const int BENCHMARK_10G_PAYLOAD_BYTES = 8 * 1024 * 1024;
@@ -404,6 +425,12 @@ namespace Ucp
 
         /// <summary>Port offset for the asymmetric route benchmark.</summary>
         public const int BENCHMARK_PORT_OFFSET_ASYM_ROUTE = 6;
+
+        /// <summary>Port offset for the high-jitter benchmark.</summary>
+        public const int BENCHMARK_PORT_OFFSET_HIGH_JITTER = 7;
+
+        /// <summary>Port offset for the weak 4G benchmark.</summary>
+        public const int BENCHMARK_PORT_OFFSET_WEAK_4G = 8;
 
         /// <summary>Fixed one-way delay for the 100 Mbps benchmark, in milliseconds.</summary>
         public const int BENCHMARK_100M_DELAY_MILLISECONDS = 5;
@@ -450,8 +477,35 @@ namespace Ucp
         /// <summary>Random data loss rate used by the asymmetric route benchmark.</summary>
         public const double BENCHMARK_ASYM_RANDOM_LOSS_RATE = 0.005d;
 
+        /// <summary>Random data loss rate used by the high-jitter benchmark.</summary>
+        public const double BENCHMARK_HIGH_JITTER_LOSS_RATE = 0.005d;
+
+        /// <summary>Random data loss rate used by the weak 4G benchmark.</summary>
+        public const double BENCHMARK_WEAK_4G_LOSS_RATE = 0.05d;
+
         /// <summary>Deterministic random seed used by asymmetric route benchmark data drops.</summary>
         public const int BENCHMARK_ASYM_RANDOM_LOSS_SEED = 20260503;
+
+        /// <summary>Deterministic random seed used by high-jitter benchmark data drops.</summary>
+        public const int BENCHMARK_HIGH_JITTER_LOSS_SEED = 20260504;
+
+        /// <summary>Deterministic random seed used by weak 4G benchmark data drops.</summary>
+        public const int BENCHMARK_WEAK_4G_LOSS_SEED = 20260505;
+
+        /// <summary>Fixed one-way delay for high-jitter benchmark scenarios, in milliseconds.</summary>
+        public const int BENCHMARK_HIGH_JITTER_DELAY_MILLISECONDS = 50;
+
+        /// <summary>Per-direction jitter for high-jitter benchmark scenarios, in milliseconds.</summary>
+        public const int BENCHMARK_HIGH_JITTER_JITTER_MILLISECONDS = 25;
+
+        /// <summary>Fixed one-way delay for weak 4G benchmark scenarios, in milliseconds.</summary>
+        public const int BENCHMARK_WEAK_4G_DELAY_MILLISECONDS = 80;
+
+        /// <summary>Weak 4G outage period, in milliseconds.</summary>
+        public const int BENCHMARK_WEAK_4G_OUTAGE_PERIOD_MILLISECONDS = 30000;
+
+        /// <summary>Weak 4G outage duration, in milliseconds.</summary>
+        public const int BENCHMARK_WEAK_4G_OUTAGE_DURATION_MILLISECONDS = 500;
 
         /// <summary>Light random data loss rate used by benchmark scenarios.</summary>
         public const double BENCHMARK_LIGHT_RANDOM_LOSS_RATE = 0.01d;
@@ -471,6 +525,9 @@ namespace Ucp
         /// <summary>Minimum line-rate utilization target for controlled-loss benchmark scenarios.</summary>
         public const double BENCHMARK_MIN_LOSS_UTILIZATION_PERCENT = 45d;
 
+        /// <summary>Minimum throughput target for the 5% random-loss 1 Gbps benchmark.</summary>
+        public const double BENCHMARK_MIN_GIGABIT_LOSS5_THROUGHPUT_MBPS = 150d;
+
         /// <summary>Maximum acceptable RTT jitter multiplier relative to the configured one-way delay.</summary>
         public const double BENCHMARK_MAX_JITTER_DELAY_MULTIPLIER = 4d;
 
@@ -481,7 +538,7 @@ namespace Ucp
         public const double BENCHMARK_MAX_CONVERGED_PACING_RATIO = 1.35d;
 
         /// <summary>Maximum number of NAK packets emitted during one RTT interval.</summary>
-        public const int MAX_NAKS_PER_RTT = 8;
+        public const int MAX_NAKS_PER_RTT = 1024;
 
         /// <summary>Threshold in payload-sized segments below which early retransmit is allowed.</summary>
         public const int EARLY_RETRANSMIT_MAX_INFLIGHT_SEGMENTS = 4;
@@ -509,6 +566,15 @@ namespace Ucp
 
         /// <summary>Duplicate ACK count needed to trigger fast retransmit.</summary>
         public const int DUPLICATE_ACK_THRESHOLD = 5;
+
+        /// <summary>SACK observations needed before a missing hole is retransmitted without waiting for RTO.</summary>
+        public const int SACK_FAST_RETRANSMIT_THRESHOLD = 1;
+
+        /// <summary>Minimum SACK distance past a missing sequence before treating the hole as real loss.</summary>
+        public const int SACK_FAST_RETRANSMIT_DISTANCE_THRESHOLD = 3;
+
+        /// <summary>Lower bound for SACK-based reorder grace before fast retransmit, in microseconds.</summary>
+        public const long SACK_FAST_RETRANSMIT_MIN_REORDER_GRACE_MICROS = 5000L;
 
         /// <summary>Missing observation count needed before the receiver sends a NAK.</summary>
         public const int NAK_MISSING_THRESHOLD = 4;
@@ -538,7 +604,7 @@ namespace Ucp
         public const int MAX_NAK_SEQUENCES_PER_PACKET = 64;
 
         /// <summary>Maximum SACK blocks emitted by default.</summary>
-        public const int DEFAULT_ACK_SACK_BLOCK_LIMIT = 32;
+        public const int DEFAULT_ACK_SACK_BLOCK_LIMIT = 149;
 
         /// <summary>Receive-buffer occupancy that forces an immediate ACK, measured in packets.</summary>
         public const int IMMEDIATE_ACK_REORDERED_PACKET_THRESHOLD = 4;

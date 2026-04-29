@@ -730,7 +730,7 @@ namespace UcpTest
                 "Gigabit_Loss5",
                 UcpConstants.BENCHMARK_BASE_PORT + UcpConstants.BENCHMARK_PORT_OFFSET_GIGABIT_LOSS5,
                 UcpConstants.BENCHMARK_1_GBPS_BYTES_PER_SECOND,
-                UcpConstants.BENCHMARK_1G_PAYLOAD_BYTES / UcpConstants.BBR_PROBE_BW_GAIN_COUNT,
+                UcpConstants.BENCHMARK_1G_LOSS_PAYLOAD_BYTES,
                 UcpConstants.BENCHMARK_1G_HEAVY_LOSS_DELAY_MILLISECONDS,
                 0,
                 UcpConstants.BENCHMARK_HEAVY_RANDOM_LOSS_RATE,
@@ -742,6 +742,8 @@ namespace UcpTest
             _output.WriteLine("Gigabit_Loss5 estimatedLoss={0:F2}, retransmission={1:F2}, utilization={2:F2}", report.EstimatedLossPercent, report.RetransmissionPercent, report.UtilizationPercent);
             Assert.True(report.EstimatedLossPercent <= UcpConstants.MAX_MAX_BANDWIDTH_LOSS_PERCENT);
             Assert.True(report.RetransmissionPercent <= UcpConstants.MAX_MAX_BANDWIDTH_LOSS_PERCENT);
+            Assert.True(report.RetransmissionPercent < 5.5d);
+            Assert.True(report.ThroughputMbps >= UcpConstants.BENCHMARK_MIN_GIGABIT_LOSS5_THROUGHPUT_MBPS);
             Assert.True(report.PacingRateBytesPerSecond >= UcpConstants.BENCHMARK_1_GBPS_BYTES_PER_SECOND * UcpConstants.BENCHMARK_MIN_CONVERGED_PACING_RATIO);
             Assert.True(report.JitterMilliseconds <= UcpConstants.BENCHMARK_1G_HEAVY_LOSS_DELAY_MILLISECONDS * UcpConstants.BENCHMARK_MAX_JITTER_DELAY_MULTIPLIER);
         }
@@ -753,7 +755,7 @@ namespace UcpTest
                 "Gigabit_Loss1",
                 UcpConstants.BENCHMARK_BASE_PORT + UcpConstants.BENCHMARK_PORT_OFFSET_GIGABIT_LOSS1,
                 UcpConstants.BENCHMARK_1_GBPS_BYTES_PER_SECOND,
-                UcpConstants.BENCHMARK_1G_PAYLOAD_BYTES / UcpConstants.BBR_PROBE_BW_GAIN_COUNT,
+                UcpConstants.BENCHMARK_1G_LOSS_PAYLOAD_BYTES,
                 UcpConstants.BENCHMARK_1G_LIGHT_LOSS_DELAY_MILLISECONDS,
                 0,
                 UcpConstants.BENCHMARK_LIGHT_RANDOM_LOSS_RATE,
@@ -849,7 +851,7 @@ namespace UcpTest
                 "AsymRoute",
                 UcpConstants.BENCHMARK_BASE_PORT + UcpConstants.BENCHMARK_PORT_OFFSET_ASYM_ROUTE,
                 UcpConstants.BENCHMARK_100_MBPS_BYTES_PER_SECOND,
-                UcpConstants.BENCHMARK_100M_PAYLOAD_BYTES,
+                UcpConstants.BENCHMARK_ASYM_PAYLOAD_BYTES,
                 0,
                 0,
                 UcpConstants.BENCHMARK_ASYM_RANDOM_LOSS_RATE,
@@ -866,6 +868,61 @@ namespace UcpTest
             Assert.True(report.ReverseDelayMilliseconds <= UcpConstants.BENCHMARK_ASYM_BACKWARD_DELAY_MILLISECONDS + UcpConstants.BENCHMARK_ASYM_JITTER_MILLISECONDS);
             Assert.True(report.RetransmissionPercent <= UcpConstants.DEFAULT_MAX_BANDWIDTH_LOSS_PERCENT);
             Assert.True(report.PacingRateBytesPerSecond >= UcpConstants.BENCHMARK_100_MBPS_BYTES_PER_SECOND * UcpConstants.BENCHMARK_MIN_CONVERGED_PACING_RATIO);
+        }
+
+        [Fact]
+        public async Task Integration_HighJitter_StaysAliveAndUseful()
+        {
+            UcpPerformanceReport report = await RunLineRateBenchmarkAsync(
+                "HighJitter",
+                UcpConstants.BENCHMARK_BASE_PORT + UcpConstants.BENCHMARK_PORT_OFFSET_HIGH_JITTER,
+                UcpConstants.BENCHMARK_100_MBPS_BYTES_PER_SECOND,
+                UcpConstants.BENCHMARK_HIGH_JITTER_PAYLOAD_BYTES,
+                UcpConstants.BENCHMARK_HIGH_JITTER_DELAY_MILLISECONDS,
+                UcpConstants.BENCHMARK_HIGH_JITTER_JITTER_MILLISECONDS,
+                0d,
+                UcpConstants.DEFAULT_MAX_BANDWIDTH_LOSS_PERCENT,
+                false,
+                UcpConstants.BENCHMARK_HIGH_JITTER_LOSS_SEED,
+                null,
+                -1,
+                -1,
+                -1,
+                -1,
+                true);
+
+            Assert.True(report.UtilizationPercent > 40d);
+            Assert.True(report.RetransmissionPercent <= UcpConstants.MIN_MAX_BANDWIDTH_LOSS_PERCENT);
+        }
+
+        [Fact]
+        public async Task Integration_Weak4G_RecoversFromOutage()
+        {
+            Func<NetworkSimulator.SimulatedDatagram, bool> outageDropRule = CreateWeak4GDropRule(
+                UcpConstants.BENCHMARK_WEAK_4G_LOSS_RATE,
+                UcpConstants.BENCHMARK_WEAK_4G_LOSS_SEED,
+                UcpConstants.BENCHMARK_WEAK_4G_OUTAGE_PERIOD_MILLISECONDS,
+                UcpConstants.BENCHMARK_WEAK_4G_OUTAGE_DURATION_MILLISECONDS);
+            UcpPerformanceReport report = await RunLineRateBenchmarkAsync(
+                "Weak4G",
+                UcpConstants.BENCHMARK_BASE_PORT + UcpConstants.BENCHMARK_PORT_OFFSET_WEAK_4G,
+                10 * 1000 * 1000 / 8,
+                UcpConstants.BENCHMARK_WEAK_4G_PAYLOAD_BYTES,
+                UcpConstants.BENCHMARK_WEAK_4G_DELAY_MILLISECONDS,
+                0,
+                UcpConstants.BENCHMARK_WEAK_4G_LOSS_RATE,
+                UcpConstants.DEFAULT_MAX_BANDWIDTH_LOSS_PERCENT,
+                false,
+                UcpConstants.BENCHMARK_WEAK_4G_LOSS_SEED,
+                outageDropRule,
+                -1,
+                -1,
+                -1,
+                -1,
+                true);
+
+            Assert.True(report.UtilizationPercent > 25d);
+            Assert.True(report.ElapsedMilliseconds < UcpConstants.BENCHMARK_READ_TIMEOUT_MILLISECONDS);
         }
 
         [Fact]
@@ -978,14 +1035,27 @@ namespace UcpTest
 
         private async Task<UcpPerformanceReport> RunLineRateBenchmarkAsync(string scenarioName, int port, int bandwidthBytesPerSecond, int payloadBytes, int fixedDelayMilliseconds, int jitterMilliseconds, double lossRate, double maxLossPercent, bool autoProbe, int simulatorSeed, Func<NetworkSimulator.SimulatedDatagram, bool>? dropRule, int forwardDelayMilliseconds, int backwardDelayMilliseconds, int forwardJitterMilliseconds, int backwardJitterMilliseconds)
         {
+            return await RunLineRateBenchmarkAsync(scenarioName, port, bandwidthBytesPerSecond, payloadBytes, fixedDelayMilliseconds, jitterMilliseconds, lossRate, maxLossPercent, autoProbe, simulatorSeed, dropRule, forwardDelayMilliseconds, backwardDelayMilliseconds, forwardJitterMilliseconds, backwardJitterMilliseconds, false).ConfigureAwait(false);
+        }
+
+        private async Task<UcpPerformanceReport> RunLineRateBenchmarkAsync(string scenarioName, int port, int bandwidthBytesPerSecond, int payloadBytes, int fixedDelayMilliseconds, int jitterMilliseconds, double lossRate, double maxLossPercent, bool autoProbe, int simulatorSeed, Func<NetworkSimulator.SimulatedDatagram, bool>? dropRule, int forwardDelayMilliseconds, int backwardDelayMilliseconds, int forwardJitterMilliseconds, int backwardJitterMilliseconds, bool useHighBandwidthMss)
+        {
             NetworkSimulator simulator = new NetworkSimulator(lossRate: dropRule == null ? lossRate : 0d, fixedDelayMilliseconds: fixedDelayMilliseconds, jitterMilliseconds: jitterMilliseconds, bandwidthBytesPerSecond: bandwidthBytesPerSecond, seed: simulatorSeed == 0 ? 1234 : simulatorSeed, dropRule: dropRule, forwardDelayMilliseconds: forwardDelayMilliseconds, backwardDelayMilliseconds: backwardDelayMilliseconds, forwardJitterMilliseconds: forwardJitterMilliseconds, backwardJitterMilliseconds: backwardJitterMilliseconds);
             UcpConfiguration config = CreateScenarioConfig(bandwidthBytesPerSecond);
+            bool hasConfiguredLoss = lossRate > 0 || dropRule != null;
+            if (useHighBandwidthMss || bandwidthBytesPerSecond >= UcpConstants.BENCHMARK_1_GBPS_BYTES_PER_SECOND)
+            {
+                config.Mss = UcpConstants.BENCHMARK_HIGH_BANDWIDTH_MSS;
+                config.SendQuantumBytes = config.Mss;
+            }
+
+            config.EnableAggressiveSackRecovery = bandwidthBytesPerSecond >= UcpConstants.BENCHMARK_1_GBPS_BYTES_PER_SECOND && hasConfiguredLoss;
+
             config.MaxBandwidthLossPercent = maxLossPercent <= 0 ? UcpConstants.DEFAULT_MAX_BANDWIDTH_LOSS_PERCENT : maxLossPercent;
             int effectiveForwardDelayMilliseconds = forwardDelayMilliseconds >= 0 ? forwardDelayMilliseconds : fixedDelayMilliseconds;
             int effectiveBackwardDelayMilliseconds = backwardDelayMilliseconds >= 0 ? backwardDelayMilliseconds : fixedDelayMilliseconds;
             int estimatedRttMicros = (int)Math.Max(UcpConstants.MICROS_PER_MILLI, (effectiveForwardDelayMilliseconds + effectiveBackwardDelayMilliseconds) * UcpConstants.MICROS_PER_MILLI);
             int estimatedBdpBytes = (int)Math.Min(int.MaxValue, bandwidthBytesPerSecond * (estimatedRttMicros / (double)UcpConstants.MICROS_PER_SECOND));
-            bool hasConfiguredLoss = lossRate > 0 || dropRule != null;
             int initialCwndBytes = CalculateBenchmarkInitialCwndBytes(config, bandwidthBytesPerSecond, estimatedBdpBytes, hasConfiguredLoss);
             config.InitialCwndBytes = (uint)initialCwndBytes;
             if (fixedDelayMilliseconds >= UcpConstants.BENCHMARK_LONG_FAT_DELAY_MILLISECONDS || estimatedRttMicros >= UcpConstants.DEFAULT_RTO_MICROS)
@@ -1094,6 +1164,32 @@ namespace UcpTest
 
                 bool isInitialData = packet.Header.Type == UcpPacketType.Data && (packet.Header.Flags & UcpPacketFlags.Retransmit) != UcpPacketFlags.Retransmit;
                 return isInitialData && random.NextDouble() < lossRate;
+            };
+        }
+
+        private static Func<NetworkSimulator.SimulatedDatagram, bool> CreateWeak4GDropRule(double lossRate, int seed, int outagePeriodMilliseconds, int outageDurationMilliseconds)
+        {
+            Random random = new Random(seed);
+            long firstDataMicros = 0;
+            return delegate (NetworkSimulator.SimulatedDatagram datagram)
+            {
+                UcpPacket packet;
+                if (!UcpPacketCodec.TryDecode(datagram.Buffer, 0, datagram.Count, out packet) || packet.Header.Type != UcpPacketType.Data)
+                {
+                    return false;
+                }
+
+                if (firstDataMicros == 0)
+                {
+                    firstDataMicros = datagram.SendMicros;
+                }
+
+                long elapsedMicros = datagram.SendMicros - firstDataMicros;
+                long periodMicros = outagePeriodMilliseconds * UcpConstants.MICROS_PER_MILLI;
+                long outageMicros = outageDurationMilliseconds * UcpConstants.MICROS_PER_MILLI;
+                bool inOutage = periodMicros > 0 && elapsedMicros > 0 && elapsedMicros % periodMicros < outageMicros;
+                bool isInitialData = (packet.Header.Flags & UcpPacketFlags.Retransmit) != UcpPacketFlags.Retransmit;
+                return inOutage || (isInitialData && random.NextDouble() < lossRate);
             };
         }
 

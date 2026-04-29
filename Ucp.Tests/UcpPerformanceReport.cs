@@ -228,6 +228,8 @@ namespace UcpTest
             bool hasGigabitLoss = false;
             bool hasBurstLoss = false;
             bool hasAsymRoute = false;
+            bool hasHighJitter = false;
+            bool hasWeak4G = false;
             for (int i = 0; i < parsedReports.Count; i++)
             {
                 UcpPerformanceReport report = parsedReports[i];
@@ -315,6 +317,24 @@ namespace UcpTest
                         return false;
                     }
                 }
+                else if (report.ScenarioName == "HighJitter")
+                {
+                    hasHighJitter = true;
+                    if (report.UtilizationPercent <= 40d || report.RetransmissionRatio > UcpConstants.DEFAULT_MAX_BANDWIDTH_LOSS_PERCENT / 100d)
+                    {
+                        errorMessage = "HighJitter metrics are outside the expected range.";
+                        return false;
+                    }
+                }
+                else if (report.ScenarioName == "Weak4G")
+                {
+                    hasWeak4G = true;
+                    if (report.UtilizationPercent <= 25d)
+                    {
+                        errorMessage = "Weak4G metrics are outside the expected range.";
+                        return false;
+                    }
+                }
             }
 
             if (!hasNoLoss || !hasLossy || !hasHighLoss || !hasLongFatPipe || !hasPacing)
@@ -326,6 +346,12 @@ namespace UcpTest
             if (!hasGigabitLoss || !hasBurstLoss || !hasAsymRoute)
             {
                 errorMessage = "Report is missing one or more production benchmark scenarios.";
+                return false;
+            }
+
+            if (!hasHighJitter || !hasWeak4G)
+            {
+                errorMessage = "Report is missing one or more weak-network scenarios.";
                 return false;
             }
 
@@ -635,6 +661,16 @@ namespace UcpTest
             if (scenarioName == "AsymRoute")
             {
                 return 130;
+            }
+
+            if (scenarioName == "HighJitter")
+            {
+                return 140;
+            }
+
+            if (scenarioName == "Weak4G")
+            {
+                return 150;
             }
 
             return 1000;

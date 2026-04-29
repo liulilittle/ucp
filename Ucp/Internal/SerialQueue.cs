@@ -38,6 +38,16 @@ namespace Ucp.Internal
             Enqueue(action);
         }
 
+        public void PostPriority(Func<Task> action)
+        {
+            if (action == null)
+            {
+                throw new ArgumentNullException(nameof(action));
+            }
+
+            Enqueue(action, true);
+        }
+
         public Task EnqueueAsync(Action action)
         {
             if (action == null)
@@ -111,10 +121,33 @@ namespace Ucp.Internal
 
         private void Enqueue(Func<Task> action)
         {
+            Enqueue(action, false);
+        }
+
+        private void Enqueue(Func<Task> action, bool priority)
+        {
             bool shouldStart = false;
             lock (_sync)
             {
-                _queue.Enqueue(action);
+                if (priority && _queue.Count > 0)
+                {
+                    Queue<Func<Task>> reordered = new Queue<Func<Task>>();
+                    reordered.Enqueue(action);
+                    while (_queue.Count > 0)
+                    {
+                        reordered.Enqueue(_queue.Dequeue());
+                    }
+
+                    while (reordered.Count > 0)
+                    {
+                        _queue.Enqueue(reordered.Dequeue());
+                    }
+                }
+                else
+                {
+                    _queue.Enqueue(action);
+                }
+
                 if (!_processing)
                 {
                     _processing = true;

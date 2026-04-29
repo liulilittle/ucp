@@ -25,6 +25,13 @@ namespace Ucp.Internal
             public long LastSendMicros;
         }
 
+        private sealed class LossEvent
+        {
+            public uint SequenceNumber;
+            public long TimestampMicros;
+            public long RttMicros;
+        }
+
         private sealed class InboundSegment
         {
             public uint SequenceNumber;
@@ -55,6 +62,7 @@ namespace Ucp.Internal
         private readonly Dictionary<uint, int> _missingSequenceCounts = new Dictionary<uint, int>();
         private readonly Dictionary<uint, long> _missingFirstSeenMicros = new Dictionary<uint, long>();
         private readonly Dictionary<uint, long> _lastNakIssuedMicros = new Dictionary<uint, long>();
+        private readonly HashSet<uint> _sackFastRetransmitNotified = new HashSet<uint>();
         private readonly SemaphoreSlim _receiveSignal = new SemaphoreSlim(0, int.MaxValue);
         private readonly SemaphoreSlim _sendSpaceSignal = new SemaphoreSlim(0, int.MaxValue);
         private readonly SemaphoreSlim _flushLock = new SemaphoreSlim(1, 1);
@@ -118,6 +126,8 @@ namespace Ucp.Internal
         private long _lastAckReceivedMicros;
         private long _lastReorderedAckSentMicros;
         private bool _tailLossProbePending;
+        private readonly Queue<LossEvent> _recentLossEvents = new Queue<LossEvent>();
+        private readonly HashSet<uint> _recentLossSequences = new HashSet<uint>();
 
         public UcpPcb(ITransport transport, IPEndPoint remoteEndPoint, bool isServerSide, bool useFairQueue, Action<UcpPcb> closedCallback, uint? connectionId, UcpConfiguration config)
             : this(transport, remoteEndPoint, isServerSide, useFairQueue, closedCallback, connectionId, config, null)
@@ -714,6 +724,7 @@ namespace Ucp.Internal
                 }
 
                 _remoteWindowBytes = ackPacket.WindowSize;
+                SortSackBlocksUnsafe(ackPacket.SackBlocks);
                 if (_state == UcpConnectionState.HandshakeSynReceived && _synAckSent)
                 {
                     establishByHandshake = true;
@@ -734,6 +745,11 @@ namespace Ucp.Internal
 
                 UpdateDuplicateAckStateUnsafe(ackPacket, nowMicros, out fastRetransmitTriggered);
 
+                int sackIndex = 0;
+                List<SackBlock> sackBlocks = ackPacket.SackBlocks;
+                bool hasSackBlocks = sackBlocks != null && sackBlocks.Count > 0;
+                uint highestSack = hasSackBlocks ? GetHighestSackEnd(sackBlocks) : 0U;
+                uint firstMissingSequence = UcpSequenceComparer.Increment(ackPacket.AckNumber);
                 foreach (KeyValuePair<uint, OutboundSegment> pair in _sendBuffer)
                 {
                     OutboundSegment segment = pair.Value;
@@ -743,16 +759,17 @@ namespace Ucp.Internal
                     }
 
                     bool acked = UcpSequenceComparer.IsBeforeOrEqual(segment.SequenceNumber, ackPacket.AckNumber);
-                    if (!acked && ackPacket.SackBlocks != null)
+                    if (!acked && sackBlocks != null)
                     {
-                        for (int i = 0; i < ackPacket.SackBlocks.Count; i++)
+                        while (sackIndex < sackBlocks.Count && UcpSequenceComparer.IsBefore(sackBlocks[sackIndex].End, segment.SequenceNumber))
                         {
-                            SackBlock block = ackPacket.SackBlocks[i];
-                            if (UcpSequenceComparer.IsInForwardRange(segment.SequenceNumber, block.Start, block.End))
-                            {
-                                acked = true;
-                                break;
-                            }
+                            sackIndex++;
+                        }
+
+                        if (sackIndex < sackBlocks.Count)
+                        {
+                            SackBlock block = sackBlocks[sackIndex];
+                            acked = UcpSequenceComparer.IsInForwardRange(segment.SequenceNumber, block.Start, block.End);
                         }
                     }
 
@@ -789,24 +806,23 @@ namespace Ucp.Internal
                         continue;
                     }
 
-                    if (ackPacket.SackBlocks != null && ackPacket.SackBlocks.Count > 0)
+                    if (hasSackBlocks)
                     {
-                        uint highestSack = GetHighestSackEnd(ackPacket.SackBlocks);
-                        uint firstMissingSequence = UcpSequenceComparer.Increment(ackPacket.AckNumber);
-                        if (segment.SequenceNumber == firstMissingSequence && UcpSequenceComparer.IsBefore(segment.SequenceNumber, highestSack))
+                        if (UcpSequenceComparer.IsBefore(segment.SequenceNumber, highestSack))
                         {
-                            segment.MissingAckCount++;
-                            if (segment.MissingAckCount >= UcpConstants.DUPLICATE_ACK_THRESHOLD && segment.SendCount == 1 && !segment.NeedsRetransmit)
+                            if (!_sackFastRetransmitNotified.Contains(segment.SequenceNumber))
                             {
-                                long rttForFastRetransmit = GetFastRetransmitAgeThresholdUnsafe();
-                                if (ShouldTriggerEarlyRetransmitUnsafe() || rttForFastRetransmit <= 0 || nowMicros - segment.LastSendMicros >= rttForFastRetransmit)
-                                {
-                                    segment.NeedsRetransmit = true;
-                                    _fastRetransmissions++;
-                                    bool isCongestionLoss = IsCongestionLossUnsafe(sampleRtt);
-                                    _bbr.OnFastRetransmit(nowMicros, isCongestionLoss);
-                                    TraceLogUnsafe("FastRetransmit sequence=" + segment.SequenceNumber + " sack=true congestion=" + isCongestionLoss);
-                                }
+                                segment.MissingAckCount++;
+                            }
+
+                            if (segment.SendCount == 1 && !segment.NeedsRetransmit && ShouldFastRetransmitSackHoleUnsafe(segment, firstMissingSequence, highestSack, nowMicros))
+                            {
+                                segment.NeedsRetransmit = true;
+                                _fastRetransmissions++;
+                                _sackFastRetransmitNotified.Add(segment.SequenceNumber);
+                                bool isCongestionLoss = IsCongestionLossUnsafe(segment.SequenceNumber, sampleRtt, nowMicros, 1);
+                                _bbr.OnFastRetransmit(nowMicros, isCongestionLoss);
+                                TraceLogUnsafe("FastRetransmit sequence=" + segment.SequenceNumber + " sack=true congestion=" + isCongestionLoss);
                             }
                         }
                     }
@@ -814,6 +830,7 @@ namespace Ucp.Internal
 
                 for (int i = 0; i < removeKeys.Count; i++)
                 {
+                    _sackFastRetransmitNotified.Remove(removeKeys[i]);
                     _sendBuffer.Remove(removeKeys[i]);
                 }
 
@@ -890,7 +907,7 @@ namespace Ucp.Internal
 
                 if (notifiedLoss)
                 {
-                    bool isCongestionLoss = nakPacket.MissingSequences.Count >= UcpConstants.BBR_CONGESTION_LOSS_BURST_THRESHOLD && IsCongestionLossUnsafe(0);
+                    bool isCongestionLoss = ClassifyLossesUnsafe(nakPacket.MissingSequences, nowMicros, 0);
                     _bbr.OnPacketLoss(nowMicros, GetRetransmissionRatioUnsafe(), isCongestionLoss);
                     TraceLogUnsafe("NAK loss congestion=" + isCongestionLoss + " count=" + nakPacket.MissingSequences.Count);
                 }
@@ -947,6 +964,67 @@ namespace Ucp.Internal
             return highest;
         }
 
+        private static void SortSackBlocksUnsafe(List<SackBlock> blocks)
+        {
+            if (blocks == null || blocks.Count <= 1)
+            {
+                return;
+            }
+
+            blocks.Sort(delegate (SackBlock left, SackBlock right)
+            {
+                return UcpSequenceComparer.Instance.Compare(left.Start, right.Start);
+            });
+        }
+
+        private bool ShouldFastRetransmitSackHoleUnsafe(OutboundSegment segment, uint firstMissingSequence, uint highestSack, long nowMicros)
+        {
+            if (segment == null || segment.LastSendMicros <= 0)
+            {
+                return false;
+            }
+
+            if (_sackFastRetransmitNotified.Contains(segment.SequenceNumber))
+            {
+                return false;
+            }
+
+            if (!_config.EnableAggressiveSackRecovery)
+            {
+                return false;
+            }
+
+            long reorderGraceMicros = GetSackFastRetransmitReorderGraceMicrosUnsafe();
+            if (nowMicros - segment.LastSendMicros < reorderGraceMicros)
+            {
+                return false;
+            }
+
+            if (segment.SequenceNumber == firstMissingSequence && segment.MissingAckCount >= UcpConstants.SACK_FAST_RETRANSMIT_THRESHOLD)
+            {
+                return true;
+            }
+
+            uint distancePastHole = unchecked(highestSack - segment.SequenceNumber);
+            if (distancePastHole >= UcpConstants.SACK_FAST_RETRANSMIT_DISTANCE_THRESHOLD && segment.MissingAckCount >= UcpConstants.SACK_FAST_RETRANSMIT_THRESHOLD)
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        private long GetSackFastRetransmitReorderGraceMicrosUnsafe()
+        {
+            long rttMicros = _rtoEstimator.SmoothedRttMicros > 0 ? _rtoEstimator.SmoothedRttMicros : _lastRttMicros;
+            if (rttMicros <= 0)
+            {
+                return UcpConstants.SACK_FAST_RETRANSMIT_MIN_REORDER_GRACE_MICROS;
+            }
+
+            return Math.Max(UcpConstants.SACK_FAST_RETRANSMIT_MIN_REORDER_GRACE_MICROS, rttMicros / 2);
+        }
+
         private void UpdateDuplicateAckStateUnsafe(UcpAckPacket ackPacket, long nowMicros, out bool fastRetransmitTriggered)
         {
             fastRetransmitTriggered = false;
@@ -968,7 +1046,7 @@ namespace Ucp.Internal
                             _fastRecoveryActive = true;
                             _fastRetransmissions++;
                             fastRetransmitTriggered = true;
-                            bool isCongestionLoss = IsCongestionLossUnsafe(0);
+                            bool isCongestionLoss = IsCongestionLossUnsafe(lostSeq, 0, nowMicros, 1);
                             _bbr.OnFastRetransmit(nowMicros, isCongestionLoss);
                             TraceLogUnsafe("FastRetransmit sequence=" + lostSeq + " dupAck=true congestion=" + isCongestionLoss);
                         }
@@ -985,16 +1063,184 @@ namespace Ucp.Internal
             _hasLastAckNumber = true;
         }
 
-        private bool IsCongestionLossUnsafe(long sampleRttMicros)
+        private bool IsCongestionLossUnsafe(uint sequenceNumber, long sampleRttMicros, long nowMicros, int contiguousLossCount)
         {
-            long currentRttMicros = sampleRttMicros > 0 ? sampleRttMicros : _lastRttMicros;
-            long smoothedRttMicros = _rtoEstimator.SmoothedRttMicros;
-            if (currentRttMicros <= 0 || smoothedRttMicros <= 0)
+            List<uint> sequences = new List<uint>(1);
+            sequences.Add(sequenceNumber);
+            return ClassifyLossesUnsafe(sequences, nowMicros, sampleRttMicros, contiguousLossCount);
+        }
+
+        private bool ClassifyLossesUnsafe(IList<uint> sequenceNumbers, long nowMicros, long sampleRttMicros)
+        {
+            return ClassifyLossesUnsafe(sequenceNumbers, nowMicros, sampleRttMicros, GetMaxContiguousLossRun(sequenceNumbers));
+        }
+
+        private bool ClassifyLossesUnsafe(IList<uint> sequenceNumbers, long nowMicros, long sampleRttMicros, int contiguousLossCount)
+        {
+            long windowMicros = GetLossClassifierWindowMicrosUnsafe();
+            PruneLossEventsUnsafe(nowMicros, windowMicros);
+            long rttMicros = sampleRttMicros > 0 ? sampleRttMicros : _lastRttMicros;
+            bool addedLoss = false;
+            if (sequenceNumbers != null)
+            {
+                for (int i = 0; i < sequenceNumbers.Count; i++)
+                {
+                    uint sequenceNumber = sequenceNumbers[i];
+                    if (_recentLossSequences.Add(sequenceNumber))
+                    {
+                        _recentLossEvents.Enqueue(new LossEvent { SequenceNumber = sequenceNumber, TimestampMicros = nowMicros, RttMicros = rttMicros });
+                        addedLoss = true;
+                    }
+                }
+            }
+
+            if (addedLoss)
+            {
+                PruneLossEventsUnsafe(nowMicros, windowMicros);
+            }
+
+            int dedupedLossCount = _recentLossEvents.Count;
+            if (dedupedLossCount == 0)
             {
                 return false;
             }
 
-            return currentRttMicros > (long)(smoothedRttMicros * UcpConstants.BBR_CONGESTION_LOSS_RTT_MULTIPLIER);
+            int maxContiguousLossCount = Math.Max(contiguousLossCount, GetMaxContiguousRecentLossRunUnsafe());
+            if (dedupedLossCount <= UcpConstants.BBR_RANDOM_LOSS_MAX_DEDUPED_EVENTS && maxContiguousLossCount < UcpConstants.BBR_CONGESTION_LOSS_BURST_THRESHOLD)
+            {
+                return false;
+            }
+
+            bool clusteredLoss = maxContiguousLossCount >= UcpConstants.BBR_CONGESTION_LOSS_BURST_THRESHOLD || dedupedLossCount > UcpConstants.BBR_CONGESTION_LOSS_WINDOW_THRESHOLD;
+            if (!clusteredLoss)
+            {
+                return false;
+            }
+
+            long medianRttMicros = GetLossWindowMedianRttMicrosUnsafe();
+            long minRttMicros = GetMinimumObservedRttMicrosUnsafe();
+            if (medianRttMicros <= 0 || minRttMicros <= 0)
+            {
+                return false;
+            }
+
+            return medianRttMicros > (long)(minRttMicros * UcpConstants.BBR_CONGESTION_LOSS_RTT_MULTIPLIER);
+        }
+
+        private long GetLossClassifierWindowMicrosUnsafe()
+        {
+            long minRttMicros = GetMinimumObservedRttMicrosUnsafe();
+            if (minRttMicros <= 0)
+            {
+                minRttMicros = _rtoEstimator.SmoothedRttMicros > 0 ? _rtoEstimator.SmoothedRttMicros : _config.MinRtoMicros;
+            }
+
+            return Math.Max(UcpConstants.MICROS_PER_MILLI, minRttMicros * 2);
+        }
+
+        private void PruneLossEventsUnsafe(long nowMicros, long windowMicros)
+        {
+            while (_recentLossEvents.Count > 0 && nowMicros - _recentLossEvents.Peek().TimestampMicros > windowMicros)
+            {
+                LossEvent expired = _recentLossEvents.Dequeue();
+                _recentLossSequences.Remove(expired.SequenceNumber);
+            }
+        }
+
+        private long GetLossWindowMedianRttMicrosUnsafe()
+        {
+            List<long> samples = new List<long>();
+            foreach (LossEvent lossEvent in _recentLossEvents)
+            {
+                if (lossEvent.RttMicros > 0)
+                {
+                    samples.Add(lossEvent.RttMicros);
+                }
+            }
+
+            if (samples.Count == 0 && _lastRttMicros > 0)
+            {
+                samples.Add(_lastRttMicros);
+            }
+
+            if (samples.Count == 0)
+            {
+                return 0;
+            }
+
+            samples.Sort();
+            return samples[samples.Count / 2];
+        }
+
+        private long GetMinimumObservedRttMicrosUnsafe()
+        {
+            long minRttMicros = 0;
+            for (int i = 0; i < _rttSamplesMicros.Count; i++)
+            {
+                long sample = _rttSamplesMicros[i];
+                if (sample > 0 && (minRttMicros == 0 || sample < minRttMicros))
+                {
+                    minRttMicros = sample;
+                }
+            }
+
+            if (minRttMicros == 0 && _lastRttMicros > 0)
+            {
+                minRttMicros = _lastRttMicros;
+            }
+
+            return minRttMicros;
+        }
+
+        private int GetMaxContiguousRecentLossRunUnsafe()
+        {
+            if (_recentLossEvents.Count == 0)
+            {
+                return 0;
+            }
+
+            List<uint> sequenceNumbers = new List<uint>(_recentLossEvents.Count);
+            foreach (LossEvent lossEvent in _recentLossEvents)
+            {
+                sequenceNumbers.Add(lossEvent.SequenceNumber);
+            }
+
+            return GetMaxContiguousLossRun(sequenceNumbers);
+        }
+
+        private static int GetMaxContiguousLossRun(IList<uint> sequenceNumbers)
+        {
+            if (sequenceNumbers == null || sequenceNumbers.Count == 0)
+            {
+                return 0;
+            }
+
+            List<uint> sorted = new List<uint>(sequenceNumbers);
+            sorted.Sort(UcpSequenceComparer.Instance);
+            int maxRun = 1;
+            int currentRun = 1;
+            for (int i = 1; i < sorted.Count; i++)
+            {
+                if (sorted[i] == sorted[i - 1])
+                {
+                    continue;
+                }
+
+                if (unchecked(sorted[i] - sorted[i - 1]) == 1U)
+                {
+                    currentRun++;
+                    if (currentRun > maxRun)
+                    {
+                        maxRun = currentRun;
+                    }
+                }
+                else
+                {
+                    currentRun = 1;
+                }
+            }
+
+            return maxRun;
         }
 
         private long GetFastRetransmitAgeThresholdUnsafe()
@@ -1656,7 +1902,8 @@ namespace Ucp.Internal
                             break;
                         }
 
-                        if (segment.SendCount >= _config.MaxRetransmissions)
+                        bool segmentTimedOutForCongestion = IsCongestionLossUnsafe(segment.SequenceNumber, 0, nowMicros, 1);
+                        if (segment.SendCount >= _config.MaxRetransmissions && segmentTimedOutForCongestion)
                         {
                             _timeoutRetransmissions++;
                             maxRetransmissionsExceeded = true;
@@ -1666,7 +1913,7 @@ namespace Ucp.Internal
                         segment.NeedsRetransmit = true;
                         timedOut = true;
                         rtoRetransmitBudget--;
-                        timedOutForCongestion = timedOutForCongestion || IsCongestionLossUnsafe(0);
+                        timedOutForCongestion = timedOutForCongestion || segmentTimedOutForCongestion;
                         _timeoutRetransmissions++;
                     }
                 }
@@ -1703,7 +1950,10 @@ namespace Ucp.Internal
                 {
                     _bbr.OnPacketLoss(nowMicros, GetRetransmissionRatioUnsafe(), timedOutForCongestion);
                     TraceLogUnsafe("RTO loss congestion=" + timedOutForCongestion + " rto=" + _rtoEstimator.CurrentRtoMicros);
-                    _rtoEstimator.Backoff();
+                    if (timedOutForCongestion)
+                    {
+                        _rtoEstimator.Backoff();
+                    }
                 }
 
                 if (_state == UcpConnectionState.Established && nowMicros - _lastAckSentMicros >= _config.KeepAliveIntervalMicros && nowMicros - _lastActivityMicros >= _config.KeepAliveIntervalMicros)
@@ -1792,6 +2042,8 @@ namespace Ucp.Internal
                     long firstSeenMicros = GetMissingFirstSeenMicrosUnsafe(current);
                     int missingCount;
                     _missingSequenceCounts.TryGetValue(current, out missingCount);
+                    missingCount++;
+                    _missingSequenceCounts[current] = missingCount;
                     if (missingCount >= UcpConstants.NAK_MISSING_THRESHOLD && HasNakReorderGraceExpiredUnsafe(missingCount, firstSeenMicros, nowMicros) && ShouldIssueNakUnsafe(current))
                     {
                         MarkNakIssuedUnsafe(current);

@@ -42,6 +42,7 @@ namespace Ucp
         public int AckSackBlockLimit = UcpConstants.DEFAULT_ACK_SACK_BLOCK_LIMIT;
         public bool LossControlEnable = true;
         public bool EnableDebugLog = false;
+        internal bool EnableAggressiveSackRecovery = false;
 
         public int SendBufferSize
         {
@@ -298,6 +299,7 @@ namespace Ucp
             target.AckSackBlockLimit = AckSackBlockLimit;
             target.LossControlEnable = LossControlEnable;
             target.EnableDebugLog = EnableDebugLog;
+            target.EnableAggressiveSackRecovery = EnableAggressiveSackRecovery;
         }
     }
 
