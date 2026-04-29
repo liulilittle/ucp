@@ -367,12 +367,12 @@ namespace UcpTest
             });
 
             builder.AppendLine("+------------------+----------------+----------------+---------+----------+--------+----------+----------+----------+----------+----------+----------+----------+----------------+----------+----------+----------+");
-            builder.AppendLine("| Scenario         | Throughput Mbps| Target Mbps    | Util%   | Retrans% | Loss%  | A->B ms  | B->A ms  | Avg ms   | P95 ms   | P99 ms   | Jit ms   | CWND     | Current Mbps   | RWND     | Waste%   | Conv ms  |");
+            builder.AppendLine("| Scenario         | Throughput Mbps| Target Mbps    | Util%   | Retrans% | Loss%  | A->B ms  | B->A ms  | Avg ms   | P95 ms   | P99 ms   | Jit ms   | CWND KB  | Current Mbps   | RWND KB  | Waste%   | Conv ms  |");
             builder.AppendLine("+------------------+----------------+----------------+---------+----------+--------+----------+----------+----------+----------+----------+----------+----------+----------------+----------+----------+----------+");
             for (int i = 0; i < snapshot.Count; i++)
             {
                 UcpPerformanceReport report = snapshot[i];
-                builder.AppendLine(string.Format(CultureInfo.InvariantCulture, "| {0,-16} | {1,14:F2} | {2,14:F2} | {3,7:F2} | {4,8:F2} | {5,6:F2} | {6,8:F2} | {7,8:F2} | {8,8:F2} | {9,8:F2} | {10,8:F2} | {11,8:F2} | {12,8} | {13,14:F2} | {14,8} | {15,8:F2} | {16,8} |",
+                builder.AppendLine(string.Format(CultureInfo.InvariantCulture, "| {0,-16} | {1,14:F2} | {2,14:F2} | {3,7:F2} | {4,8:F2} | {5,6:F2} | {6,8:F2} | {7,8:F2} | {8,8:F2} | {9,8:F2} | {10,8:F2} | {11,8:F2} | {12,8:F2} | {13,14:F2} | {14,8:F2} | {15,8:F2} | {16,8} |",
                     Trim(report.ScenarioName, 16),
                     report.ThroughputMbps,
                     report.TargetMbps,
@@ -385,9 +385,9 @@ namespace UcpTest
                     report.P95RttMilliseconds,
                     report.P99RttMilliseconds,
                     report.JitterMilliseconds,
-                    report.CongestionWindowBytes,
+                    report.CongestionWindowBytes / 1024d,
                     report.PacingMbps,
-                    report.RemoteWindowBytes,
+                    report.RemoteWindowBytes / 1024d,
                     report.BandwidthWastePercent,
                     report.ConvergenceMilliseconds));
             }
@@ -444,9 +444,9 @@ namespace UcpTest
                     report.P95RttMicros = FromMilliseconds(ParseDouble(columns[10]));
                     report.P99RttMicros = FromMilliseconds(ParseDouble(columns[11]));
                     report.JitterMicros = FromMilliseconds(ParseDouble(columns[12]));
-                    report.CongestionWindowBytes = ParseInt(columns[13]);
+                    report.CongestionWindowBytes = (int)Math.Round(ParseDouble(columns[13]) * 1024d);
                     report.PacingRateBytesPerSecond = FromMbps(ParseDouble(columns[14]));
-                    report.RemoteWindowBytes = ParseUInt(columns[15]);
+                    report.RemoteWindowBytes = (uint)Math.Round(ParseDouble(columns[15]) * 1024d);
                     report.BandwidthWastePercent = ParseDouble(columns[16]);
                     report.ConvergenceMilliseconds = ParseLong(columns[17]);
                 }
@@ -456,9 +456,9 @@ namespace UcpTest
                     report.P95RttMicros = FromMilliseconds(ParseDouble(columns[8]));
                     report.P99RttMicros = FromMilliseconds(ParseDouble(columns[9]));
                     report.JitterMicros = FromMilliseconds(ParseDouble(columns[10]));
-                    report.CongestionWindowBytes = ParseInt(columns[11]);
+                    report.CongestionWindowBytes = (int)Math.Round(ParseDouble(columns[11]) * 1024d);
                     report.PacingRateBytesPerSecond = FromMbps(ParseDouble(columns[12]));
-                    report.RemoteWindowBytes = ParseUInt(columns[13]);
+                    report.RemoteWindowBytes = (uint)Math.Round(ParseDouble(columns[13]) * 1024d);
                     report.BandwidthWastePercent = ParseDouble(columns[14]);
                     report.ConvergenceMilliseconds = ParseLong(columns[15]);
                 }

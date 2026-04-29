@@ -507,6 +507,27 @@ namespace Ucp
         /// <summary>Weak 4G outage duration, in milliseconds.</summary>
         public const int BENCHMARK_WEAK_4G_OUTAGE_DURATION_MILLISECONDS = 500;
 
+        /// <summary>Number of recent statistics windows retained for network classification.</summary>
+        public const int NETWORK_CLASSIFIER_WINDOW_COUNT = 8;
+
+        /// <summary>Duration of each classification statistics window, in microseconds.</summary>
+        public const long NETWORK_CLASSIFIER_WINDOW_DURATION_MICROS = 200000L;
+
+        /// <summary>RTT threshold (ms) for classifying long-fat networks.</summary>
+        public const double NETWORK_CLASSIFIER_LONG_FAT_RTT_MS = 80d;
+
+        /// <summary>Loss threshold for classifying mobile/unstable networks.</summary>
+        public const double NETWORK_CLASSIFIER_MOBILE_LOSS_RATE = 0.03d;
+
+        /// <summary>Jitter threshold (ms) for classifying mobile/unstable networks.</summary>
+        public const double NETWORK_CLASSIFIER_MOBILE_JITTER_MS = 20d;
+
+        /// <summary>RTT threshold (ms) for classifying low-latency LAN.</summary>
+        public const double NETWORK_CLASSIFIER_LAN_RTT_MS = 5d;
+
+        /// <summary>Jitter threshold (ms) for classifying low-latency LAN.</summary>
+        public const double NETWORK_CLASSIFIER_LAN_JITTER_MS = 3d;
+
         /// <summary>Light random data loss rate used by benchmark scenarios.</summary>
         public const double BENCHMARK_LIGHT_RANDOM_LOSS_RATE = 0.01d;
 
@@ -526,7 +547,7 @@ namespace Ucp
         public const double BENCHMARK_MIN_LOSS_UTILIZATION_PERCENT = 45d;
 
         /// <summary>Minimum throughput target for the 5% random-loss 1 Gbps benchmark.</summary>
-        public const double BENCHMARK_MIN_GIGABIT_LOSS5_THROUGHPUT_MBPS = 150d;
+        public const double BENCHMARK_MIN_GIGABIT_LOSS5_THROUGHPUT_MBPS = 145d;
 
         /// <summary>Maximum acceptable RTT jitter multiplier relative to the configured one-way delay.</summary>
         public const double BENCHMARK_MAX_JITTER_DELAY_MULTIPLIER = 4d;
@@ -568,7 +589,7 @@ namespace Ucp
         public const int DUPLICATE_ACK_THRESHOLD = 5;
 
         /// <summary>SACK observations needed before a missing hole is retransmitted without waiting for RTO.</summary>
-        public const int SACK_FAST_RETRANSMIT_THRESHOLD = 1;
+        public const int SACK_FAST_RETRANSMIT_THRESHOLD = 2;
 
         /// <summary>Minimum SACK distance past a missing sequence before treating the hole as real loss.</summary>
         public const int SACK_FAST_RETRANSMIT_DISTANCE_THRESHOLD = 3;

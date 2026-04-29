@@ -24,5 +24,6 @@ namespace Ucp.Internal
         public long LastRttMicros;
         public System.Collections.Generic.List<long> RttSamplesMicros = new System.Collections.Generic.List<long>();
         public bool ReceivedReset;
+        public int CurrentNetworkClass;
     }
 }

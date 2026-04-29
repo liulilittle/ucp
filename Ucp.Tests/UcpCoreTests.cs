@@ -704,6 +704,85 @@ namespace UcpTest
         }
 
         [Fact]
+        public async Task Integration_OrderedSmallSegments_AreDeliveredImmediately()
+        {
+            int mss = UcpConstants.MSS;
+            NetworkSimulator simulator = new NetworkSimulator(fixedDelayMilliseconds: 1, jitterMilliseconds: 0, bandwidthBytesPerSecond: mss * 10 * 8, dynamicJitterRangeMilliseconds: 0, dynamicWaveAmplitudeMilliseconds: 0);
+            UcpConfiguration immediateConfig = UcpConfiguration.GetOptimizedConfig();
+            immediateConfig.DelayedAckTimeoutMicros = 0;
+            immediateConfig.MinPacingIntervalMicros = 0;
+            immediateConfig.InitialBandwidthBytesPerSecond = mss * 10 * 8;
+            immediateConfig.MaxPacingRateBytesPerSecond = mss * 10 * 8;
+            UcpServer server = new UcpServer(simulator.CreateTransport("server"), immediateConfig);
+            UcpConnection client = new UcpConnection(simulator.CreateTransport("client"), true, immediateConfig, null);
+            server.Start(40014);
+            try
+            {
+                Task<UcpConnection> acceptTask = server.AcceptAsync();
+                await client.ConnectAsync(new IPEndPoint(IPAddress.Loopback, 40014));
+                UcpConnection serverConnection = await acceptTask;
+                List<double> deliveryDelays = new List<double>();
+                Queue<DateTime> sendTimes = new Queue<DateTime>();
+                TaskCompletionSource<bool> receivedAll = new TaskCompletionSource<bool>();
+                int receivedCount = 0;
+                serverConnection.OnData += delegate (byte[] buffer, int offset, int count)
+                {
+                    DateTime sentAt;
+                    lock (sendTimes)
+                    {
+                        sentAt = sendTimes.Count == 0 ? DateTime.UtcNow : sendTimes.Dequeue();
+                    }
+
+                    deliveryDelays.Add((DateTime.UtcNow - sentAt).TotalMilliseconds - 1d);
+                    receivedCount++;
+                    if (receivedCount == 16)
+                    {
+                        receivedAll.TrySetResult(true);
+                    }
+                };
+
+                for (int i = 0; i < 8; i++)
+                {
+                    byte[] payload = Encoding.ASCII.GetBytes("W" + i.ToString("D2"));
+                    bool writeOk = await client.WriteAsync(payload, 0, payload.Length);
+                    Assert.True(writeOk);
+                }
+
+                await Task.Delay(20);
+
+                for (int i = 0; i < 8; i++)
+                {
+                    byte[] payload = Encoding.ASCII.GetBytes("M" + i.ToString("D2"));
+                    lock (sendTimes)
+                    {
+                        sendTimes.Enqueue(DateTime.UtcNow);
+                    }
+
+                    bool writeOk = await client.WriteAsync(payload, 0, payload.Length);
+                    Assert.True(writeOk);
+                    await Task.Delay(2);
+                }
+
+                Task completed = await Task.WhenAny(receivedAll.Task, Task.Delay(2000));
+                Assert.Equal(receivedAll.Task, completed);
+                double maxDelay = 0d;
+                for (int i = 0; i < deliveryDelays.Count; i++)
+                {
+                    if (deliveryDelays[i] > maxDelay)
+                    {
+                        maxDelay = deliveryDelays[i];
+                    }
+                }
+
+                Assert.True(maxDelay < 50d, "max ordered delivery delay was " + maxDelay.ToString("F2") + "ms");
+            }
+            finally
+            {
+                server.Stop();
+            }
+        }
+
+        [Fact]
         public async Task Integration_GigabitIdeal_ReportsHighUtilization()
         {
             UcpPerformanceReport report = await RunLineRateBenchmarkAsync(
@@ -923,6 +1002,34 @@ namespace UcpTest
 
             Assert.True(report.UtilizationPercent > 25d);
             Assert.True(report.ElapsedMilliseconds < UcpConstants.BENCHMARK_READ_TIMEOUT_MILLISECONDS);
+        }
+
+        [Theory]
+        [InlineData(100000000 / 8, 0.002d, "100M_Loss0.2")]
+        [InlineData(100000000 / 8, 0.01d, "100M_Loss1")]
+        [InlineData(100000000 / 8, 0.10d, "100M_Loss10")]
+        [InlineData(1000000000 / 8, 0.03d, "1G_Loss3")]
+        public async Task Integration_CoverageLossBandwidth(int bandwidthBytesPerSecond, double lossRate, string scenarioName)
+        {
+            int payloadBytes = bandwidthBytesPerSecond >= UcpConstants.BENCHMARK_1_GBPS_BYTES_PER_SECOND ? UcpConstants.BENCHMARK_1G_LOSS_PAYLOAD_BYTES : 2 * 1024 * 1024;
+            int seed = 20260506 + (int)(lossRate * 1000d);
+            bool autoProbe = bandwidthBytesPerSecond >= UcpConstants.BENCHMARK_10_GBPS_BYTES_PER_SECOND;
+            UcpPerformanceReport report = await RunLineRateBenchmarkAsync(
+                scenarioName,
+                UcpConstants.BENCHMARK_BASE_PORT + 13 + (int)(lossRate * 100d),
+                bandwidthBytesPerSecond,
+                payloadBytes,
+                bandwidthBytesPerSecond > UcpConstants.BENCHMARK_100_MBPS_BYTES_PER_SECOND ? 20 : 10,
+                4,
+                lossRate,
+                UcpConstants.DEFAULT_MAX_BANDWIDTH_LOSS_PERCENT,
+                autoProbe,
+                seed,
+                CreateInitialDataDropRule(lossRate, seed));
+
+            Assert.True(report.ThroughputBytesPerSecond > 0);
+            Assert.True(report.UtilizationPercent > 0);
+            Assert.True(report.RetransmissionPercent <= UcpConstants.MAX_MAX_BANDWIDTH_LOSS_PERCENT);
         }
 
         [Fact]

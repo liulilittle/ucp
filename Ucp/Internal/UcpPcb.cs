@@ -217,6 +217,7 @@ namespace Ucp.Internal
                 diagnostics.LastRttMicros = _lastRttMicros;
                 diagnostics.RttSamplesMicros.AddRange(_rttSamplesMicros);
                 diagnostics.ReceivedReset = _rstReceived;
+                diagnostics.CurrentNetworkClass = (int)_bbr.CurrentNetworkClass;
 
                 int bufferedBytes = 0;
                 foreach (ReceiveChunk chunk in _receiveQueue)
@@ -1001,12 +1002,6 @@ namespace Ucp.Internal
             }
 
             if (segment.SequenceNumber == firstMissingSequence && segment.MissingAckCount >= UcpConstants.SACK_FAST_RETRANSMIT_THRESHOLD)
-            {
-                return true;
-            }
-
-            uint distancePastHole = unchecked(highestSack - segment.SequenceNumber);
-            if (distancePastHole >= UcpConstants.SACK_FAST_RETRANSMIT_DISTANCE_THRESHOLD && segment.MissingAckCount >= UcpConstants.SACK_FAST_RETRANSMIT_THRESHOLD)
             {
                 return true;
             }

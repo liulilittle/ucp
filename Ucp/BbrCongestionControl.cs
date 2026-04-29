@@ -53,6 +53,36 @@ namespace Ucp
             RandomLoss
         }
 
+        public enum NetworkClass
+        {
+            Default,
+            LowLatencyLAN,
+            LossyLongFat,
+            MobileUnstable,
+            CongestedBottleneck,
+            SymmetricVPN
+        }
+
+        private struct ClassifierWindow
+        {
+            public double AvgRttMicros;
+            public double LossRate;
+            public double JitterMicros;
+            public double ThroughputRatio;
+        }
+
+        private readonly ClassifierWindow[] _classifierWindows = new ClassifierWindow[UcpConstants.NETWORK_CLASSIFIER_WINDOW_COUNT];
+        private int _classifierWindowIndex;
+        private int _classifierWindowCount;
+        private long _classifierWindowStartMicros;
+        private long _classifierWindowSentBytes;
+        private long _classifierWindowMinRttMicros;
+        private long _classifierWindowMaxRttMicros;
+        private long _classifierWindowRttSumMicros;
+        private int _classifierWindowRttCount;
+
+        public NetworkClass CurrentNetworkClass { get; private set; }
+
         public BbrMode Mode { get; private set; }
 
         public double BtlBwBytesPerSecond { get; private set; }
@@ -120,6 +150,7 @@ namespace Ucp
             if (deliveredBytes > 0)
             {
                 _totalDeliveredBytes += deliveredBytes;
+                _consecutiveNonCongestionLosses = 0;
                 double deliveryRate = deliveredBytes * UcpConstants.MICROS_PER_SECOND / (double)intervalMicros;
                 if (PacingRateBytesPerSecond > 0)
                 {
@@ -140,6 +171,9 @@ namespace Ucp
             {
                 AddRttSample(sampleRttMicros);
             }
+
+            AdvanceClassifierWindow(nowMicros, deliveredBytes + flightBytes, sampleRttMicros, GetRecentLossRatio(nowMicros));
+            CurrentNetworkClass = ClassifyNetworkPath();
 
             _networkCondition = ClassifyNetworkCondition(nowMicros);
             UpdateEstimatedLossPercent(nowMicros);
@@ -248,7 +282,14 @@ namespace Ucp
             {
                 TraceLog("RandomLoss lossRate=" + lossRate.ToString("F4"));
                 _fastRecoveryEnteredMicros = nowMicros;
-                if (Mode == BbrMode.ProbeBw)
+                _consecutiveNonCongestionLosses++;
+                long outageGapMicros = Math.Max(MinRttMicros > 0 ? MinRttMicros * 3 : 0, 300000L);
+                if (_consecutiveNonCongestionLosses >= 3 && nowMicros - _lastAckMicros >= outageGapMicros)
+                {
+                    PacingGain = Math.Max(1.5d, PacingGain);
+                    _consecutiveNonCongestionLosses = 0;
+                }
+                else if (Mode == BbrMode.ProbeBw)
                 {
                     PacingGain = Math.Max(PacingGain, CalculatePacingGain(nowMicros));
                     RecalculateModel(nowMicros);
@@ -817,5 +858,109 @@ namespace Ucp
                 Trace.WriteLine("[UCP BBR] " + message);
             }
         }
+
+        private void AdvanceClassifierWindow(long nowMicros, int sentOrAckedBytes, long sampleRttMicros, double lossRateSnapshot)
+        {
+            if (_classifierWindowStartMicros == 0)
+            {
+                _classifierWindowStartMicros = nowMicros;
+            }
+
+            _classifierWindowSentBytes += Math.Max(0, sentOrAckedBytes);
+            if (sampleRttMicros > 0)
+            {
+                _classifierWindowRttSumMicros += sampleRttMicros;
+                _classifierWindowRttCount++;
+                if (_classifierWindowMinRttMicros == 0 || sampleRttMicros < _classifierWindowMinRttMicros)
+                {
+                    _classifierWindowMinRttMicros = sampleRttMicros;
+                }
+
+                if (sampleRttMicros > _classifierWindowMaxRttMicros)
+                {
+                    _classifierWindowMaxRttMicros = sampleRttMicros;
+                }
+            }
+
+            if (nowMicros - _classifierWindowStartMicros >= UcpConstants.NETWORK_CLASSIFIER_WINDOW_DURATION_MICROS)
+            {
+                ref ClassifierWindow window = ref _classifierWindows[_classifierWindowIndex];
+                window.AvgRttMicros = _classifierWindowRttCount > 0 ? _classifierWindowRttSumMicros / (double)_classifierWindowRttCount : 0d;
+                window.JitterMicros = _classifierWindowMinRttMicros > 0 && _classifierWindowMaxRttMicros > 0 ? (_classifierWindowMaxRttMicros - _classifierWindowMinRttMicros) : 0d;
+                window.LossRate = lossRateSnapshot;
+                window.ThroughputRatio = BtlBwBytesPerSecond > 0 ? Math.Min(1d, (_classifierWindowSentBytes / (double)Math.Max(1, nowMicros - _classifierWindowStartMicros)) / BtlBwBytesPerSecond) : 0d;
+                _classifierWindowIndex = (_classifierWindowIndex + 1) % UcpConstants.NETWORK_CLASSIFIER_WINDOW_COUNT;
+                if (_classifierWindowCount < UcpConstants.NETWORK_CLASSIFIER_WINDOW_COUNT)
+                {
+                    _classifierWindowCount++;
+                }
+
+                _classifierWindowStartMicros = nowMicros;
+                _classifierWindowSentBytes = 0;
+                _classifierWindowMinRttMicros = 0;
+                _classifierWindowMaxRttMicros = 0;
+                _classifierWindowRttSumMicros = 0;
+                _classifierWindowRttCount = 0;
+            }
+        }
+
+        private NetworkClass ClassifyNetworkPath()
+        {
+            if (_classifierWindowCount < 2)
+            {
+                return NetworkClass.Default;
+            }
+
+            double avgRtt = 0d;
+            double avgLoss = 0d;
+            double avgJitter = 0d;
+            double minThroughput = 1d;
+            for (int i = 0; i < _classifierWindowCount; i++)
+            {
+                avgRtt += _classifierWindows[i].AvgRttMicros;
+                avgLoss += _classifierWindows[i].LossRate;
+                avgJitter += _classifierWindows[i].JitterMicros;
+                if (_classifierWindows[i].ThroughputRatio > 0 && _classifierWindows[i].ThroughputRatio < minThroughput)
+                {
+                    minThroughput = _classifierWindows[i].ThroughputRatio;
+                }
+            }
+
+            avgRtt /= _classifierWindowCount;
+            avgLoss /= _classifierWindowCount;
+            avgJitter /= _classifierWindowCount;
+
+            double avgRttMs = avgRtt / UcpConstants.MICROS_PER_MILLI;
+            double avgJitterMs = avgJitter / UcpConstants.MICROS_PER_MILLI;
+
+            if (avgRttMs < UcpConstants.NETWORK_CLASSIFIER_LAN_RTT_MS && avgLoss < 0.001d && avgJitterMs < UcpConstants.NETWORK_CLASSIFIER_LAN_JITTER_MS)
+            {
+                return NetworkClass.LowLatencyLAN;
+            }
+
+            if (avgLoss > UcpConstants.NETWORK_CLASSIFIER_MOBILE_LOSS_RATE && avgJitterMs > UcpConstants.NETWORK_CLASSIFIER_MOBILE_JITTER_MS)
+            {
+                return NetworkClass.MobileUnstable;
+            }
+
+            if (avgRttMs > UcpConstants.NETWORK_CLASSIFIER_LONG_FAT_RTT_MS && avgLoss > 0.01d)
+            {
+                return NetworkClass.LossyLongFat;
+            }
+
+            if (minThroughput < 0.7d && avgRttMs > _classifierWindows[0].AvgRttMicros / UcpConstants.MICROS_PER_MILLI * 1.1d)
+            {
+                return NetworkClass.CongestedBottleneck;
+            }
+
+            if (avgRttMs > 30d)
+            {
+                return NetworkClass.SymmetricVPN;
+            }
+
+            return NetworkClass.Default;
+        }
+
+        private int _consecutiveNonCongestionLosses;
     }
 }

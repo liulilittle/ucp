@@ -22,6 +22,9 @@ namespace UcpTest.TestTransport
         private const long SchedulerCoalescingMicros = 1000;
         private const long LogicalSenderIdleGapMicros = 500000;
         private const int HighBandwidthLogicalClockThresholdBytesPerSecond = 10 * 1024 * 1024;
+        private const int DefaultDynamicJitterRangeMilliseconds = 3;
+        private const int DefaultDynamicWaveAmplitudeMilliseconds = 2;
+        private const int DynamicWavePeriodMilliseconds = 5000;
         private int _nextPort = 30000;
         private long _nextForwardTransmitAvailableMicros;
         private long _nextReverseTransmitAvailableMicros;
@@ -34,7 +37,7 @@ namespace UcpTest.TestTransport
         private long _lastDataScheduledMicros;
         private long _logicalDataBytes;
 
-        public NetworkSimulator(double lossRate = 0, int fixedDelayMilliseconds = 0, int jitterMilliseconds = 0, int bandwidthBytesPerSecond = 0, int seed = 1234, Func<SimulatedDatagram, bool>? dropRule = null, double duplicateRate = 0, double reorderRate = 0, int forwardDelayMilliseconds = -1, int backwardDelayMilliseconds = -1, int forwardJitterMilliseconds = -1, int backwardJitterMilliseconds = -1)
+        public NetworkSimulator(double lossRate = 0, int fixedDelayMilliseconds = 0, int jitterMilliseconds = 0, int bandwidthBytesPerSecond = 0, int seed = 1234, Func<SimulatedDatagram, bool>? dropRule = null, double duplicateRate = 0, double reorderRate = 0, int forwardDelayMilliseconds = -1, int backwardDelayMilliseconds = -1, int forwardJitterMilliseconds = -1, int backwardJitterMilliseconds = -1, int dynamicJitterRangeMilliseconds = DefaultDynamicJitterRangeMilliseconds, int dynamicWaveAmplitudeMilliseconds = DefaultDynamicWaveAmplitudeMilliseconds)
         {
             LossRate = lossRate;
             FixedDelayMilliseconds = fixedDelayMilliseconds;
@@ -43,6 +46,8 @@ namespace UcpTest.TestTransport
             BackwardDelayMilliseconds = backwardDelayMilliseconds >= 0 ? backwardDelayMilliseconds : fixedDelayMilliseconds;
             ForwardJitterMilliseconds = forwardJitterMilliseconds >= 0 ? forwardJitterMilliseconds : jitterMilliseconds;
             BackwardJitterMilliseconds = backwardJitterMilliseconds >= 0 ? backwardJitterMilliseconds : jitterMilliseconds;
+            DynamicJitterRangeMilliseconds = dynamicJitterRangeMilliseconds;
+            DynamicWaveAmplitudeMilliseconds = dynamicWaveAmplitudeMilliseconds;
             BandwidthBytesPerSecond = bandwidthBytesPerSecond;
             _random = new Random(seed);
             _dropRule = dropRule;
@@ -63,6 +68,10 @@ namespace UcpTest.TestTransport
         public int ForwardJitterMilliseconds { get; private set; }
 
         public int BackwardJitterMilliseconds { get; private set; }
+
+        public int DynamicJitterRangeMilliseconds { get; private set; }
+
+        public int DynamicWaveAmplitudeMilliseconds { get; private set; }
 
         public int BandwidthBytesPerSecond { get; private set; }
 
@@ -155,6 +164,8 @@ namespace UcpTest.TestTransport
                 BackwardDelayMilliseconds = fixedDelayMilliseconds;
                 ForwardJitterMilliseconds = jitterMilliseconds;
                 BackwardJitterMilliseconds = jitterMilliseconds;
+                DynamicJitterRangeMilliseconds = DefaultDynamicJitterRangeMilliseconds;
+                DynamicWaveAmplitudeMilliseconds = DefaultDynamicWaveAmplitudeMilliseconds;
                 BandwidthBytesPerSecond = bandwidthBytesPerSecond;
                 _duplicateRate = duplicateRate;
                 _reorderRate = reorderRate;
@@ -450,7 +461,18 @@ namespace UcpTest.TestTransport
                 jitter = _random.Next(-jitterMilliseconds, jitterMilliseconds + 1);
             }
 
-            long propagationMicros = (fixedDelayMilliseconds + jitter) * 1000L;
+            int dynamicJitter = DynamicJitterRangeMilliseconds > 0 ? _random.Next(-DynamicJitterRangeMilliseconds, DynamicJitterRangeMilliseconds + 1) : 0;
+            double phaseOffset = forwardDirection ? 0d : Math.PI / 2d;
+            double wave = 0d;
+            if (DynamicWaveAmplitudeMilliseconds > 0)
+            {
+                long nowForWaveMicros = DateTime.UtcNow.Ticks / 10L;
+                double phase = ((nowForWaveMicros % (DynamicWavePeriodMilliseconds * 1000L)) / (double)(DynamicWavePeriodMilliseconds * 1000L)) * Math.PI * 2d;
+                wave = Math.Sin(phase + phaseOffset) * DynamicWaveAmplitudeMilliseconds;
+            }
+
+            int directionBias = forwardDirection ? 1 : -1;
+            long propagationMicros = (long)Math.Round((fixedDelayMilliseconds + jitter + dynamicJitter + wave + directionBias) * 1000d);
             if (propagationMicros < 0)
             {
                 propagationMicros = 0;
