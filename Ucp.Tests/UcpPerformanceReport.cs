@@ -23,10 +23,15 @@ namespace UcpTest
         public double BandwidthWastePercent;
         public long DataPacketsSent;
         public long RetransmittedPackets;
+        public long AckPacketsSent;
+        public long NakPacketsSent;
+        public long FastRetransmissions;
+        public long TimeoutRetransmissions;
         public long ElapsedMilliseconds;
         public double TargetBandwidthBytesPerSecond;
         public double UtilizationPercent;
         public double EstimatedLossPercent;
+        public long ConvergenceMilliseconds;
         public string Note = string.Empty;
 
         public double ThroughputMbps
@@ -47,6 +52,26 @@ namespace UcpTest
         public double RetransmissionPercent
         {
             get { return RetransmissionRatio * 100d; }
+        }
+
+        public double AverageRttMilliseconds
+        {
+            get { return ToMilliseconds(AverageRttMicros); }
+        }
+
+        public double P95RttMilliseconds
+        {
+            get { return ToMilliseconds(P95RttMicros); }
+        }
+
+        public double P99RttMilliseconds
+        {
+            get { return ToMilliseconds(P99RttMicros); }
+        }
+
+        public double JitterMilliseconds
+        {
+            get { return ToMilliseconds(JitterMicros); }
         }
 
         private static readonly object Sync = new object();
@@ -72,6 +97,10 @@ namespace UcpTest
             performance.BandwidthWastePercent = report.DataPacketsSent == 0 ? 0 : report.RetransmittedPackets * 100d / report.DataPacketsSent;
             performance.DataPacketsSent = report.DataPacketsSent;
             performance.RetransmittedPackets = report.RetransmittedPackets;
+            performance.AckPacketsSent = report.AckPacketsSent;
+            performance.NakPacketsSent = report.NakPacketsSent;
+            performance.FastRetransmissions = report.FastRetransmissions;
+            performance.TimeoutRetransmissions = report.TimeoutRetransmissions;
             performance.TargetBandwidthBytesPerSecond = targetBandwidthBytesPerSecond;
             performance.UtilizationPercent = targetBandwidthBytesPerSecond <= 0 ? 0 : throughputBytesPerSecond * 100d / targetBandwidthBytesPerSecond;
             performance.EstimatedLossPercent = report.EstimatedLossPercent;
@@ -92,11 +121,11 @@ namespace UcpTest
             builder.AppendLine("Throughput(Mbps): " + report.ThroughputMbps.ToString("F2"));
             builder.AppendLine("Target(Mbps): " + report.TargetMbps.ToString("F2"));
             builder.AppendLine("Retransmission(%): " + report.RetransmissionPercent.ToString("F2"));
-            builder.AppendLine("LastRtt(us): " + report.LastRttMicros);
-            builder.AppendLine("AverageRtt(us): " + report.AverageRttMicros);
-            builder.AppendLine("P95Rtt(us): " + report.P95RttMicros);
-            builder.AppendLine("P99Rtt(us): " + report.P99RttMicros);
-            builder.AppendLine("Jitter(us): " + report.JitterMicros);
+            builder.AppendLine("LastRtt(ms): " + ToMilliseconds(report.LastRttMicros).ToString("F2"));
+            builder.AppendLine("AverageRtt(ms): " + report.AverageRttMilliseconds.ToString("F2"));
+            builder.AppendLine("P95Rtt(ms): " + report.P95RttMilliseconds.ToString("F2"));
+            builder.AppendLine("P99Rtt(ms): " + report.P99RttMilliseconds.ToString("F2"));
+            builder.AppendLine("Jitter(ms): " + report.JitterMilliseconds.ToString("F2"));
             builder.AppendLine("CWND(bytes): " + report.CongestionWindowBytes);
             builder.AppendLine("Pacing(Mbps): " + report.PacingMbps.ToString("F2"));
             builder.AppendLine("RWND(bytes): " + report.RemoteWindowBytes);
@@ -104,7 +133,12 @@ namespace UcpTest
             builder.AppendLine("EstimatedLoss(%): " + report.EstimatedLossPercent.ToString("F2"));
             builder.AppendLine("DataPacketsSent: " + report.DataPacketsSent);
             builder.AppendLine("RetransmittedPackets: " + report.RetransmittedPackets);
+            builder.AppendLine("AckPacketsSent: " + report.AckPacketsSent);
+            builder.AppendLine("NakPacketsSent: " + report.NakPacketsSent);
+            builder.AppendLine("FastRetransmissions: " + report.FastRetransmissions);
+            builder.AppendLine("TimeoutRetransmissions: " + report.TimeoutRetransmissions);
             builder.AppendLine("Elapsed(ms): " + report.ElapsedMilliseconds);
+            builder.AppendLine("Convergence(ms): " + report.ConvergenceMilliseconds);
             builder.AppendLine();
             File.AppendAllText(filePath, builder.ToString(), Encoding.UTF8);
             WriteSummary(Path.Combine(Path.GetDirectoryName(filePath) ?? AppContext.BaseDirectory, "test_report.txt"));
@@ -169,6 +203,8 @@ namespace UcpTest
             bool hasHighLoss = false;
             bool hasLongFatPipe = false;
             bool hasPacing = false;
+            bool hasGigabitLoss = false;
+            bool hasBurstLoss = false;
             for (int i = 0; i < parsedReports.Count; i++)
             {
                 UcpPerformanceReport report = parsedReports[i];
@@ -229,11 +265,35 @@ namespace UcpTest
                         return false;
                     }
                 }
+                else if (report.ScenarioName == "Gigabit_Loss5")
+                {
+                    hasGigabitLoss = true;
+                    if (report.EstimatedLossPercent > UcpConstants.MAX_MAX_BANDWIDTH_LOSS_PERCENT)
+                    {
+                        errorMessage = "Gigabit_Loss5 exceeded the configured loss budget.";
+                        return false;
+                    }
+                }
+                else if (report.ScenarioName == "BurstLoss")
+                {
+                    hasBurstLoss = true;
+                    if (report.RetransmissionRatio <= 0 || report.RetransmissionRatio >= 0.45d)
+                    {
+                        errorMessage = "BurstLoss retransmission ratio is outside the expected range.";
+                        return false;
+                    }
+                }
             }
 
             if (!hasNoLoss || !hasLossy || !hasHighLoss || !hasLongFatPipe || !hasPacing)
             {
                 errorMessage = "Report is missing one or more required scenarios.";
+                return false;
+            }
+
+            if (!hasGigabitLoss || !hasBurstLoss)
+            {
+                errorMessage = "Report is missing one or more production benchmark scenarios.";
                 return false;
             }
 
@@ -248,29 +308,31 @@ namespace UcpTest
                 return GetScenarioOrder(left.ScenarioName).CompareTo(GetScenarioOrder(right.ScenarioName));
             });
 
-            builder.AppendLine("+------------------+----------------+----------------+---------+----------+----------+----------+----------+----------+----------+----------------+----------+----------+");
-            builder.AppendLine("| Scenario         | Throughput Mb  | Target Mbps    | Util%   | Retrans% | Avg RTT  | P95 RTT  | P99 RTT  | Jitter   | CWND     | Current Mbps   | RWND     | Waste%   |");
-            builder.AppendLine("+------------------+----------------+----------------+---------+----------+----------+----------+----------+----------+----------+----------------+----------+----------+");
+            builder.AppendLine("+------------------+----------------+----------------+---------+----------+--------+----------+----------+----------+----------+----------+----------------+----------+----------+----------+");
+            builder.AppendLine("| Scenario         | Throughput Mbps| Target Mbps    | Util%   | Retrans% | Loss%  | Avg ms   | P95 ms   | P99 ms   | Jit ms   | CWND     | Current Mbps   | RWND     | Waste%   | Conv ms  |");
+            builder.AppendLine("+------------------+----------------+----------------+---------+----------+--------+----------+----------+----------+----------+----------+----------------+----------+----------+----------+");
             for (int i = 0; i < snapshot.Count; i++)
             {
                 UcpPerformanceReport report = snapshot[i];
-                builder.AppendLine(string.Format(CultureInfo.InvariantCulture, "| {0,-16} | {1,14:F2} | {2,14:F2} | {3,7:F2} | {4,8:F2} | {5,8} | {6,8} | {7,8} | {8,8} | {9,8} | {10,14:F2} | {11,8} | {12,8:F2} |",
+                builder.AppendLine(string.Format(CultureInfo.InvariantCulture, "| {0,-16} | {1,14:F2} | {2,14:F2} | {3,7:F2} | {4,8:F2} | {5,6:F2} | {6,8:F2} | {7,8:F2} | {8,8:F2} | {9,8:F2} | {10,8} | {11,14:F2} | {12,8} | {13,8:F2} | {14,8} |",
                     Trim(report.ScenarioName, 16),
                     report.ThroughputMbps,
                     report.TargetMbps,
                     report.UtilizationPercent,
                     report.RetransmissionPercent,
-                    report.AverageRttMicros,
-                    report.P95RttMicros,
-                    report.P99RttMicros,
-                    report.JitterMicros,
+                    report.EstimatedLossPercent,
+                    report.AverageRttMilliseconds,
+                    report.P95RttMilliseconds,
+                    report.P99RttMilliseconds,
+                    report.JitterMilliseconds,
                     report.CongestionWindowBytes,
                     report.PacingMbps,
                     report.RemoteWindowBytes,
-                    report.BandwidthWastePercent));
+                    report.BandwidthWastePercent,
+                    report.ConvergenceMilliseconds));
             }
 
-            builder.AppendLine("+------------------+----------------+----------------+---------+----------+----------+----------+----------+----------+----------+----------------+----------+----------+");
+            builder.AppendLine("+------------------+----------------+----------------+---------+----------+--------+----------+----------+----------+----------+----------+----------------+----------+----------+----------+");
             if (includeNotes)
             {
                 builder.AppendLine("Notes:");
@@ -302,7 +364,7 @@ namespace UcpTest
                 }
 
                 string[] columns = line.Split('|');
-                if (columns.Length < 15)
+                if (columns.Length < 17)
                 {
                     continue;
                 }
@@ -313,14 +375,16 @@ namespace UcpTest
                 report.TargetBandwidthBytesPerSecond = FromMbps(ParseDouble(columns[3]));
                 report.UtilizationPercent = ParseDouble(columns[4]);
                 report.RetransmissionRatio = ParseDouble(columns[5]) / 100d;
-                report.AverageRttMicros = ParseLong(columns[6]);
-                report.P95RttMicros = ParseLong(columns[7]);
-                report.P99RttMicros = ParseLong(columns[8]);
-                report.JitterMicros = ParseLong(columns[9]);
-                report.CongestionWindowBytes = ParseInt(columns[10]);
-                report.PacingRateBytesPerSecond = FromMbps(ParseDouble(columns[11]));
-                report.RemoteWindowBytes = ParseUInt(columns[12]);
-                report.BandwidthWastePercent = ParseDouble(columns[13]);
+                report.EstimatedLossPercent = ParseDouble(columns[6]);
+                report.AverageRttMicros = FromMilliseconds(ParseDouble(columns[7]));
+                report.P95RttMicros = FromMilliseconds(ParseDouble(columns[8]));
+                report.P99RttMicros = FromMilliseconds(ParseDouble(columns[9]));
+                report.JitterMicros = FromMilliseconds(ParseDouble(columns[10]));
+                report.CongestionWindowBytes = ParseInt(columns[11]);
+                report.PacingRateBytesPerSecond = FromMbps(ParseDouble(columns[12]));
+                report.RemoteWindowBytes = ParseUInt(columns[13]);
+                report.BandwidthWastePercent = ParseDouble(columns[14]);
+                report.ConvergenceMilliseconds = ParseLong(columns[15]);
                 report.Note = BuildNote(report);
                 reports.Add(report);
             }
@@ -445,6 +509,16 @@ namespace UcpTest
             return megabitsPerSecond * UcpConstants.BITS_PER_MEGABIT / UcpConstants.BITS_PER_BYTE;
         }
 
+        private static double ToMilliseconds(long micros)
+        {
+            return micros / (double)UcpConstants.MICROS_PER_MILLI;
+        }
+
+        private static long FromMilliseconds(double milliseconds)
+        {
+            return (long)Math.Round(milliseconds * UcpConstants.MICROS_PER_MILLI);
+        }
+
         private static int GetScenarioOrder(string scenarioName)
         {
             if (scenarioName == "NoLoss")
@@ -472,6 +546,41 @@ namespace UcpTest
                 return 50;
             }
 
+            if (scenarioName == "Benchmark100M")
+            {
+                return 60;
+            }
+
+            if (scenarioName == "Gigabit_Ideal")
+            {
+                return 70;
+            }
+
+            if (scenarioName == "Gigabit_Loss1")
+            {
+                return 80;
+            }
+
+            if (scenarioName == "Gigabit_Loss5")
+            {
+                return 90;
+            }
+
+            if (scenarioName == "LongFat_100M")
+            {
+                return 100;
+            }
+
+            if (scenarioName == "Benchmark10G")
+            {
+                return 110;
+            }
+
+            if (scenarioName == "BurstLoss")
+            {
+                return 120;
+            }
+
             return 1000;
         }
 
@@ -490,6 +599,11 @@ namespace UcpTest
             if (report.ScenarioName == "HighLossHighRtt")
             {
                 return "loss recovery scenario; utilization is expected below target";
+            }
+
+            if (report.ConvergenceMilliseconds > 0)
+            {
+                return "auto-probe benchmark; convergence is the time until pacing reached the stable target band";
             }
 
             return string.Empty;

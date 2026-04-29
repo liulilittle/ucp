@@ -28,9 +28,12 @@ public class UcpConfiguration
 - `ProbeBwLowGain`
 - `ProbeBwCwndGain`
 - `AckSackBlockLimit`
+- `MaxBandwidthLossPercent`
+- `LossControlEnable`
 
 配置 API 只有 `UcpConfiguration` 一个类型，公开成员采用 .NET PascalCase 命名。
-`UcpConfiguration.GetOptimizedConfig()` 返回面向高延迟/高丢包场景的推荐配置，包含 200ms 最小 RTO、30s ProbeRTT 周期、100ms ProbeRTT 持续时间、1.2 RTO 退避和 20 包初始拥塞窗口。
+`UcpConfiguration.GetOptimizedConfig()` 返回面向高延迟/高丢包场景的推荐配置，包含 200ms 最小 RTO、30s ProbeRTT 周期、100ms ProbeRTT 持续时间、1.2 RTO 退避、20 包初始拥塞窗口，以及默认开启的 loss-control。
+`MaxBandwidthLossPercent` 会被限制在 15% 到 35% 范围内，用作拥塞控制的损失预算目标；随机丢包不会自动等同于拥塞，控制器会结合 RTT 增长、delivery-rate 变化和近期重传信号判断是否需要降速。
 
 ## UcpNetwork
 
@@ -156,4 +159,4 @@ using (UcpDatagramNetwork clientNetwork = new UcpDatagramNetwork(config))
 
 ## 性能报告单位
 
-内部带宽字段仍以 bytes/second 保存，便于窗口和 pacing 计算。测试报告和控制台表格面向用户展示时使用 Mbps，重传率、利用率和浪费率使用百分比。
+内部带宽字段仍以 bytes/second 保存，便于窗口和 pacing 计算。测试报告和控制台表格面向用户展示时使用 Mbps，RTT/Jitter 使用毫秒，重传率、估算损失率、利用率和浪费率使用百分比。

@@ -25,6 +25,8 @@ The implementation keeps protocol-level constants in `UcpConstants`. Names use `
 - `DUPLICATE_ACK_THRESHOLD`: duplicate ACK/SACK threshold for fast retransmit.
 - `NAK_MISSING_THRESHOLD`: receiver missing-observation threshold before emitting NAK.
 - `MAX_NAK_MISSING_SCAN`: maximum forward sequence slots scanned when updating missing state.
+- `NAK_REORDER_GRACE_MICROS`, `NAK_REPEAT_INTERVAL_MICROS`, `MAX_NAK_SEQUENCES_PER_PACKET`: receiver-side NAK pacing and batching controls used to avoid retransmission storms under reordering.
+- `RTT_RECOVERY_SAMPLE_MAX_RTO_MULTIPLIER`: Karn-style guard that prevents stale recovery ACKs from poisoning RTT/RTO filters.
 
 ## BBR
 
@@ -34,6 +36,15 @@ The implementation keeps protocol-level constants in `UcpConstants`. Names use `
 - `BBR_PROBE_RTT_INTERVAL_MICROS`, `BBR_PROBE_RTT_DURATION_MICROS`: minimum RTT refresh timing.
 - `BBR_PROBE_RTT_EXIT_RTT_MULTIPLIER`: acceptable RTT sample multiplier for ProbeRTT exit.
 - `BBR_*_LOSS_RATIO`: recent loss ratio thresholds used for dynamic pacing gain.
+- `BBR_LOSS_EWMA_*`: smoothing factors for exported loss estimates.
+- `BBR_*_ACK_AGGREGATION_RATE_CAP_GAIN`: caps delivery-rate samples so ACK compression does not inflate `btl_bw`.
+- `BBR_*_BANDWIDTH_GROWTH_PER_ROUND`: per-round growth caps used to probe quickly without accepting impossible short-term samples.
+
+## Benchmarks
+
+- `BENCHMARK_100_MBPS_BYTES_PER_SECOND`, `BENCHMARK_1_GBPS_BYTES_PER_SECOND`, `BENCHMARK_10_GBPS_BYTES_PER_SECOND`: benchmark line-rate targets.
+- `BENCHMARK_*_PAYLOAD_BYTES`: benchmark payload sizes selected to keep tests deterministic on the simulator.
+- `BENCHMARK_MIN_*`, `BENCHMARK_MAX_*`: quality gates for utilization, pacing convergence, jitter, and loss-budget checks.
 
 ## Reporting
 

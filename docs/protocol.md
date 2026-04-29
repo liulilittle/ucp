@@ -143,11 +143,13 @@ sequenceDiagram
 
 当前实现为更接近生产行为的工程版：
 
-- `btl_bw` 使用最近窗口最大 delivery rate。
+- `btl_bw` 使用最近窗口最大 delivery rate，并对 ACK 压缩样本和单轮增长幅度做上限约束。
 - `min_rtt` 使用时间窗口内最小 RTT。
 - Startup 在多轮带宽不再显著增长时退出。
-- ProbeBW 使用动态 pacing gain，根据最近 1 秒重传率和 RTT 抬升程度调整探测强度。
+- ProbeBW 使用动态 pacing gain，根据近期重传率、RTT 抬升程度和轻量分类器调整探测强度。
 - ProbeRTT 周期性触发，至少持续配置时长，并在收到接近最小 RTT 的样本后退出；随机丢包不会触发 ProbeRTT。
+- Loss-control 使用 15% 到 35% 的可配置损失预算。只有分类为拥塞时才会收缩 pacing/cwnd，随机丢包优先走快速恢复和 NAK/SACK 修复路径。
+- RTT/RTO 更新遵循 Karn 风格保护，恢复期的过期 echo 样本不会污染 RTT 过滤器。
 - Pacing 使用令牌桶，速率上限可配置。
 
 ```mermaid
@@ -213,6 +215,7 @@ flowchart TD
 - 初始带宽
 - 最大 pacing 速率
 - 初始拥塞窗口
+- loss-control 开关和最大带宽损失预算
 - keepalive / 超时 / ProbeRTT / 定时器粒度
 - FQ 轮转周期和服务器出口带宽
 
@@ -220,7 +223,7 @@ flowchart TD
 
 ## 性能指标单位
 
-协议内部带宽、pacing 和 delivery rate 使用 bytes/second。测试报告和用户可读表格统一转换为 Mbps，重传率、利用率和带宽浪费率统一显示为百分比。
+协议内部带宽、pacing 和 delivery rate 使用 bytes/second。测试报告和用户可读表格统一转换为 Mbps，RTT/Jitter 使用毫秒，重传率、估算损失率、利用率和带宽浪费率统一显示为百分比。
 
 ## 统计与报告
 
@@ -234,5 +237,7 @@ flowchart TD
 - CWND
 - Pacing 速率
 - 远端窗口大小
+- 估算损失率
+- 快速重传和超时重传计数
 
-测试项目会把关键场景性能数据写到 `reports/summary.txt`，并生成对齐的纯文本表格 `reports/test_report.txt`。测试脚本会读取并校验该报告，确保关键场景、吞吐、重传比例、pacing 与窗口指标没有缺失或明显异常。
+测试项目会把关键场景性能数据写到 `reports/summary.txt`，并生成对齐的纯文本表格 `reports/test_report.txt`。测试脚本会读取并校验该报告，确保基础场景、100Mbps/1G/10G 基准、随机丢包预算、突发丢包恢复、pacing 与窗口指标没有缺失或明显异常。

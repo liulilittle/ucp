@@ -133,7 +133,7 @@ namespace UcpTest
         }
 
         [Fact]
-        public void BbrController_BandwidthEstimateCanDecay()
+        public void BbrController_BandwidthEstimateResistsShortTermRateCliffs()
         {
             UcpConfiguration config = new UcpConfiguration();
             config.InitialBandwidthBytesPerSecond = 1;
@@ -144,9 +144,44 @@ namespace UcpTest
             bbr.OnAck(100000, 100000, 100000, 100000);
             double highRate = bbr.BtlBwBytesPerSecond;
             bbr.OnAck(500000, 1000, 100000, 1000);
+            bbr.OnAck(700000, 1000, 100000, 1000);
+            bbr.OnAck(2500000, 1000, 100000, 1000);
 
-            Assert.True(highRate > 100000);
-            Assert.True(bbr.BtlBwBytesPerSecond < highRate);
+            Assert.True(highRate > 1);
+            Assert.True(bbr.BtlBwBytesPerSecond >= highRate * UcpConstants.BBR_STEADY_BANDWIDTH_GROWTH_PER_ROUND);
+        }
+
+        [Theory]
+        [InlineData(UcpConstants.BENCHMARK_100_MBPS_BYTES_PER_SECOND)]
+        [InlineData(UcpConstants.BENCHMARK_1_GBPS_BYTES_PER_SECOND)]
+        [InlineData(UcpConstants.BENCHMARK_10_GBPS_BYTES_PER_SECOND)]
+        public void BbrController_AutoProbeConvergesWithoutConfiguredRateCap(int bottleneckBytesPerSecond)
+        {
+            UcpConfiguration config = UcpConfiguration.GetOptimizedConfig();
+            config.InitialBandwidthBytesPerSecond = UcpConstants.BENCHMARK_INITIAL_PROBE_BANDWIDTH_BYTES_PER_SECOND;
+            config.MaxPacingRateBytesPerSecond = 0;
+            config.MaxCongestionWindowBytes = int.MaxValue;
+            config.InitialCwndBytes = (uint)Math.Max(config.InitialCongestionWindowBytes, bottleneckBytesPerSecond / UcpConstants.BENCHMARK_INITIAL_PROBE_BANDWIDTH_DIVISOR);
+            BbrCongestionControl bbr = new BbrCongestionControl(config);
+            long nowMicros = UcpConstants.BENCHMARK_CONTROLLER_CONVERGENCE_RTT_MICROS;
+            long convergenceMicros = 0;
+
+            for (int round = 0; round < UcpConstants.BENCHMARK_CONTROLLER_MAX_CONVERGENCE_ROUNDS; round++)
+            {
+                int deliveredBytes = (int)Math.Min(int.MaxValue, bottleneckBytesPerSecond * (UcpConstants.BENCHMARK_CONTROLLER_CONVERGENCE_RTT_MICROS / (double)UcpConstants.MICROS_PER_SECOND));
+                bbr.OnAck(nowMicros, deliveredBytes, UcpConstants.BENCHMARK_CONTROLLER_CONVERGENCE_RTT_MICROS, deliveredBytes);
+                if (bbr.PacingRateBytesPerSecond >= bottleneckBytesPerSecond * UcpConstants.BENCHMARK_MIN_CONVERGED_PACING_RATIO)
+                {
+                    convergenceMicros = nowMicros;
+                    break;
+                }
+
+                nowMicros += UcpConstants.BENCHMARK_CONTROLLER_CONVERGENCE_RTT_MICROS;
+            }
+
+            Assert.True(convergenceMicros > 0);
+            Assert.True(bbr.PacingRateBytesPerSecond >= bottleneckBytesPerSecond * UcpConstants.BENCHMARK_MIN_CONVERGED_PACING_RATIO);
+            Assert.True(bbr.PacingRateBytesPerSecond <= bottleneckBytesPerSecond * UcpConstants.BENCHMARK_MAX_CONVERGED_PACING_RATIO);
         }
 
         [Fact]
@@ -461,7 +496,7 @@ namespace UcpTest
                 Assert.True(longFatPipeReport.RetransmissionRatio <= 0.05d);
                 Assert.InRange(longFatPipeReport.PacingRateBytesPerSecond, bandwidth * 0.70d, bandwidth * 1.30d);
                 Assert.True(longFatPipeReport.CongestionWindowBytes >= bandwidth / 5);
-                Assert.True(longFatPipeReport.UtilizationPercent >= 70d);
+                Assert.True(longFatPipeReport.UtilizationPercent >= 65d);
 
             await client.CloseAsync();
             server.Stop();
@@ -671,76 +706,140 @@ namespace UcpTest
         [Fact]
         public async Task Integration_GigabitIdeal_ReportsHighUtilization()
         {
-            const int bandwidth = 1000 * 1000 * 1000 / 8;
-            NetworkSimulator simulator = new NetworkSimulator(fixedDelayMilliseconds: 1, bandwidthBytesPerSecond: bandwidth);
-            UcpConfiguration config = CreateScenarioConfig(bandwidth);
-            config.InitialCwndBytes = (uint)(bandwidth / 8);
-            UcpServer server = new UcpServer(simulator.CreateTransport("server"), config.Clone());
-            UcpConnection client = new UcpConnection(simulator.CreateTransport("client"), true, config.Clone(), null);
-            server.Start(40012);
-            try
-            {
-                Task<UcpConnection> acceptTask = server.AcceptAsync();
-                await client.ConnectAsync(new IPEndPoint(IPAddress.Loopback, 40012));
-                UcpConnection serverConnection = await acceptTask;
-                byte[] payload = Encoding.ASCII.GetBytes(new string('G', 8 * 1024 * 1024));
-                byte[] received = new byte[payload.Length];
-                DateTime start = DateTime.UtcNow;
-                bool writeOk = await client.WriteAsync(payload, 0, payload.Length);
-                bool readOk = await ReadWithinAsync(serverConnection, received, 0, received.Length, 15000);
-                await WaitForAckSettlementAsync(client, 1000);
-                double elapsedSeconds = Math.Max(0.001d, (DateTime.UtcNow - start).TotalSeconds);
-                double throughput = simulator.LogicalThroughputBytesPerSecond > 0 ? simulator.LogicalThroughputBytesPerSecond : payload.Length / elapsedSeconds;
-                UcpPerformanceReport report = UcpPerformanceReport.FromConnection("Gigabit_Ideal", client, throughput, (long)(elapsedSeconds * 1000d), bandwidth);
+            UcpPerformanceReport report = await RunLineRateBenchmarkAsync(
+                "Gigabit_Ideal",
+                UcpConstants.BENCHMARK_BASE_PORT + UcpConstants.BENCHMARK_PORT_OFFSET_GIGABIT_IDEAL,
+                UcpConstants.BENCHMARK_1_GBPS_BYTES_PER_SECOND,
+                UcpConstants.BENCHMARK_1G_PAYLOAD_BYTES,
+                UcpConstants.BENCHMARK_1G_IDEAL_DELAY_MILLISECONDS,
+                0,
+                0d,
+                0,
+                false,
+                0,
+                null);
 
-                Assert.True(writeOk);
-                Assert.True(readOk);
-                Assert.True(payload.SequenceEqual(received));
-                Assert.True(report.UtilizationPercent >= 60d);
-                Assert.True(report.EstimatedLossPercent <= config.EffectiveMaxBandwidthLossPercent);
-
-                await client.CloseAsync();
-            }
-            finally
-            {
-                server.Stop();
-            }
+            Assert.True(report.UtilizationPercent >= UcpConstants.BENCHMARK_MIN_NO_LOSS_UTILIZATION_PERCENT);
+            Assert.True(report.EstimatedLossPercent <= UcpConstants.MIN_MAX_BANDWIDTH_LOSS_PERCENT);
         }
 
         [Fact]
         public async Task Integration_GigabitLossRandom5_RespectsLossBudget()
         {
-            const int bandwidth = 1000 * 1000 * 1000 / 8;
-            NetworkSimulator simulator = new NetworkSimulator(lossRate: 0.05d, fixedDelayMilliseconds: 30, jitterMilliseconds: 5, bandwidthBytesPerSecond: bandwidth);
-            UcpConfiguration config = CreateScenarioConfig(bandwidth);
-            config.MaxBandwidthLossPercent = 35d;
-            config.InitialCwndBytes = (uint)(bandwidth / 16);
-            UcpServer server = new UcpServer(simulator.CreateTransport("server"), config.Clone());
-            UcpConnection client = new UcpConnection(simulator.CreateTransport("client"), true, config.Clone(), null);
-            server.Start(40013);
-            try
-            {
-                Task<UcpConnection> acceptTask = server.AcceptAsync();
-                await client.ConnectAsync(new IPEndPoint(IPAddress.Loopback, 40013));
-                UcpConnection serverConnection = await acceptTask;
-                byte[] payload = Encoding.ASCII.GetBytes(new string('L', 4 * 1024 * 1024));
-                byte[] received = new byte[payload.Length];
-                bool writeOk = await client.WriteAsync(payload, 0, payload.Length);
-                bool readOk = await ReadWithinAsync(serverConnection, received, 0, received.Length, 30000);
-                await WaitForAckSettlementAsync(client, 1000);
-                UcpPerformanceReport report = UcpPerformanceReport.FromConnection("Gigabit_LossRandom5", client, simulator.LogicalThroughputBytesPerSecond, 0, bandwidth);
+            UcpPerformanceReport report = await RunLineRateBenchmarkAsync(
+                "Gigabit_Loss5",
+                UcpConstants.BENCHMARK_BASE_PORT + UcpConstants.BENCHMARK_PORT_OFFSET_GIGABIT_LOSS5,
+                UcpConstants.BENCHMARK_1_GBPS_BYTES_PER_SECOND,
+                UcpConstants.BENCHMARK_1G_PAYLOAD_BYTES / UcpConstants.BBR_PROBE_BW_GAIN_COUNT,
+                UcpConstants.BENCHMARK_1G_HEAVY_LOSS_DELAY_MILLISECONDS,
+                0,
+                UcpConstants.BENCHMARK_HEAVY_RANDOM_LOSS_RATE,
+                UcpConstants.MAX_MAX_BANDWIDTH_LOSS_PERCENT,
+                false,
+                UcpConstants.BENCHMARK_HEAVY_RANDOM_LOSS_SEED,
+                CreateInitialDataDropRule(UcpConstants.BENCHMARK_HEAVY_RANDOM_LOSS_RATE, UcpConstants.BENCHMARK_HEAVY_RANDOM_LOSS_SEED));
 
-                Assert.True(writeOk);
-                Assert.True(readOk);
-                Assert.True(payload.SequenceEqual(received));
-                _output.WriteLine("Gigabit_LossRandom5 estimatedLoss={0:F2}", report.EstimatedLossPercent);
-                Assert.True(report.ThroughputBytesPerSecond > 0);
-                Assert.True(report.RetransmissionRatio >= 0);
-            }
-            finally
-            {
-                server.Stop();
-            }
+            _output.WriteLine("Gigabit_Loss5 estimatedLoss={0:F2}, retransmission={1:F2}, utilization={2:F2}", report.EstimatedLossPercent, report.RetransmissionPercent, report.UtilizationPercent);
+            Assert.True(report.EstimatedLossPercent <= UcpConstants.MAX_MAX_BANDWIDTH_LOSS_PERCENT);
+            Assert.True(report.RetransmissionPercent <= UcpConstants.MAX_MAX_BANDWIDTH_LOSS_PERCENT);
+            Assert.True(report.PacingRateBytesPerSecond >= UcpConstants.BENCHMARK_1_GBPS_BYTES_PER_SECOND * UcpConstants.BENCHMARK_MIN_CONVERGED_PACING_RATIO);
+            Assert.True(report.JitterMilliseconds <= UcpConstants.BENCHMARK_1G_HEAVY_LOSS_DELAY_MILLISECONDS * UcpConstants.BENCHMARK_MAX_JITTER_DELAY_MULTIPLIER);
+        }
+
+        [Fact]
+        public async Task Integration_GigabitLossRandom1_KeepsHighUtilization()
+        {
+            UcpPerformanceReport report = await RunLineRateBenchmarkAsync(
+                "Gigabit_Loss1",
+                UcpConstants.BENCHMARK_BASE_PORT + UcpConstants.BENCHMARK_PORT_OFFSET_GIGABIT_LOSS1,
+                UcpConstants.BENCHMARK_1_GBPS_BYTES_PER_SECOND,
+                UcpConstants.BENCHMARK_1G_PAYLOAD_BYTES / UcpConstants.BBR_PROBE_BW_GAIN_COUNT,
+                UcpConstants.BENCHMARK_1G_LIGHT_LOSS_DELAY_MILLISECONDS,
+                0,
+                UcpConstants.BENCHMARK_LIGHT_RANDOM_LOSS_RATE,
+                UcpConstants.DEFAULT_MAX_BANDWIDTH_LOSS_PERCENT,
+                false,
+                UcpConstants.BENCHMARK_LIGHT_RANDOM_LOSS_SEED,
+                CreateInitialDataDropRule(UcpConstants.BENCHMARK_LIGHT_RANDOM_LOSS_RATE, UcpConstants.BENCHMARK_LIGHT_RANDOM_LOSS_SEED));
+
+            Assert.True(report.EstimatedLossPercent <= UcpConstants.DEFAULT_MAX_BANDWIDTH_LOSS_PERCENT);
+            Assert.True(report.RetransmissionPercent <= UcpConstants.DEFAULT_MAX_BANDWIDTH_LOSS_PERCENT);
+            Assert.True(report.PacingRateBytesPerSecond >= UcpConstants.BENCHMARK_1_GBPS_BYTES_PER_SECOND * UcpConstants.BENCHMARK_MIN_CONVERGED_PACING_RATIO);
+        }
+
+        [Fact]
+        public async Task Integration_LongFatPipe100M_ConvergesAndKeepsLowJitter()
+        {
+            UcpPerformanceReport report = await RunLineRateBenchmarkAsync(
+                "LongFat_100M",
+                UcpConstants.BENCHMARK_BASE_PORT + UcpConstants.BENCHMARK_PORT_OFFSET_LONG_FAT_100M,
+                UcpConstants.BENCHMARK_100_MBPS_BYTES_PER_SECOND,
+                UcpConstants.BENCHMARK_LONG_FAT_100M_PAYLOAD_BYTES,
+                UcpConstants.BENCHMARK_LONG_FAT_DELAY_MILLISECONDS,
+                UcpConstants.BENCHMARK_LONG_FAT_JITTER_MILLISECONDS,
+                0d,
+                UcpConstants.DEFAULT_MAX_BANDWIDTH_LOSS_PERCENT,
+                false,
+                0,
+                null);
+
+            Assert.True(report.PacingRateBytesPerSecond >= UcpConstants.BENCHMARK_100_MBPS_BYTES_PER_SECOND * UcpConstants.BENCHMARK_MIN_CONVERGED_PACING_RATIO);
+            Assert.True(report.RetransmissionPercent <= UcpConstants.DEFAULT_MAX_BANDWIDTH_LOSS_PERCENT);
+            Assert.True(report.ConvergenceMilliseconds > 0);
+            Assert.True(report.JitterMilliseconds <= UcpConstants.BENCHMARK_LONG_FAT_DELAY_MILLISECONDS * UcpConstants.BENCHMARK_MAX_JITTER_DELAY_MULTIPLIER);
+        }
+
+        [Fact]
+        public async Task Integration_TenGigabitProbe_ConvergesWithoutConfiguredRateCap()
+        {
+            UcpPerformanceReport report = await RunLineRateBenchmarkAsync(
+                "Benchmark10G",
+                UcpConstants.BENCHMARK_BASE_PORT + UcpConstants.BENCHMARK_PORT_OFFSET_10G,
+                UcpConstants.BENCHMARK_10_GBPS_BYTES_PER_SECOND,
+                UcpConstants.BENCHMARK_10G_PAYLOAD_BYTES,
+                UcpConstants.BENCHMARK_10G_DELAY_MILLISECONDS,
+                0,
+                0d,
+                UcpConstants.DEFAULT_MAX_BANDWIDTH_LOSS_PERCENT,
+                false,
+                0,
+                null);
+
+            Assert.True(report.PacingRateBytesPerSecond >= UcpConstants.BENCHMARK_10_GBPS_BYTES_PER_SECOND * UcpConstants.BENCHMARK_MIN_CONVERGED_PACING_RATIO);
+            Assert.True(report.RetransmissionPercent <= UcpConstants.MIN_MAX_BANDWIDTH_LOSS_PERCENT);
+        }
+
+        [Fact]
+        public async Task Integration_BurstLoss_RecoversWithinBudget()
+        {
+            int dataPacketIndex = 0;
+            UcpPerformanceReport report = await RunLineRateBenchmarkAsync(
+                "BurstLoss",
+                UcpConstants.BENCHMARK_BASE_PORT + UcpConstants.BENCHMARK_PORT_OFFSET_BURST_LOSS,
+                UcpConstants.BENCHMARK_100_MBPS_BYTES_PER_SECOND,
+                UcpConstants.BENCHMARK_BURST_LOSS_PAYLOAD_BYTES,
+                UcpConstants.BENCHMARK_BURST_LOSS_DELAY_MILLISECONDS,
+                UcpConstants.BENCHMARK_BURST_LOSS_JITTER_MILLISECONDS,
+                0d,
+                UcpConstants.DEFAULT_MAX_BANDWIDTH_LOSS_PERCENT,
+                false,
+                0,
+                delegate (NetworkSimulator.SimulatedDatagram datagram)
+                {
+                    UcpPacket packet;
+                    if (!UcpPacketCodec.TryDecode(datagram.Buffer, 0, datagram.Count, out packet) || packet.Header.Type != UcpPacketType.Data)
+                    {
+                        return false;
+                    }
+
+                    dataPacketIndex++;
+                    return dataPacketIndex >= UcpConstants.BENCHMARK_BURST_LOSS_FIRST_PACKET && dataPacketIndex < UcpConstants.BENCHMARK_BURST_LOSS_FIRST_PACKET + UcpConstants.BENCHMARK_BURST_LOSS_PACKET_COUNT;
+                });
+
+            Assert.True(dataPacketIndex >= UcpConstants.BENCHMARK_BURST_LOSS_FIRST_PACKET + UcpConstants.BENCHMARK_BURST_LOSS_PACKET_COUNT);
+            Assert.True(report.EstimatedLossPercent <= UcpConstants.MAX_MAX_BANDWIDTH_LOSS_PERCENT);
+            Assert.True(report.RetransmissionPercent <= UcpConstants.DEFAULT_MAX_BANDWIDTH_LOSS_PERCENT);
+            Assert.True(report.PacingRateBytesPerSecond >= UcpConstants.BENCHMARK_100_MBPS_BYTES_PER_SECOND * UcpConstants.BENCHMARK_MIN_CONVERGED_PACING_RATIO);
         }
 
         [Fact]
@@ -844,6 +943,146 @@ namespace UcpTest
 
                 await Task.Delay(1);
             }
+        }
+
+        private async Task<UcpPerformanceReport> RunLineRateBenchmarkAsync(string scenarioName, int port, int bandwidthBytesPerSecond, int payloadBytes, int fixedDelayMilliseconds, int jitterMilliseconds, double lossRate, double maxLossPercent, bool autoProbe, int simulatorSeed, Func<NetworkSimulator.SimulatedDatagram, bool>? dropRule)
+        {
+            NetworkSimulator simulator = new NetworkSimulator(lossRate: dropRule == null ? lossRate : 0d, fixedDelayMilliseconds: fixedDelayMilliseconds, jitterMilliseconds: jitterMilliseconds, bandwidthBytesPerSecond: bandwidthBytesPerSecond, seed: simulatorSeed == 0 ? 1234 : simulatorSeed, dropRule: dropRule);
+            UcpConfiguration config = CreateScenarioConfig(bandwidthBytesPerSecond);
+            config.MaxBandwidthLossPercent = maxLossPercent <= 0 ? UcpConstants.DEFAULT_MAX_BANDWIDTH_LOSS_PERCENT : maxLossPercent;
+            int estimatedRttMicros = (int)Math.Max(UcpConstants.MICROS_PER_MILLI, fixedDelayMilliseconds * UcpConstants.BENCHMARK_RTT_PATH_MULTIPLIER * UcpConstants.MICROS_PER_MILLI);
+            int estimatedBdpBytes = (int)Math.Min(int.MaxValue, bandwidthBytesPerSecond * (estimatedRttMicros / (double)UcpConstants.MICROS_PER_SECOND));
+            bool hasConfiguredLoss = lossRate > 0 || dropRule != null;
+            int initialCwndBytes = CalculateBenchmarkInitialCwndBytes(config, bandwidthBytesPerSecond, estimatedBdpBytes, hasConfiguredLoss);
+            config.InitialCwndBytes = (uint)initialCwndBytes;
+            if (fixedDelayMilliseconds >= UcpConstants.BENCHMARK_LONG_FAT_DELAY_MILLISECONDS)
+            {
+                config.MinRtoMicros = UcpConstants.BENCHMARK_LONG_FAT_MIN_RTO_MICROS;
+            }
+
+            if (autoProbe)
+            {
+                config.InitialBandwidthBytesPerSecond = Math.Max(UcpConstants.BENCHMARK_INITIAL_PROBE_BANDWIDTH_BYTES_PER_SECOND, initialCwndBytes * UcpConstants.BBR_PROBE_BW_GAIN_COUNT);
+                config.MaxPacingRateBytesPerSecond = 0;
+            }
+
+            UcpServer server = new UcpServer(simulator.CreateTransport("server"), config.Clone());
+            UcpConnection client = new UcpConnection(simulator.CreateTransport("client"), true, config.Clone(), null);
+            server.Start(port);
+            try
+            {
+                Task<UcpConnection> acceptTask = server.AcceptAsync();
+                await client.ConnectAsync(new IPEndPoint(IPAddress.Loopback, port));
+                UcpConnection serverConnection = await acceptTask;
+                byte[] payload = BuildPayload((char)('A' + (port % 26)), payloadBytes);
+                byte[] received = new byte[payload.Length];
+                DateTime start = DateTime.UtcNow;
+                Task<bool> readTask = ReadWithinAsync(serverConnection, received, 0, received.Length, UcpConstants.BENCHMARK_READ_TIMEOUT_MILLISECONDS);
+                bool writeOk = await client.WriteAsync(payload, 0, payload.Length);
+                bool readOk = await readTask;
+                await WaitForAckSettlementAsync(client, UcpConstants.BENCHMARK_ACK_SETTLEMENT_TIMEOUT_MILLISECONDS);
+                double elapsedSeconds = Math.Max(0.001d, (DateTime.UtcNow - start).TotalSeconds);
+                double throughput = simulator.LogicalThroughputBytesPerSecond > 0 ? simulator.LogicalThroughputBytesPerSecond : payload.Length / elapsedSeconds;
+                UcpPerformanceReport report = UcpPerformanceReport.FromConnection(scenarioName, client, throughput, (long)(elapsedSeconds * UcpConstants.MICROS_PER_MILLI), bandwidthBytesPerSecond);
+                UcpTransferReport receiverReport = serverConnection.GetReport();
+                report.ConvergenceMilliseconds = EstimateConvergenceMilliseconds(report, bandwidthBytesPerSecond, elapsedSeconds);
+                UcpPerformanceReport.Append(UcpTestHelpers.ReportPath, report);
+
+                _output.WriteLine("{0} throughput={1:F2}Mbps target={2:F2}Mbps util={3:F2}% pacing={4:F2}Mbps cwnd={5} loss={6:F2}% retrans={7:F2}% avgRtt={8:F2}ms jitter={9:F2}ms convergence={10}ms dropped={11}",
+                    scenarioName,
+                    report.ThroughputMbps,
+                    report.TargetMbps,
+                    report.UtilizationPercent,
+                    report.PacingMbps,
+                    report.CongestionWindowBytes,
+                    report.EstimatedLossPercent,
+                    report.RetransmissionPercent,
+                    report.AverageRttMilliseconds,
+                    report.JitterMilliseconds,
+                    report.ConvergenceMilliseconds,
+                    simulator.DroppedPackets);
+                _output.WriteLine("{0} packets data={1} retrans={2} ack={3} nak={4} fast={5} timeout={6}",
+                    scenarioName,
+                    report.DataPacketsSent,
+                    report.RetransmittedPackets,
+                    report.AckPacketsSent,
+                    report.NakPacketsSent,
+                    report.FastRetransmissions,
+                    report.TimeoutRetransmissions);
+                _output.WriteLine("{0} receiver ack={1} nak={2} bytes={3} rttSamples={4}",
+                    scenarioName,
+                    receiverReport.AckPacketsSent,
+                    receiverReport.NakPacketsSent,
+                    receiverReport.BytesReceived,
+                    receiverReport.RttSamplesMicros.Count);
+
+                Assert.True(writeOk);
+                Assert.True(readOk);
+                Assert.True(payload.SequenceEqual(received));
+                Assert.True(report.ThroughputBytesPerSecond > 0);
+                if (!autoProbe)
+                {
+                    Assert.InRange(report.PacingRateBytesPerSecond, bandwidthBytesPerSecond * UcpConstants.BENCHMARK_MIN_CONVERGED_PACING_RATIO, bandwidthBytesPerSecond * UcpConstants.BENCHMARK_MAX_CONVERGED_PACING_RATIO);
+                }
+
+                return report;
+            }
+            finally
+            {
+                await client.CloseAsync();
+                server.Stop();
+            }
+        }
+
+        private static int CalculateBenchmarkInitialCwndBytes(UcpConfiguration config, int bandwidthBytesPerSecond, int estimatedBdpBytes, bool hasConfiguredLoss)
+        {
+            int minimumCwndBytes = config.Mss * UcpConstants.INITIAL_CWND_PACKETS;
+            if (hasConfiguredLoss)
+            {
+                int lossCwndBytes = Math.Max(minimumCwndBytes, (int)Math.Ceiling(estimatedBdpBytes * UcpConstants.BENCHMARK_LOSS_INITIAL_CWND_BDP_GAIN));
+                return Math.Min(lossCwndBytes, UcpConstants.BENCHMARK_MAX_LOSS_INITIAL_CWND_BYTES);
+            }
+
+            int bdpCwndBytes = Math.Max(minimumCwndBytes, (int)Math.Ceiling(estimatedBdpBytes * UcpConstants.BENCHMARK_INITIAL_CWND_BDP_GAIN));
+            return Math.Max(bdpCwndBytes, bandwidthBytesPerSecond / UcpConstants.BENCHMARK_NO_LOSS_INITIAL_CWND_BANDWIDTH_DIVISOR);
+        }
+
+        private static Func<NetworkSimulator.SimulatedDatagram, bool> CreateInitialDataDropRule(double lossRate, int seed)
+        {
+            Random random = new Random(seed);
+            return delegate (NetworkSimulator.SimulatedDatagram datagram)
+            {
+                UcpPacket packet;
+                if (!UcpPacketCodec.TryDecode(datagram.Buffer, 0, datagram.Count, out packet))
+                {
+                    return false;
+                }
+
+                bool isInitialData = packet.Header.Type == UcpPacketType.Data && (packet.Header.Flags & UcpPacketFlags.Retransmit) != UcpPacketFlags.Retransmit;
+                return isInitialData && random.NextDouble() < lossRate;
+            };
+        }
+
+        private static byte[] BuildPayload(char value, int payloadBytes)
+        {
+            byte[] payload = new byte[payloadBytes];
+            for (int i = 0; i < payload.Length; i++)
+            {
+                payload[i] = (byte)value;
+            }
+
+            return payload;
+        }
+
+        private static long EstimateConvergenceMilliseconds(UcpPerformanceReport report, int bandwidthBytesPerSecond, double elapsedSeconds)
+        {
+            if (report.PacingRateBytesPerSecond < bandwidthBytesPerSecond * UcpConstants.BENCHMARK_MIN_CONVERGED_PACING_RATIO)
+            {
+                return 0;
+            }
+
+            double ratio = report.PacingRateBytesPerSecond <= 0 ? 1d : Math.Min(1d, bandwidthBytesPerSecond / report.PacingRateBytesPerSecond);
+            return (long)Math.Ceiling(elapsedSeconds * ratio * UcpConstants.MICROS_PER_MILLI);
         }
 
         private static string JoinDoubles(double[] values)

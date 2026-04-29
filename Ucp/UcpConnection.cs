@@ -436,6 +436,8 @@ namespace Ucp
             report.RetransmittedPackets = diagnostics.RetransmittedPackets;
             report.AckPacketsSent = diagnostics.SentAckPackets;
             report.NakPacketsSent = diagnostics.SentNakPackets;
+            report.FastRetransmissions = diagnostics.FastRetransmissions;
+            report.TimeoutRetransmissions = diagnostics.TimeoutRetransmissions;
             report.LastRttMicros = diagnostics.LastRttMicros;
             report.RttSamplesMicros.AddRange(diagnostics.RttSamplesMicros);
             report.CongestionWindowBytes = diagnostics.CongestionWindowBytes;

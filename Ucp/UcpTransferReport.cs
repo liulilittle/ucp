@@ -11,6 +11,8 @@ namespace Ucp
         public int RetransmittedPackets;
         public int AckPacketsSent;
         public int NakPacketsSent;
+        public int FastRetransmissions;
+        public int TimeoutRetransmissions;
         public long LastRttMicros;
         public System.Collections.Generic.List<long> RttSamplesMicros = new System.Collections.Generic.List<long>();
         public int CongestionWindowBytes;

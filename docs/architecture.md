@@ -50,6 +50,8 @@
 - 最后 RTT
 - 当前 CWND
 - 当前 pacing rate（内部为 bytes/second，报告展示为 Mbps）
+- loss-control 估算损失率
+- fast retransmit / timeout retransmit 计数
 
 这些统计通过 `UcpConnection.GetReport()` 暴露给上层和测试。
 
@@ -63,4 +65,6 @@
 - 带宽瓶颈
 - 规则型选择性丢包
 
-测试过程中会把性能快照写入 `reports/summary.txt`，并生成对齐纯文本表格 `reports/test_report.txt`。报告中的吞吐、目标带宽和当前 pacing 使用 Mbps，重传率、利用率和浪费率使用百分比。`run-tests.ps1` 会在测试结束后读取并校验报告，报告缺失或关键指标异常会导致脚本失败。
+测试过程中会把性能快照写入 `reports/summary.txt`，并生成对齐纯文本表格 `reports/test_report.txt`。报告中的吞吐、目标带宽和当前 pacing 使用 Mbps，RTT/Jitter 使用毫秒，重传率、估算损失率、利用率和浪费率使用百分比。`run-tests.ps1` 会在测试结束后读取并校验报告，报告缺失或关键指标异常会导致脚本失败。
+
+性能基准覆盖 100Mbps、1Gbps 和 10Gbps 档位。集成测试验证实际传输、pacing 收敛、随机丢包预算和突发丢包恢复；控制器级测试验证不设置 pacing 上限时从较低初始带宽探测到瓶颈带宽的收敛行为。

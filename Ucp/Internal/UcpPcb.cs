@@ -53,6 +53,8 @@ namespace Ucp.Internal
         private readonly Queue<ReceiveChunk> _receiveQueue = new Queue<ReceiveChunk>();
         private readonly HashSet<uint> _nakIssued = new HashSet<uint>();
         private readonly Dictionary<uint, int> _missingSequenceCounts = new Dictionary<uint, int>();
+        private readonly Dictionary<uint, long> _missingFirstSeenMicros = new Dictionary<uint, long>();
+        private readonly Dictionary<uint, long> _lastNakIssuedMicros = new Dictionary<uint, long>();
         private readonly SemaphoreSlim _receiveSignal = new SemaphoreSlim(0, int.MaxValue);
         private readonly SemaphoreSlim _sendSpaceSignal = new SemaphoreSlim(0, int.MaxValue);
         private readonly SemaphoreSlim _flushLock = new SemaphoreSlim(1, 1);
@@ -338,11 +340,6 @@ namespace Ucp.Internal
                 int chunk = remaining > _config.MaxPayloadSize ? _config.MaxPayloadSize : remaining;
                 lock (_sync)
                 {
-                    if (_flightBytes > 0 && remaining < _config.MaxPayloadSize && _sendBuffer.Count > 0)
-                    {
-                        break;
-                    }
-
                     if (_sendBuffer.Count >= maxBufferedSegments)
                     {
                         break;
@@ -703,6 +700,7 @@ namespace Ucp.Internal
             int deliveredBytes = 0;
             int remainingFlight;
             long sampleRtt = 0;
+            long echoRtt = 0;
             long nowMicros = NowMicros();
             bool fastRetransmitTriggered = false;
 
@@ -727,9 +725,7 @@ namespace Ucp.Internal
 
                 if (ackPacket.EchoTimestamp > 0)
                 {
-                    sampleRtt = nowMicros - ackPacket.EchoTimestamp;
-                    _lastRttMicros = sampleRtt;
-                    AddRttSampleUnsafe(sampleRtt);
+                    echoRtt = nowMicros - ackPacket.EchoTimestamp;
                 }
 
                 _lastAckReceivedMicros = nowMicros;
@@ -778,11 +774,13 @@ namespace Ucp.Internal
                         }
 
                         deliveredBytes += segment.Payload.Length;
-                        if (sampleRtt == 0 && segment.SendCount == 1 && segment.LastSendMicros > 0)
+                        if (segment.SendCount == 1 && segment.LastSendMicros > 0)
                         {
-                            sampleRtt = nowMicros - segment.LastSendMicros;
-                            _lastRttMicros = sampleRtt;
-                            AddRttSampleUnsafe(sampleRtt);
+                            long segmentRtt = nowMicros - segment.LastSendMicros;
+                            if (sampleRtt == 0 || segmentRtt < sampleRtt)
+                            {
+                                sampleRtt = segmentRtt;
+                            }
                         }
 
                         _bytesReceived += 0;
@@ -793,7 +791,8 @@ namespace Ucp.Internal
                     if (ackPacket.SackBlocks != null && ackPacket.SackBlocks.Count > 0)
                     {
                         uint highestSack = GetHighestSackEnd(ackPacket.SackBlocks);
-                        if (UcpSequenceComparer.IsBefore(segment.SequenceNumber, highestSack))
+                        uint firstMissingSequence = UcpSequenceComparer.Increment(ackPacket.AckNumber);
+                        if (segment.SequenceNumber == firstMissingSequence && UcpSequenceComparer.IsBefore(segment.SequenceNumber, highestSack))
                         {
                             segment.MissingAckCount++;
                             if (segment.MissingAckCount >= UcpConstants.DUPLICATE_ACK_THRESHOLD && segment.SendCount == 1 && !segment.NeedsRetransmit)
@@ -834,8 +833,16 @@ namespace Ucp.Internal
                 }
 
                 remainingFlight = _flightBytes;
-                if (deliveredBytes > 0 && sampleRtt > 0)
+                if (deliveredBytes > 0 && sampleRtt == 0 && echoRtt > 0 && echoRtt <= _rtoEstimator.CurrentRtoMicros)
                 {
+                    sampleRtt = echoRtt;
+                }
+
+                bool acceptableRttSample = sampleRtt > 0 && sampleRtt <= (long)(_rtoEstimator.CurrentRtoMicros * UcpConstants.RTT_RECOVERY_SAMPLE_MAX_RTO_MULTIPLIER);
+                if (deliveredBytes > 0 && acceptableRttSample)
+                {
+                    _lastRttMicros = sampleRtt;
+                    AddRttSampleUnsafe(sampleRtt);
                     _rtoEstimator.Update(sampleRtt);
                 }
 
@@ -871,7 +878,7 @@ namespace Ucp.Internal
                     OutboundSegment segment;
                     if (_sendBuffer.TryGetValue(sequence, out segment))
                     {
-                        if (!segment.NeedsRetransmit)
+                        if (!segment.NeedsRetransmit && !segment.Acked)
                         {
                             segment.NeedsRetransmit = true;
                             _tailLossProbePending = false;
@@ -1021,6 +1028,7 @@ namespace Ucp.Internal
             List<byte[]> readyPayloads = new List<byte[]>();
             bool shouldEstablish = false;
             bool shouldStore = false;
+            bool sendImmediateAck = false;
 
             lock (_sync)
             {
@@ -1053,10 +1061,13 @@ namespace Ucp.Internal
                         _recvBuffer[dataPacket.SequenceNumber] = inbound;
                         _nakIssued.Remove(dataPacket.SequenceNumber);
                         _missingSequenceCounts.Remove(dataPacket.SequenceNumber);
+                        _missingFirstSeenMicros.Remove(dataPacket.SequenceNumber);
+                        _lastNakIssuedMicros.Remove(dataPacket.SequenceNumber);
                     }
 
                     if (shouldStore && UcpSequenceComparer.IsAfter(dataPacket.SequenceNumber, _nextExpectedSequence))
                     {
+                        sendImmediateAck = true;
                         uint current = _nextExpectedSequence;
                         int remainingNakSlots = UcpConstants.MAX_NAK_MISSING_SCAN;
                         while (current != dataPacket.SequenceNumber && remainingNakSlots > 0)
@@ -1067,9 +1078,12 @@ namespace Ucp.Internal
                                 _missingSequenceCounts.TryGetValue(current, out missingCount);
                                 missingCount++;
                                 _missingSequenceCounts[current] = missingCount;
-                                if (current == _nextExpectedSequence && missingCount >= UcpConstants.NAK_MISSING_THRESHOLD && !_nakIssued.Contains(current))
+                                long firstSeenMicros = GetMissingFirstSeenMicrosUnsafe(current);
+                                bool missingAgeExpired = NowMicros() - firstSeenMicros >= UcpConstants.NAK_REORDER_GRACE_MICROS;
+                                bool missingRepeatedEnough = missingCount >= UcpConstants.NAK_MISSING_THRESHOLD;
+                                if (missing.Count < UcpConstants.MAX_NAK_SEQUENCES_PER_PACKET && missingRepeatedEnough && missingAgeExpired && ShouldIssueNakUnsafe(current))
                                 {
-                                    _nakIssued.Add(current);
+                                    MarkNakIssuedUnsafe(current);
                                     missing.Add(current);
                                 }
                             }
@@ -1090,17 +1104,25 @@ namespace Ucp.Internal
                         _recvBuffer.Remove(_nextExpectedSequence);
                         _nakIssued.Remove(_nextExpectedSequence);
                         _missingSequenceCounts.Remove(_nextExpectedSequence);
+                        _missingFirstSeenMicros.Remove(_nextExpectedSequence);
+                        _lastNakIssuedMicros.Remove(_nextExpectedSequence);
                         _nextExpectedSequence = UcpSequenceComparer.Increment(_nextExpectedSequence);
                         readyPayloads.Add(next.Payload);
                     }
 
-                    if (_recvBuffer.Count > 0 && !_recvBuffer.ContainsKey(_nextExpectedSequence) && !_nakIssued.Contains(_nextExpectedSequence))
+                    if (_recvBuffer.Count > 0 && !_recvBuffer.ContainsKey(_nextExpectedSequence))
                     {
+                        if (_recvBuffer.Count >= UcpConstants.IMMEDIATE_ACK_REORDERED_PACKET_THRESHOLD)
+                        {
+                            sendImmediateAck = true;
+                        }
+
                         int missingCount;
                         _missingSequenceCounts.TryGetValue(_nextExpectedSequence, out missingCount);
-                        if (missingCount >= UcpConstants.NAK_MISSING_THRESHOLD)
+                        long firstSeenMicros = GetMissingFirstSeenMicrosUnsafe(_nextExpectedSequence);
+                        if (missing.Count < UcpConstants.MAX_NAK_SEQUENCES_PER_PACKET && missingCount >= UcpConstants.NAK_MISSING_THRESHOLD && NowMicros() - firstSeenMicros >= UcpConstants.NAK_REORDER_GRACE_MICROS && ShouldIssueNakUnsafe(_nextExpectedSequence))
                         {
-                            _nakIssued.Add(_nextExpectedSequence);
+                            MarkNakIssuedUnsafe(_nextExpectedSequence);
                             missing.Add(_nextExpectedSequence);
                         }
                     }
@@ -1122,7 +1144,37 @@ namespace Ucp.Internal
                 SendNak(missing);
             }
 
-            ScheduleAck();
+            if (sendImmediateAck)
+            {
+                SendAckPacket(UcpPacketFlags.None, 0);
+            }
+            else
+            {
+                ScheduleAck();
+            }
+        }
+
+        private bool ShouldIssueNakUnsafe(uint sequenceNumber)
+        {
+            return !_nakIssued.Contains(sequenceNumber);
+        }
+
+        private void MarkNakIssuedUnsafe(uint sequenceNumber)
+        {
+            _nakIssued.Add(sequenceNumber);
+            _lastNakIssuedMicros[sequenceNumber] = NowMicros();
+        }
+
+        private long GetMissingFirstSeenMicrosUnsafe(uint sequenceNumber)
+        {
+            long firstSeenMicros;
+            if (!_missingFirstSeenMicros.TryGetValue(sequenceNumber, out firstSeenMicros))
+            {
+                firstSeenMicros = NowMicros();
+                _missingFirstSeenMicros[sequenceNumber] = firstSeenMicros;
+            }
+
+            return firstSeenMicros;
         }
 
         private void HandleFin(UcpControlPacket packet)
@@ -1545,6 +1597,7 @@ namespace Ucp.Internal
             bool maxRetransmissionsExceeded = false;
             bool timedOutForCongestion = false;
             bool tailLossProbe = false;
+            List<uint> missingForNak = new List<uint>();
 
             lock (_sync)
             {
@@ -1608,6 +1661,8 @@ namespace Ucp.Internal
                     sendKeepAlive = true;
                 }
 
+                CollectMissingForNakUnsafe(missingForNak, nowMicros);
+
                 if (_isServerSide && _state == UcpConnectionState.HandshakeSynReceived && _synAckSent && nowMicros - _synAckSentMicros >= _rtoEstimator.CurrentRtoMicros)
                 {
                     _synAckSentMicros = nowMicros;
@@ -1631,6 +1686,12 @@ namespace Ucp.Internal
                 SendControl(UcpPacketType.SynAck, UcpPacketFlags.None);
             }
 
+            if (missingForNak.Count > 0)
+            {
+                SendNak(missingForNak);
+                SendAckPacket(UcpPacketFlags.None, 0);
+            }
+
             if (sendKeepAlive)
             {
                 SendAckPacket(UcpPacketFlags.None, -1);
@@ -1646,6 +1707,50 @@ namespace Ucp.Internal
             if (_state == UcpConnectionState.Closed)
             {
                 TransitionToClosed();
+            }
+        }
+
+        private void CollectMissingForNakUnsafe(List<uint> missing, long nowMicros)
+        {
+            if (missing == null || _recvBuffer.Count == 0 || _recvBuffer.ContainsKey(_nextExpectedSequence))
+            {
+                return;
+            }
+
+            uint highestReceived = _nextExpectedSequence;
+            bool hasHighest = false;
+            foreach (KeyValuePair<uint, InboundSegment> pair in _recvBuffer)
+            {
+                if (!hasHighest || UcpSequenceComparer.IsAfter(pair.Key, highestReceived))
+                {
+                    highestReceived = pair.Key;
+                    hasHighest = true;
+                }
+            }
+
+            if (!hasHighest)
+            {
+                return;
+            }
+
+            uint current = _nextExpectedSequence;
+            int remainingScan = UcpConstants.MAX_NAK_MISSING_SCAN;
+            while (missing.Count < UcpConstants.MAX_NAK_SEQUENCES_PER_PACKET && current != highestReceived && remainingScan > 0)
+            {
+                if (!_recvBuffer.ContainsKey(current))
+                {
+                    long firstSeenMicros = GetMissingFirstSeenMicrosUnsafe(current);
+                    int missingCount;
+                    _missingSequenceCounts.TryGetValue(current, out missingCount);
+                    if (missingCount >= UcpConstants.NAK_MISSING_THRESHOLD && nowMicros - firstSeenMicros >= UcpConstants.NAK_REORDER_GRACE_MICROS && ShouldIssueNakUnsafe(current))
+                    {
+                        MarkNakIssuedUnsafe(current);
+                        missing.Add(current);
+                    }
+                }
+
+                current = UcpSequenceComparer.Increment(current);
+                remainingScan--;
             }
         }
 

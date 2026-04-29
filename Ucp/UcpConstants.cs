@@ -109,7 +109,7 @@ namespace Ucp
         public const long DEFAULT_MIN_PACING_INTERVAL_MICROS = MICROS_PER_MILLI;
 
         /// <summary>Default pacing token bucket duration in microseconds.</summary>
-        public const long DEFAULT_PACING_BUCKET_DURATION_MICROS = MICROS_PER_SECOND;
+        public const long DEFAULT_PACING_BUCKET_DURATION_MICROS = 10000L;
 
         /// <summary>Minimum RTO accepted by configuration validation, in microseconds.</summary>
         public const long MIN_RTO_MICROS = 100000L;
@@ -146,6 +146,9 @@ namespace Ucp
 
         /// <summary>RTT variance multiplier used when calculating RTO.</summary>
         public const int RTO_GAIN_MULTIPLIER = 4;
+
+        /// <summary>Maximum accepted RTT sample multiplier relative to the current RTO during recovery.</summary>
+        public const double RTT_RECOVERY_SAMPLE_MAX_RTO_MULTIPLIER = 1.0d;
 
         /// <summary>Maximum backoff multiple relative to the minimum RTO.</summary>
         public const int RTO_MAX_BACKOFF_MIN_RTO_MULTIPLIER = 2;
@@ -229,7 +232,7 @@ namespace Ucp
         public const double BBR_HIGH_LOSS_PACING_GAIN = 0.95d;
 
         /// <summary>BBR fast recovery pacing gain used after non-congestion loss recovery signals.</summary>
-        public const double BBR_FAST_RECOVERY_PACING_GAIN = 0.80d;
+        public const double BBR_FAST_RECOVERY_PACING_GAIN = 1.05d;
 
         /// <summary>Minimum BBR pacing gain after a congestion loss signal.</summary>
         public const double BBR_MIN_CONGESTION_PACING_GAIN = 0.92d;
@@ -246,6 +249,48 @@ namespace Ucp
         /// <summary>Loss budget headroom below which probing may become more aggressive again.</summary>
         public const double BBR_LOSS_BUDGET_RECOVERY_RATIO = 0.80d;
 
+        /// <summary>EWMA sample weight used to smooth exported loss estimates.</summary>
+        public const double BBR_LOSS_EWMA_SAMPLE_WEIGHT = 0.25d;
+
+        /// <summary>EWMA retained weight used to smooth exported loss estimates.</summary>
+        public const double BBR_LOSS_EWMA_RETAINED_WEIGHT = 1d - BBR_LOSS_EWMA_SAMPLE_WEIGHT;
+
+        /// <summary>EWMA decay applied when no recent loss is observed.</summary>
+        public const double BBR_LOSS_EWMA_IDLE_DECAY = 0.90d;
+
+        /// <summary>Delivery-rate drop ratio that contributes to a congestion classification.</summary>
+        public const double BBR_CONGESTION_RATE_DROP_RATIO = -0.15d;
+
+        /// <summary>RTT increase ceiling below which loss is treated as random rather than queue congestion.</summary>
+        public const double BBR_RANDOM_LOSS_MAX_RTT_INCREASE_RATIO = 0.20d;
+
+        /// <summary>Classifier score required before loss-control treats a signal as congestion.</summary>
+        public const int BBR_CONGESTION_CLASSIFIER_SCORE_THRESHOLD = 2;
+
+        /// <summary>Classifier score assigned to a meaningful delivery-rate drop.</summary>
+        public const int BBR_CONGESTION_RATE_DROP_SCORE = 1;
+
+        /// <summary>Classifier score assigned to sustained RTT growth.</summary>
+        public const int BBR_CONGESTION_RTT_GROWTH_SCORE = 1;
+
+        /// <summary>Classifier score assigned to moderate recent loss while RTT is also growing.</summary>
+        public const int BBR_CONGESTION_LOSS_SCORE = 1;
+
+        /// <summary>Maximum startup delivery-rate sample multiplier relative to the active pacing rate.</summary>
+        public const double BBR_STARTUP_ACK_AGGREGATION_RATE_CAP_GAIN = 4.0d;
+
+        /// <summary>Maximum steady-state delivery-rate sample multiplier relative to the active pacing rate.</summary>
+        public const double BBR_STEADY_ACK_AGGREGATION_RATE_CAP_GAIN = 1.50d;
+
+        /// <summary>Maximum bottleneck-bandwidth growth per RTT while in Startup.</summary>
+        public const double BBR_STARTUP_BANDWIDTH_GROWTH_PER_ROUND = 1.50d;
+
+        /// <summary>Maximum bottleneck-bandwidth growth per RTT after Startup.</summary>
+        public const double BBR_STEADY_BANDWIDTH_GROWTH_PER_ROUND = 1.15d;
+
+        /// <summary>Fallback bandwidth-growth interval before a valid RTT sample is available.</summary>
+        public const long BBR_BANDWIDTH_GROWTH_FALLBACK_INTERVAL_MICROS = 10000L;
+
         /// <summary>Maximum ratio used for the lower inflight guardrail relative to BDP.</summary>
         public const double BBR_INFLIGHT_LOW_GAIN = 0.90d;
 
@@ -258,8 +303,155 @@ namespace Ucp
         /// <summary>Number of recent RTT samples used to classify jitter.</summary>
         public const int BBR_RTT_HISTORY_COUNT = 5;
 
+        /// <summary>Benchmark bandwidth for 100 Mbps line-rate scenarios, in bytes per second.</summary>
+        public const int BENCHMARK_100_MBPS_BYTES_PER_SECOND = 100000000 / 8;
+
+        /// <summary>Benchmark bandwidth for 1 Gbps line-rate scenarios, in bytes per second.</summary>
+        public const int BENCHMARK_1_GBPS_BYTES_PER_SECOND = 1000000000 / 8;
+
+        /// <summary>Benchmark bandwidth for 10 Gbps line-rate scenarios, in bytes per second.</summary>
+        public const int BENCHMARK_10_GBPS_BYTES_PER_SECOND = 10000000000L / 8 > int.MaxValue ? int.MaxValue : (int)(10000000000L / 8);
+
+        /// <summary>Initial probe bandwidth used by unconstrained benchmark tests, in bytes per second.</summary>
+        public const int BENCHMARK_INITIAL_PROBE_BANDWIDTH_BYTES_PER_SECOND = 1000000 / 8;
+
+        /// <summary>Relative divisor used to choose a practical initial bandwidth probe for large links.</summary>
+        public const int BENCHMARK_INITIAL_PROBE_BANDWIDTH_DIVISOR = 128;
+
+        /// <summary>Path multiplier used to estimate RTT from one-way simulator delay.</summary>
+        public const int BENCHMARK_RTT_PATH_MULTIPLIER = 2;
+
+        /// <summary>Initial congestion-window gain relative to estimated BDP for line-rate benchmarks.</summary>
+        public const double BENCHMARK_INITIAL_CWND_BDP_GAIN = 1.25d;
+
+        /// <summary>Bandwidth divisor used as the no-loss benchmark initial congestion-window floor.</summary>
+        public const int BENCHMARK_NO_LOSS_INITIAL_CWND_BANDWIDTH_DIVISOR = 16;
+
+        /// <summary>Initial congestion-window gain relative to estimated BDP for lossy benchmarks.</summary>
+        public const double BENCHMARK_LOSS_INITIAL_CWND_BDP_GAIN = 0.25d;
+
+        /// <summary>Maximum initial congestion window used by random-loss benchmarks, in bytes.</summary>
+        public const int BENCHMARK_MAX_LOSS_INITIAL_CWND_BYTES = 512 * 1024;
+
+        /// <summary>Minimum RTO used by long-fat-pipe benchmarks to avoid simulator serialization false positives.</summary>
+        public const long BENCHMARK_LONG_FAT_MIN_RTO_MICROS = MICROS_PER_SECOND;
+
+        /// <summary>Deterministic random seed used by light-loss benchmark data drops.</summary>
+        public const int BENCHMARK_LIGHT_RANDOM_LOSS_SEED = 20260501;
+
+        /// <summary>Deterministic random seed used by heavy-loss benchmark data drops.</summary>
+        public const int BENCHMARK_HEAVY_RANDOM_LOSS_SEED = 20260502;
+
+        /// <summary>RTT used by controller-only auto-probe convergence benchmarks, in microseconds.</summary>
+        public const long BENCHMARK_CONTROLLER_CONVERGENCE_RTT_MICROS = 10000L;
+
+        /// <summary>Maximum BBR rounds allowed for controller-only auto-probe convergence benchmarks.</summary>
+        public const int BENCHMARK_CONTROLLER_MAX_CONVERGENCE_ROUNDS = 32;
+
+        /// <summary>Payload size used by 100 Mbps benchmark scenarios, in bytes.</summary>
+        public const int BENCHMARK_100M_PAYLOAD_BYTES = 4 * 1024 * 1024;
+
+        /// <summary>Payload size used by the 100 Mbps long-fat-pipe benchmark, in bytes.</summary>
+        public const int BENCHMARK_LONG_FAT_100M_PAYLOAD_BYTES = 16 * 1024 * 1024;
+
+        /// <summary>Payload size used by 1 Gbps benchmark scenarios, in bytes.</summary>
+        public const int BENCHMARK_1G_PAYLOAD_BYTES = 4 * 1024 * 1024;
+
+        /// <summary>Payload size used by 10 Gbps benchmark scenarios, in bytes.</summary>
+        public const int BENCHMARK_10G_PAYLOAD_BYTES = 8 * 1024 * 1024;
+
+        /// <summary>Payload size used by burst-loss recovery benchmark scenarios, in bytes.</summary>
+        public const int BENCHMARK_BURST_LOSS_PAYLOAD_BYTES = 2 * 1024 * 1024;
+
+        /// <summary>Default benchmark read timeout in milliseconds.</summary>
+        public const int BENCHMARK_READ_TIMEOUT_MILLISECONDS = 30000;
+
+        /// <summary>Default ACK settlement timeout in milliseconds.</summary>
+        public const int BENCHMARK_ACK_SETTLEMENT_TIMEOUT_MILLISECONDS = 1000;
+
+        /// <summary>First logical port used by dynamically allocated benchmark tests.</summary>
+        public const int BENCHMARK_BASE_PORT = 40100;
+
+        /// <summary>Port offset for the 1 Gbps ideal benchmark.</summary>
+        public const int BENCHMARK_PORT_OFFSET_GIGABIT_IDEAL = 0;
+
+        /// <summary>Port offset for the 1 Gbps heavy-loss benchmark.</summary>
+        public const int BENCHMARK_PORT_OFFSET_GIGABIT_LOSS5 = 1;
+
+        /// <summary>Port offset for the 1 Gbps light-loss benchmark.</summary>
+        public const int BENCHMARK_PORT_OFFSET_GIGABIT_LOSS1 = 2;
+
+        /// <summary>Port offset for the 100 Mbps long-fat-pipe benchmark.</summary>
+        public const int BENCHMARK_PORT_OFFSET_LONG_FAT_100M = 3;
+
+        /// <summary>Port offset for the 10 Gbps benchmark.</summary>
+        public const int BENCHMARK_PORT_OFFSET_10G = 4;
+
+        /// <summary>Port offset for the burst-loss benchmark.</summary>
+        public const int BENCHMARK_PORT_OFFSET_BURST_LOSS = 5;
+
+        /// <summary>Fixed one-way delay for the 100 Mbps benchmark, in milliseconds.</summary>
+        public const int BENCHMARK_100M_DELAY_MILLISECONDS = 5;
+
+        /// <summary>Fixed one-way delay for the 1 Gbps ideal benchmark, in milliseconds.</summary>
+        public const int BENCHMARK_1G_IDEAL_DELAY_MILLISECONDS = 1;
+
+        /// <summary>Fixed one-way delay for the 1 Gbps light-loss benchmark, in milliseconds.</summary>
+        public const int BENCHMARK_1G_LIGHT_LOSS_DELAY_MILLISECONDS = 20;
+
+        /// <summary>Jitter for the 1 Gbps light-loss benchmark, in milliseconds.</summary>
+        public const int BENCHMARK_1G_LIGHT_LOSS_JITTER_MILLISECONDS = 3;
+
+        /// <summary>Fixed one-way delay for the 1 Gbps heavy-loss benchmark, in milliseconds.</summary>
+        public const int BENCHMARK_1G_HEAVY_LOSS_DELAY_MILLISECONDS = 30;
+
+        /// <summary>Jitter for the 1 Gbps heavy-loss benchmark, in milliseconds.</summary>
+        public const int BENCHMARK_1G_HEAVY_LOSS_JITTER_MILLISECONDS = 5;
+
+        /// <summary>Fixed one-way delay for the 100 Mbps long-fat-pipe benchmark, in milliseconds.</summary>
+        public const int BENCHMARK_LONG_FAT_DELAY_MILLISECONDS = 50;
+
+        /// <summary>Jitter for the 100 Mbps long-fat-pipe benchmark, in milliseconds.</summary>
+        public const int BENCHMARK_LONG_FAT_JITTER_MILLISECONDS = 2;
+
+        /// <summary>Fixed one-way delay for the 10 Gbps probe benchmark, in milliseconds.</summary>
+        public const int BENCHMARK_10G_DELAY_MILLISECONDS = 1;
+
+        /// <summary>Fixed one-way delay for the burst-loss benchmark, in milliseconds.</summary>
+        public const int BENCHMARK_BURST_LOSS_DELAY_MILLISECONDS = 25;
+
+        /// <summary>Jitter for the burst-loss benchmark, in milliseconds.</summary>
+        public const int BENCHMARK_BURST_LOSS_JITTER_MILLISECONDS = 4;
+
+        /// <summary>Light random data loss rate used by benchmark scenarios.</summary>
+        public const double BENCHMARK_LIGHT_RANDOM_LOSS_RATE = 0.01d;
+
+        /// <summary>Heavy random data loss rate used by benchmark scenarios.</summary>
+        public const double BENCHMARK_HEAVY_RANDOM_LOSS_RATE = 0.05d;
+
+        /// <summary>First data packet index included in the burst-loss benchmark.</summary>
+        public const int BENCHMARK_BURST_LOSS_FIRST_PACKET = 16;
+
+        /// <summary>Number of consecutive data packets dropped in the burst-loss benchmark.</summary>
+        public const int BENCHMARK_BURST_LOSS_PACKET_COUNT = 8;
+
+        /// <summary>Minimum line-rate utilization target for no-loss benchmark scenarios.</summary>
+        public const double BENCHMARK_MIN_NO_LOSS_UTILIZATION_PERCENT = 70d;
+
+        /// <summary>Minimum line-rate utilization target for controlled-loss benchmark scenarios.</summary>
+        public const double BENCHMARK_MIN_LOSS_UTILIZATION_PERCENT = 45d;
+
+        /// <summary>Maximum acceptable RTT jitter multiplier relative to the configured one-way delay.</summary>
+        public const double BENCHMARK_MAX_JITTER_DELAY_MULTIPLIER = 4d;
+
+        /// <summary>Minimum pacing ratio accepted after auto-probing converges.</summary>
+        public const double BENCHMARK_MIN_CONVERGED_PACING_RATIO = 0.70d;
+
+        /// <summary>Maximum pacing ratio accepted after auto-probing converges.</summary>
+        public const double BENCHMARK_MAX_CONVERGED_PACING_RATIO = 1.35d;
+
         /// <summary>Maximum number of NAK packets emitted during one RTT interval.</summary>
-        public const int MAX_NAKS_PER_RTT = 3;
+        public const int MAX_NAKS_PER_RTT = 8;
 
         /// <summary>Threshold in payload-sized segments below which early retransmit is allowed.</summary>
         public const int EARLY_RETRANSMIT_MAX_INFLIGHT_SEGMENTS = 4;
@@ -286,16 +478,28 @@ namespace Ucp
         public const long BBR_DEFAULT_RATE_WINDOW_MICROS = MICROS_PER_SECOND;
 
         /// <summary>Duplicate ACK count needed to trigger fast retransmit.</summary>
-        public const int DUPLICATE_ACK_THRESHOLD = 3;
+        public const int DUPLICATE_ACK_THRESHOLD = 5;
 
         /// <summary>Missing observation count needed before the receiver sends a NAK.</summary>
-        public const int NAK_MISSING_THRESHOLD = 3;
+        public const int NAK_MISSING_THRESHOLD = 12;
+
+        /// <summary>Minimum packet-age delay before receiver NAKs a missing sequence, in microseconds.</summary>
+        public const long NAK_REORDER_GRACE_MICROS = 20000L;
+
+        /// <summary>Minimum interval before the receiver may re-emit a NAK for the same missing sequence.</summary>
+        public const long NAK_REPEAT_INTERVAL_MICROS = 250000L;
 
         /// <summary>Maximum number of sequence slots scanned while building NAK state.</summary>
-        public const int MAX_NAK_MISSING_SCAN = 32;
+        public const int MAX_NAK_MISSING_SCAN = 4096;
+
+        /// <summary>Maximum missing sequences included in one NAK packet.</summary>
+        public const int MAX_NAK_SEQUENCES_PER_PACKET = 4;
 
         /// <summary>Maximum SACK blocks emitted by default.</summary>
-        public const int DEFAULT_ACK_SACK_BLOCK_LIMIT = 10;
+        public const int DEFAULT_ACK_SACK_BLOCK_LIMIT = 32;
+
+        /// <summary>Receive-buffer occupancy that forces an immediate ACK, measured in packets.</summary>
+        public const int IMMEDIATE_ACK_REORDERED_PACKET_THRESHOLD = 4;
 
         /// <summary>Default keep-alive interval in microseconds.</summary>
         public const long KEEP_ALIVE_INTERVAL_MICROS = MICROS_PER_SECOND;

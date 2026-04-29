@@ -41,6 +41,8 @@ namespace Ucp
         private double _inflightLowBytes;
         private double _maxBandwidthLossPercent;
         private long _fastRecoveryEnteredMicros;
+        private long _bandwidthGrowthWindowMicros;
+        private double _bandwidthGrowthWindowStartRate;
         private NetworkCondition _networkCondition;
 
         private enum NetworkCondition
@@ -119,6 +121,12 @@ namespace Ucp
             {
                 _totalDeliveredBytes += deliveredBytes;
                 double deliveryRate = deliveredBytes * UcpConstants.MICROS_PER_SECOND / (double)intervalMicros;
+                if (PacingRateBytesPerSecond > 0)
+                {
+                    double aggregationCapGain = Mode == BbrMode.Startup ? UcpConstants.BBR_STARTUP_ACK_AGGREGATION_RATE_CAP_GAIN : UcpConstants.BBR_STEADY_ACK_AGGREGATION_RATE_CAP_GAIN;
+                    deliveryRate = Math.Min(deliveryRate, PacingRateBytesPerSecond * aggregationCapGain);
+                }
+
                 _deliveryRateBytesPerSecond = deliveryRate;
                 AddRateSample(deliveryRate, nowMicros);
                 AddDeliveryRateSample(deliveryRate);
@@ -134,7 +142,7 @@ namespace Ucp
             }
 
             _networkCondition = ClassifyNetworkCondition(nowMicros);
-            EstimatedLossPercent = CalculateLossPercent(nowMicros);
+            UpdateEstimatedLossPercent(nowMicros);
             UpdateInflightBounds();
 
             if (minRttExpired && Mode != BbrMode.ProbeRtt)
@@ -232,15 +240,16 @@ namespace Ucp
                 nowMicros = UcpTime.NowMicroseconds();
             }
 
-            lossRate = Math.Max(lossRate, GetRecentLossRatio(nowMicros));
-            EstimatedLossPercent = Math.Max(EstimatedLossPercent, lossRate * 100d);
+            double recentLossRate = GetRecentLossRatio(nowMicros);
+            lossRate = isCongestion ? Math.Max(lossRate, recentLossRate) : recentLossRate;
+            UpdateEstimatedLossPercent(nowMicros, lossRate * 100d);
             if (!isCongestion)
             {
                 TraceLog("RandomLoss lossRate=" + lossRate.ToString("F4"));
                 return;
             }
 
-            if (_config.LossControlEnable && EstimatedLossPercent > _maxBandwidthLossPercent)
+            if (_config.LossControlEnable && _networkCondition == NetworkCondition.Congested && EstimatedLossPercent > _maxBandwidthLossPercent)
             {
                 PacingGain = Math.Max(UcpConstants.BBR_HIGH_LOSS_PACING_GAIN, PacingGain * UcpConstants.BBR_CONGESTION_LOSS_REDUCTION);
                 _lossCwndGain = Math.Max(UcpConstants.BBR_MIN_LOSS_CWND_GAIN, _lossCwndGain * UcpConstants.BBR_CONGESTION_LOSS_REDUCTION);
@@ -327,6 +336,7 @@ namespace Ucp
 
             if (maxRate > 0)
             {
+                maxRate = ClampBandwidthGrowth(maxRate, nowMicros);
                 if (_config.MaxPacingRateBytesPerSecond > 0 && maxRate > _config.MaxPacingRateBytesPerSecond)
                 {
                     maxRate = _config.MaxPacingRateBytesPerSecond;
@@ -343,6 +353,25 @@ namespace Ucp
                     }
                 }
             }
+        }
+
+        private double ClampBandwidthGrowth(double candidateRate, long nowMicros)
+        {
+            if (candidateRate <= BtlBwBytesPerSecond || BtlBwBytesPerSecond <= 0)
+            {
+                return candidateRate;
+            }
+
+            long growthIntervalMicros = MinRttMicros > 0 ? MinRttMicros : UcpConstants.BBR_BANDWIDTH_GROWTH_FALLBACK_INTERVAL_MICROS;
+            if (_bandwidthGrowthWindowMicros == 0 || nowMicros - _bandwidthGrowthWindowMicros >= growthIntervalMicros)
+            {
+                _bandwidthGrowthWindowMicros = nowMicros;
+                _bandwidthGrowthWindowStartRate = BtlBwBytesPerSecond;
+            }
+
+            double growthGain = Mode == BbrMode.Startup ? UcpConstants.BBR_STARTUP_BANDWIDTH_GROWTH_PER_ROUND : UcpConstants.BBR_STEADY_BANDWIDTH_GROWTH_PER_ROUND;
+            double growthCap = Math.Max(BtlBwBytesPerSecond, _bandwidthGrowthWindowStartRate * growthGain);
+            return Math.Min(candidateRate, growthCap);
         }
 
         private void AddDeliveryRateSample(double deliveryRate)
@@ -426,7 +455,7 @@ namespace Ucp
 
             if (_config.LossControlEnable)
             {
-                if (EstimatedLossPercent > _maxBandwidthLossPercent && GetRecentLossRatio(nowMicros) > 0)
+                if (_networkCondition == NetworkCondition.Congested && EstimatedLossPercent > _maxBandwidthLossPercent && GetRecentLossRatio(nowMicros) > 0)
                 {
                     PacingGain = Math.Max(UcpConstants.BBR_HIGH_LOSS_PACING_GAIN, PacingGain * UcpConstants.BBR_CONGESTION_LOSS_REDUCTION);
                 }
@@ -510,13 +539,9 @@ namespace Ucp
         private double CalculatePacingGain(long nowMicros)
         {
             double lossRatio = GetRecentLossRatio(nowMicros);
-            double rttIncrease = 0d;
-            if (_currentRttMicros > 0 && MinRttMicros > 0)
-            {
-                rttIncrease = Math.Max(0d, (_currentRttMicros - MinRttMicros) / (double)MinRttMicros);
-            }
+            double rttIncrease = GetAverageRttIncreaseRatio();
 
-            if (_config.LossControlEnable && EstimatedLossPercent > _maxBandwidthLossPercent)
+            if (_config.LossControlEnable && _networkCondition == NetworkCondition.Congested && EstimatedLossPercent > _maxBandwidthLossPercent)
             {
                 return UcpConstants.BBR_HIGH_LOSS_PACING_GAIN;
             }
@@ -554,6 +579,29 @@ namespace Ucp
             return UcpConstants.BBR_HIGH_LOSS_PACING_GAIN;
         }
 
+        private void UpdateEstimatedLossPercent(long nowMicros)
+        {
+            UpdateEstimatedLossPercent(nowMicros, CalculateLossPercent(nowMicros));
+        }
+
+        private void UpdateEstimatedLossPercent(long nowMicros, double candidateLossPercent)
+        {
+            double boundedCandidate = Math.Max(0d, Math.Min(100d, candidateLossPercent));
+            if (boundedCandidate <= 0d && GetRecentLossRatio(nowMicros) <= 0d)
+            {
+                EstimatedLossPercent *= UcpConstants.BBR_LOSS_EWMA_IDLE_DECAY;
+                return;
+            }
+
+            if (EstimatedLossPercent <= 0d)
+            {
+                EstimatedLossPercent = boundedCandidate;
+                return;
+            }
+
+            EstimatedLossPercent = (EstimatedLossPercent * UcpConstants.BBR_LOSS_EWMA_RETAINED_WEIGHT) + (boundedCandidate * UcpConstants.BBR_LOSS_EWMA_SAMPLE_WEIGHT);
+        }
+
         private double CalculateLossPercent(long nowMicros)
         {
             double targetRate = BtlBwBytesPerSecond > 0 ? BtlBwBytesPerSecond : _config.InitialBandwidthBytesPerSecond;
@@ -563,7 +611,7 @@ namespace Ucp
             }
 
             double retransmissionLoss = GetRecentLossRatio(nowMicros);
-            if (_networkCondition != NetworkCondition.Congested || _deliveryRateBytesPerSecond <= 0)
+            if (_networkCondition != NetworkCondition.Congested || _deliveryRateBytesPerSecond <= 0 || Mode == BbrMode.Startup)
             {
                 return retransmissionLoss * 100d;
             }
@@ -586,18 +634,29 @@ namespace Ucp
             double newestRate = _deliveryRateHistory[newestIndex];
             double deliveryRateChange = oldestRate <= 0 ? 0d : (newestRate - oldestRate) / oldestRate;
             double lossRatio = GetRecentLossRatio(nowMicros);
-            double rttIncrease = 0d;
-            if (_currentRttMicros > 0 && MinRttMicros > 0)
+            double rttIncrease = GetAverageRttIncreaseRatio();
+            int congestionScore = 0;
+            if (deliveryRateChange <= UcpConstants.BBR_CONGESTION_RATE_DROP_RATIO)
             {
-                rttIncrease = Math.Max(0d, (_currentRttMicros - MinRttMicros) / (double)MinRttMicros);
+                congestionScore += UcpConstants.BBR_CONGESTION_RATE_DROP_SCORE;
             }
 
-            if (deliveryRateChange < 0 && rttIncrease >= UcpConstants.BBR_LOW_RTT_INCREASE_RATIO)
+            if (rttIncrease >= UcpConstants.BBR_MODERATE_RTT_INCREASE_RATIO)
+            {
+                congestionScore += UcpConstants.BBR_CONGESTION_RTT_GROWTH_SCORE;
+            }
+
+            if (lossRatio >= UcpConstants.BBR_MODERATE_LOSS_RATIO && rttIncrease >= UcpConstants.BBR_LOW_RTT_INCREASE_RATIO)
+            {
+                congestionScore += UcpConstants.BBR_CONGESTION_LOSS_SCORE;
+            }
+
+            if (congestionScore >= UcpConstants.BBR_CONGESTION_CLASSIFIER_SCORE_THRESHOLD)
             {
                 return NetworkCondition.Congested;
             }
 
-            if (deliveryRateChange < 0 && lossRatio > 0)
+            if (lossRatio > 0 && rttIncrease <= UcpConstants.BBR_RANDOM_LOSS_MAX_RTT_INCREASE_RATIO)
             {
                 return NetworkCondition.RandomLoss;
             }
@@ -608,6 +667,23 @@ namespace Ucp
             }
 
             return NetworkCondition.Idle;
+        }
+
+        private double GetAverageRttIncreaseRatio()
+        {
+            if (_rttHistoryCount == 0 || MinRttMicros <= 0)
+            {
+                return 0d;
+            }
+
+            long total = 0;
+            for (int i = 0; i < _rttHistoryCount; i++)
+            {
+                total += _rttHistoryMicros[i];
+            }
+
+            double averageRtt = total / (double)_rttHistoryCount;
+            return Math.Max(0d, (averageRtt - MinRttMicros) / MinRttMicros);
         }
 
         private void UpdateInflightBounds()
