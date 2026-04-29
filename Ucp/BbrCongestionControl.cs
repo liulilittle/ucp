@@ -929,7 +929,10 @@ namespace Ucp
                 window.AvgRttMicros = _classifierWindowRttCount > 0 ? _classifierWindowRttSumMicros / (double)_classifierWindowRttCount : 0d;
                 window.JitterMicros = _classifierWindowMinRttMicros > 0 && _classifierWindowMaxRttMicros > 0 ? (_classifierWindowMaxRttMicros - _classifierWindowMinRttMicros) : 0d;
                 window.LossRate = lossRateSnapshot;
-                window.ThroughputRatio = BtlBwBytesPerSecond > 0 ? Math.Min(1d, (_classifierWindowSentBytes / (double)Math.Max(1, nowMicros - _classifierWindowStartMicros)) / BtlBwBytesPerSecond) : 0d;
+                // Convert the microsecond window to bytes/second before comparing
+                // against BtlBw; otherwise high-bandwidth paths look artificially idle.
+                double windowBytesPerSecond = _classifierWindowSentBytes * UcpConstants.MICROS_PER_SECOND / (double)Math.Max(1, nowMicros - _classifierWindowStartMicros);
+                window.ThroughputRatio = BtlBwBytesPerSecond > 0 ? Math.Min(1d, windowBytesPerSecond / BtlBwBytesPerSecond) : 0d;
                 _classifierWindowIndex = (_classifierWindowIndex + 1) % UcpConstants.NETWORK_CLASSIFIER_WINDOW_COUNT;
                 if (_classifierWindowCount < UcpConstants.NETWORK_CLASSIFIER_WINDOW_COUNT)
                 {

@@ -1,113 +1,113 @@
-# UCP 性能与报告深度文档 / Performance And Reporting Guide
+# UCP Performance And Reporting Guide
 
-## 1. 目标 / Goals
+[中文](performance_CN.md) | [Documentation Index](index.md)
 
-UCP 的性能报告必须可信。它不能把本地线程调度造成的瞬时完成时间解释成超过链路目标的带宽，也不能把物理丢包率和协议重传率混成一个数字。当前实现把三个概念拆开：链路容量、网络损伤、协议恢复。
+## Goals
 
-English: the benchmark report is designed to be auditable. It separates bottleneck capacity, network impairment, and protocol recovery so a high-loss scenario can still show whether UCP repaired data efficiently without pretending the path carried more than its configured line rate.
+UCP benchmark output must be auditable. It separates bottleneck capacity, path impairment, and protocol recovery so a high-loss scenario can show whether the protocol repaired data efficiently without claiming more bandwidth than the configured link can carry.
 
-## 2. 报告字段 / Report Columns
+The report intentionally clamps payload throughput to `Target Mbps`. Local in-process scheduling can complete faster than a real NIC, but the reported value remains bounded by the simulator serialization budget.
 
-| 字段 | 中文定义 | English Definition |
-|---|---|---|
-| `Throughput Mbps` | 仿真器观测 payload 吞吐，并按 `Target Mbps` 封顶。 | Payload throughput observed by the simulator, capped by `Target Mbps`. |
-| `Target Mbps` | 场景配置的瓶颈带宽。 | Configured bottleneck bandwidth. |
-| `Util%` | `Throughput / Target * 100`，最大 100%。 | `Throughput / Target * 100`, capped at 100%. |
-| `Retrans%` | 发送端重传 DATA 包数 / 原始 DATA 包数。 | Sender retransmitted DATA packets divided by original DATA packets. |
-| `Loss%` | 仿真器丢弃的 DATA 包数 / 发送到仿真器的 DATA 包数。 | Simulator-dropped DATA packets divided by DATA packets sent into the simulator. |
-| `A->B ms` | A 到 B 的平均单向传播延迟。 | Average one-way propagation delay from A to B. |
-| `B->A ms` | B 到 A 的平均单向传播延迟。 | Average one-way propagation delay from B to A. |
-| `Avg/P95/P99/Jit ms` | RTT 样本统计和相邻 RTT 差的平均抖动。 | RTT statistics and average adjacent-sample jitter. |
-| `CWND` | 拥塞窗口，自适应 B/KB/MB/GB 单位。 | Congestion window with adaptive byte units. |
-| `Current Mbps` | BBR 当前瞬时 pacing rate。 | Current BBR instantaneous pacing rate. |
-| `RWND` | 对端通告接收窗口，自适应 B/KB/MB/GB 单位。 | Remote receive window with adaptive byte units. |
-| `Waste%` | 重传 DATA 包占原始 DATA 包比例，用于观察带宽浪费。 | Retransmitted DATA packets as a percentage of original DATA packets. |
-| `Conv ms` | pacing 进入稳定目标带宽区间的估算时间。 | Estimated time until pacing reached the stable target band. |
+## Report Columns
 
-## 3. 关键校验 / Validation Rules
-
-报告校验器 `UcpPerformanceReport.ValidateReportFile()` 执行以下约束：
-
-| 规则 | 原因 |
+| Column | Meaning |
 |---|---|
-| `Throughput Mbps <= Target Mbps * 1.01` | 防止报告出现超过物理瓶颈的虚假带宽。 |
-| `Retrans%` 在 0-100% 范围 | 保证发送端统计有效。 |
-| 每个有方向延迟的场景必须有 3-15ms 的方向差 | 模拟真实动态路由，避免所有场景同向或完全对称。 |
-| 全报告必须同时包含 A->B 更高和 B->A 更高的场景 | 覆盖 M247 类动态路由的去程高/回程高两种情况。 |
-| `Loss%` 独立于 `Retrans%` | 丢包是网络事件，重传是恢复动作。 |
+| `Throughput Mbps` | Simulator-observed payload throughput capped by `Target Mbps`. |
+| `Target Mbps` | Configured bottleneck bandwidth. |
+| `Util%` | `Throughput / Target * 100`, capped at 100%. |
+| `Retrans%` | Sender retransmitted DATA packets divided by original DATA packets. |
+| `Loss%` | Simulator-dropped DATA packets divided by DATA packets sent into the simulator. |
+| `A->B ms` | Average one-way propagation delay from endpoint A to endpoint B. |
+| `B->A ms` | Average one-way propagation delay from endpoint B to endpoint A. |
+| `Avg/P95/P99/Jit ms` | RTT statistics and average adjacent-sample jitter. |
+| `CWND` | Congestion window rendered with adaptive `B`/`KB`/`MB`/`GB` units. |
+| `Current Mbps` | Current instantaneous BBR pacing rate. |
+| `RWND` | Remote receive window rendered with adaptive units. |
+| `Waste%` | Retransmitted DATA packets as a percentage of original DATA packets. |
+| `Conv ms` | Estimated time until pacing reached the stable target band. |
 
-English: validation is intentionally strict where the report could otherwise mislead humans. Throughput cannot exceed the target; route direction must vary; loss and retransmission are independent columns.
+## Validation Rules
 
-## 4. 场景矩阵 / Scenario Matrix
+`UcpPerformanceReport.ValidateReportFile()` enforces these constraints:
 
-| 场景类型 | 代表场景 | 覆盖点 |
+| Rule | Purpose |
+|---|---|
+| `Throughput Mbps <= Target Mbps * 1.01` | Rejects physically impossible benchmark reports. |
+| `Retrans%` is between 0% and 100% | Ensures sender counters are valid. |
+| Directional delay differs by 3-15ms when both directions are known | Covers realistic asymmetric routing without unbounded skew. |
+| The complete report includes both forward-heavy and reverse-heavy routes | Prevents modeling every scenario with the same direction slower. |
+| `Loss%` is independent from `Retrans%` | Keeps network drops separate from protocol repair overhead. |
+
+## Scenario Matrix
+
+| Scenario Type | Representative Scenarios | Coverage |
 |---|---|---|
-| 无丢包稳定链路 | `NoLoss`, `Gigabit_Ideal`, `DataCenter`, `Benchmark10G` | 线速、逻辑时钟、低 RTT、高带宽。 |
-| 随机丢包 | `Lossy`, `Gigabit_Loss1`, `Gigabit_Loss5`, `100M_Loss*`, `1G_Loss3` | Loss% 与 Retrans% 分离、SACK 快恢复。 |
-| 长肥管 | `LongFatPipe`, `LongFat_100M`, `Satellite` | 高 BDP、较大 CWND、稳定 pacing。 |
-| 路由不对称 | `AsymRoute`, `VpnTunnel`, `Enterprise` | A->B/B->A 延迟方向不同，验证 3-15ms 差距。 |
-| 弱移动网络 | `Weak4G`, `Mobile3G`, `Mobile4G`, `HighJitter` | 高 RTT、高抖动、短 outage、恢复速度。 |
-| 突发丢包 | `BurstLoss` | 连续缺口恢复和带宽不崩塌。 |
+| Stable no-loss links | `NoLoss`, `Gigabit_Ideal`, `DataCenter`, `Benchmark10G` | Line rate, logical clock, low RTT, high bandwidth. |
+| Random loss | `Lossy`, `Gigabit_Loss1`, `Gigabit_Loss5`, `100M_Loss*`, `1G_Loss3` | Loss/retransmission separation, SACK fast recovery. |
+| Long fat pipes | `LongFatPipe`, `LongFat_100M`, `Satellite` | High BDP, large CWND, stable pacing. |
+| Asymmetric routing | `AsymRoute`, `VpnTunnel`, `Enterprise` | Independent A->B and B->A delay models. |
+| Weak mobile networks | `Weak4G`, `Mobile3G`, `Mobile4G`, `HighJitter` | High RTT, high jitter, mid-transfer outage, recovery speed. |
+| Burst loss | `BurstLoss` | Consecutive gap repair without collapsing pacing. |
 
-## 5. 方向延迟模型 / Directional Route Model
+## Directional Route Model
 
-测试不会假设单向网络总是同一方向更慢。`RunLineRateBenchmarkAsync` 在未显式配置方向延迟时会给每个场景生成稳定的方向模型，并让差值落在 3-15ms 范围。部分场景显式指定方向，例如 `AsymRoute` 使用 25ms/15ms。
-
-English: route asymmetry is first-class. The benchmark matrix includes both forward-heavy and reverse-heavy paths, matching real networks where return routing can differ from outbound routing.
+Benchmarks do not assume the same direction is always slower. When a scenario does not explicitly configure forward and reverse delays, `RunLineRateBenchmarkAsync` generates a deterministic route model with a 3-15ms one-way difference. Explicit scenarios, such as `AsymRoute`, use fixed forward/backward delays.
 
 ```mermaid
 flowchart LR
-    A[Endpoint A] -->|A->B 3-15ms heavier in some scenarios| B[Endpoint B]
-    B -->|B->A 3-15ms heavier in other scenarios| A
-    A -. report .-> R[Test report]
-    B -. report .-> R
+    A[Endpoint A] -->|Some scenarios are A->B heavier| B[Endpoint B]
+    B -->|Other scenarios are B->A heavier| A
+    A -. metrics .-> R[Test report]
+    B -. metrics .-> R
 ```
 
-## 6. 丢包和重传 / Loss And Retransmission
+## Loss And Retransmission
 
-丢包不是错误。`Loss%` 是仿真器在网络层丢掉的 DATA 包比例；`Retrans%` 是发送端为了恢复这些缺口而实际发出的重传比例。二者可能接近，但不应该被认为相同。
-
-English: packet loss is not an error by itself. The protocol should recover quickly. A scenario is suspicious only when loss creates excessive retransmission overhead, stalls pacing, or fails payload integrity.
+Packet loss is not an error by itself. A scenario is suspicious only when loss causes excessive retransmission overhead, stalls pacing, or fails payload integrity.
 
 ```mermaid
 flowchart TD
-    L[Network drops DATA] --> A[Receiver observes gap]
+    L[Network drops DATA] --> A[Receiver observes a sequence gap]
     A --> S[SACK after out-of-order arrival]
     A --> N[NAK after 60ms reorder guard]
-    S --> F[Fast retransmit after 2 observations]
+    S --> F[Fast retransmit after confirmed observations]
     N --> F
-    F --> R[BBR fast recovery gain 1.25]
-    R --> D[Delivery resumes]
+    F --> U{Urgent recovery?}
+    U -->|yes| Bypass[Bypass FQ and pacing, charge pacing debt]
+    U -->|no| Smooth[Use normal FQ and token bucket]
+    Bypass --> D[Delivery resumes]
+    Smooth --> D
 ```
 
-## 7. 拥塞恢复策略 / Congestion Recovery Strategy
+SACK is the first-line fast recovery path. Receiver NAK is intentionally more conservative because high-jitter routes can reorder packets for tens of milliseconds.
 
-UCP 使用 BBR 风格控制，不把丢包直接等同拥塞。关键策略如下：
+## Congestion Recovery Strategy
 
-| 策略 | 当前值 | 目的 |
+UCP uses BBR-style control and does not equate every loss event with congestion.
+
+| Strategy | Current Value | Purpose |
 |---|---|---|
-| 快恢复 pacing gain | `1.25` | 非拥塞丢包后快速补洞。 |
-| 拥塞削减因子 | `0.98` | 只在确认拥塞后温和降速。 |
-| 最低 loss CWND gain | `0.95` | 避免窗口被临时丢包打穿。 |
-| CWND 恢复步长 | `0.04/ACK` | ACK 到达后更快恢复窗口。 |
-| ProbeRTT 拥塞丢包阈值 | `5` | 避免随机丢包频繁进入 ProbeRTT。 |
+| Fast-recovery pacing gain | `1.25` | Quickly refill holes after non-congestion loss. |
+| Congestion reduction factor | `0.98` | Gently reduce only after congestion evidence. |
+| Minimum loss CWND gain | `0.95` | Prevent temporary loss from punching the window too low. |
+| CWND recovery step | `0.04` per ACK | Restore window after delivery resumes. |
+| Urgent retransmit budget | `16` packets per RTT window | Allow near-dead recovery to bypass smoothing without unlimited bursts. |
+| RTO retransmit budget | `4` packets per timer tick | Repair timeout gaps faster than one packet per tick. |
 
-English: the controller is recovery-biased. It reduces gently only when the path is congested, and it restores pacing/CWND quickly when delivery resumes.
-
-## 8. 运行与验收 / Running And Acceptance
+## Running And Acceptance
 
 ```powershell
-.\run-tests.ps1
+dotnet build ".\Ucp.Tests\UcpTest.csproj"
+dotnet test ".\Ucp.Tests\UcpTest.csproj" --no-build
+dotnet run --project ".\Ucp.Tests\UcpTest.csproj" --no-build -- ".\Ucp.Tests\bin\Debug\net8.0\reports\test_report.txt"
 ```
 
-验收标准：
+Acceptance criteria:
 
-| 项目 | 期望 |
+| Item | Expected Result |
 |---|---|
-| 单元/集成测试 | `48/48` 通过 |
-| 报告校验 | `ReportPrinter` 无 `[report-error]` |
-| 吞吐 | 不超过目标带宽，低损耗高带宽场景接近目标 |
-| 弱网 | 完成传输、保持 payload 完整、恢复后 pacing 接近目标 |
-| 文档 | README 与 `docs/` 中指标口径一致 |
-
-English: always run both the xUnit suite and the report printer. Passing tests alone is not enough if the report is misleading or fails validation.
+| Unit/integration tests | All tests pass; current suite has 52 tests. |
+| Report validation | `ReportPrinter` prints no `[report-error]`. |
+| Throughput | Never exceeds target bandwidth; low-loss high-bandwidth scenarios approach target. |
+| Weak networks | Transfer completes, payload stays intact, and pacing recovers after loss/outage. |
+| Documentation | README and `docs/` use the same report semantics. |

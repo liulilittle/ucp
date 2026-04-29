@@ -106,7 +106,7 @@ namespace Ucp
         public const double MAX_MAX_BANDWIDTH_LOSS_PERCENT = 35d;
 
         /// <summary>Default minimum pacing interval in microseconds.</summary>
-        public const long DEFAULT_MIN_PACING_INTERVAL_MICROS = MICROS_PER_MILLI;
+        public const long DEFAULT_MIN_PACING_INTERVAL_MICROS = 0L;
 
         /// <summary>Default pacing token bucket duration in microseconds.</summary>
         public const long DEFAULT_PACING_BUCKET_DURATION_MICROS = 10000L;
@@ -133,7 +133,13 @@ namespace Ucp
         public const int MAX_RETRANSMISSIONS = 10;
 
         /// <summary>Maximum timeout retransmits armed by one timer tick.</summary>
-        public const int RTO_RETRANSMIT_BUDGET_PER_TICK = 1;
+        public const int RTO_RETRANSMIT_BUDGET_PER_TICK = 4;
+
+        /// <summary>Maximum urgent retransmits allowed to bypass pacing in one RTT window.</summary>
+        public const int URGENT_RETRANSMIT_BUDGET_PER_RTT = 16;
+
+        /// <summary>Idle-time percentage after which a tail-loss probe may be urgent.</summary>
+        public const int URGENT_RETRANSMIT_DISCONNECT_THRESHOLD_PERCENT = 75;
 
         /// <summary>RTT variance EWMA denominator for RFC6298-style smoothing.</summary>
         public const int RTT_VAR_DENOM = 4;
@@ -376,7 +382,25 @@ namespace Ucp
         public const int BENCHMARK_HIGH_JITTER_PAYLOAD_BYTES = 2 * 1024 * 1024;
 
         /// <summary>Payload size used by 4G weak-network benchmark scenarios, in bytes.</summary>
-        public const int BENCHMARK_WEAK_4G_PAYLOAD_BYTES = 1024 * 1024;
+        public const int BENCHMARK_WEAK_4G_PAYLOAD_BYTES = 4 * 1024 * 1024;
+
+        /// <summary>Payload size used by 100 Mbps random-loss benchmark scenarios, in bytes.</summary>
+        public const int BENCHMARK_100M_LOSS_PAYLOAD_BYTES = 16 * 1024 * 1024;
+
+        /// <summary>Payload size used by high-loss high-RTT benchmark scenarios, in bytes.</summary>
+        public const int BENCHMARK_HIGH_LOSS_HIGH_RTT_PAYLOAD_BYTES = 4 * 1024 * 1024;
+
+        /// <summary>Payload size used by mobile 3G lossy benchmark scenarios, in bytes.</summary>
+        public const int BENCHMARK_MOBILE_3G_PAYLOAD_BYTES = 4 * 1024 * 1024;
+
+        /// <summary>Payload size used by mobile 4G high-jitter benchmark scenarios, in bytes.</summary>
+        public const int BENCHMARK_MOBILE_4G_PAYLOAD_BYTES = 8 * 1024 * 1024;
+
+        /// <summary>Payload size used by satellite benchmark scenarios, in bytes.</summary>
+        public const int BENCHMARK_SATELLITE_PAYLOAD_BYTES = 8 * 1024 * 1024;
+
+        /// <summary>Payload size used by VPN benchmark scenarios, in bytes.</summary>
+        public const int BENCHMARK_VPN_PAYLOAD_BYTES = 32 * 1024 * 1024;
 
         /// <summary>Payload size used by the 100 Mbps long-fat-pipe benchmark, in bytes.</summary>
         public const int BENCHMARK_LONG_FAT_100M_PAYLOAD_BYTES = 16 * 1024 * 1024;
@@ -385,7 +409,7 @@ namespace Ucp
         public const int BENCHMARK_1G_PAYLOAD_BYTES = 4 * 1024 * 1024;
 
         /// <summary>Payload size used by 1 Gbps random-loss benchmark scenarios, in bytes.</summary>
-        public const int BENCHMARK_1G_LOSS_PAYLOAD_BYTES = 8 * 1024 * 1024;
+        public const int BENCHMARK_1G_LOSS_PAYLOAD_BYTES = 64 * 1024 * 1024;
 
         /// <summary>Jumbo MSS used by high-bandwidth benchmark paths to avoid control-plane packet amplification.</summary>
         public const int BENCHMARK_HIGH_BANDWIDTH_MSS = 9000;

@@ -116,6 +116,24 @@ namespace UcpTest
         }
 
         [Fact]
+        public void PacingController_ForceConsume_BypassesEmptyBucketAndCreatesDebt()
+        {
+            UcpConfiguration config = new UcpConfiguration();
+            config.PacingBucketDurationMicros = 1000000;
+            PacingController controller = new PacingController(config, 1000);
+            controller.SetRate(1000, 1000000);
+
+            Assert.True(controller.TryConsume(1220, 1000000));
+            Assert.False(controller.TryConsume(1, 1000000));
+
+            controller.ForceConsume(500, 1000000);
+
+            Assert.False(controller.TryConsume(1, 1000000));
+            Assert.InRange(controller.GetWaitTimeMicros(1, 1000000), 499000, 501000);
+            Assert.True(controller.TryConsume(1, 1501000));
+        }
+
+        [Fact]
         public void BbrController_TransitionsOutOfStartup()
         {
             BbrCongestionControl bbr = new BbrCongestionControl();
@@ -247,7 +265,7 @@ namespace UcpTest
                 Assert.True(simulator.DeliveredPackets > 0);
                 Assert.True(noLossReport.RetransmissionRatio <= 0.01d);
                 Assert.True(noLossReport.AverageRttMicros > 0);
-                Assert.InRange(noLossReport.PacingRateBytesPerSecond, noLossBandwidth * 0.95d, noLossBandwidth * 1.30d);
+                Assert.InRange(noLossReport.PacingRateBytesPerSecond, noLossBandwidth * UcpConstants.BENCHMARK_MIN_CONVERGED_PACING_RATIO, noLossBandwidth * UcpConstants.BENCHMARK_MAX_CONVERGED_PACING_RATIO);
             }
             finally
             {
@@ -437,6 +455,7 @@ namespace UcpTest
                     return packet.Header.Type == UcpPacketType.Data && highLossRandom.NextDouble() < 0.05d;
                 });
             UcpConfiguration highLossConfig = CreateScenarioConfig(highLossBandwidth);
+            highLossConfig.EnableAggressiveSackRecovery = true;
             UcpServer server = new UcpServer(simulator.CreateTransport("server"), highLossConfig);
             server.Start(40004);
             UcpConnection client = new UcpConnection(simulator.CreateTransport("client"), true, highLossConfig.Clone(), null);
@@ -445,7 +464,7 @@ namespace UcpTest
             await client.ConnectAsync(new IPEndPoint(IPAddress.Loopback, 40004));
             UcpConnection serverConnection = await acceptTask;
 
-            byte[] payload = Encoding.ASCII.GetBytes(new string('D', 256 * 1024));
+            byte[] payload = Encoding.ASCII.GetBytes(new string('D', UcpConstants.BENCHMARK_HIGH_LOSS_HIGH_RTT_PAYLOAD_BYTES));
             byte[] received = new byte[payload.Length];
             DateTime start = DateTime.UtcNow;
             bool writeOk = await client.WriteAsync(payload, 0, payload.Length);
@@ -714,6 +733,107 @@ namespace UcpTest
         }
 
         [Fact]
+        public async Task Integration_ReorderingAndDuplication_PreservesUniqueByteStreamOrder()
+        {
+            NetworkSimulator simulator = new NetworkSimulator(fixedDelayMilliseconds: 4, jitterMilliseconds: 2, bandwidthBytesPerSecond: 2 * 1024 * 1024, duplicateRate: 0.05, reorderRate: 0.2);
+            UcpServer server = new UcpServer(simulator.CreateTransport("server"));
+            UcpConnection client = new UcpConnection(simulator.CreateTransport("client"));
+            server.Start(40015);
+            try
+            {
+                Task<UcpConnection> acceptTask = server.AcceptAsync();
+                await client.ConnectAsync(new IPEndPoint(IPAddress.Loopback, 40015));
+                UcpConnection serverConnection = await acceptTask;
+
+                byte[] payload = BuildUniquePayload(192 * 1024, 20260429);
+                byte[] received = new byte[payload.Length];
+                bool writeOk = await client.WriteAsync(payload, 0, payload.Length);
+                bool readOk = await ReadWithinAsync(serverConnection, received, 0, received.Length, 15000);
+
+                Assert.True(writeOk);
+                Assert.True(readOk);
+                Assert.Equal(payload, received);
+                Assert.True(simulator.ReorderedPackets > 0);
+                Assert.True(simulator.DuplicatedPackets > 0);
+                Assert.Equal(payload.Length, serverConnection.GetReport().BytesReceived);
+            }
+            finally
+            {
+                server.Stop();
+            }
+        }
+
+        [Fact]
+        public async Task Integration_Stream_MultipleWritesPartialReads_PreservesConcatenatedOrder()
+        {
+            NetworkSimulator simulator = new NetworkSimulator(fixedDelayMilliseconds: 3, jitterMilliseconds: 1, bandwidthBytesPerSecond: 4 * 1024 * 1024);
+            UcpServer server = new UcpServer(simulator.CreateTransport("server"));
+            UcpConnection client = new UcpConnection(simulator.CreateTransport("client"));
+            server.Start(40016);
+            try
+            {
+                Task<UcpConnection> acceptTask = server.AcceptAsync();
+                await client.ConnectAsync(new IPEndPoint(IPAddress.Loopback, 40016));
+                UcpConnection serverConnection = await acceptTask;
+
+                int[] chunkSizes = new int[] { 1, 7, UcpConstants.Mss - 1, UcpConstants.Mss, UcpConstants.Mss + 1, 2 * UcpConstants.Mss + 17, 64 * 1024 + 3 };
+                byte[] payload = BuildConcatenatedUniquePayload(chunkSizes, 7171);
+                Task<byte[]> readTask = ReadInChunksWithinAsync(serverConnection, payload.Length, new int[] { 3, 97, 4096, 8191, 13 }, 15000);
+                int offset = 0;
+                for (int i = 0; i < chunkSizes.Length; i++)
+                {
+                    bool writeOk = await client.WriteAsync(payload, offset, chunkSizes[i]);
+                    Assert.True(writeOk);
+                    offset += chunkSizes[i];
+                }
+
+                byte[] chunkedReceived = await readTask;
+                Assert.Equal(payload, chunkedReceived);
+            }
+            finally
+            {
+                server.Stop();
+            }
+        }
+
+        [Fact]
+        public async Task Integration_Stream_FullDuplexConcurrentTransfers_DoNotInterleaveOrCorrupt()
+        {
+            NetworkSimulator simulator = new NetworkSimulator(fixedDelayMilliseconds: 4, jitterMilliseconds: 2, bandwidthBytesPerSecond: 8 * 1024 * 1024, duplicateRate: 0.02, reorderRate: 0.05);
+            UcpConfiguration config = CreateScenarioConfig(8 * 1024 * 1024);
+            UcpServer server = new UcpServer(simulator.CreateTransport("server"), config.Clone());
+            UcpConnection client = new UcpConnection(simulator.CreateTransport("client"), true, config.Clone(), null);
+            server.Start(40017);
+            try
+            {
+                Task<UcpConnection> acceptTask = server.AcceptAsync();
+                await client.ConnectAsync(new IPEndPoint(IPAddress.Loopback, 40017));
+                UcpConnection serverConnection = await acceptTask;
+
+                byte[] clientPayload = BuildUniquePayload(256 * 1024, 9001);
+                byte[] serverPayload = BuildUniquePayload(192 * 1024, 9002);
+                byte[] serverReceived = new byte[clientPayload.Length];
+                byte[] clientReceived = new byte[serverPayload.Length];
+                Task<bool> serverRead = ReadWithinAsync(serverConnection, serverReceived, 0, serverReceived.Length, 20000);
+                Task<bool> clientRead = ReadWithinAsync(client, clientReceived, 0, clientReceived.Length, 20000);
+                Task<bool> clientWrite = client.WriteAsync(clientPayload, 0, clientPayload.Length);
+                Task<bool> serverWrite = serverConnection.WriteAsync(serverPayload, 0, serverPayload.Length);
+
+                Assert.True(await clientWrite);
+                Assert.True(await serverWrite);
+                Assert.True(await serverRead);
+                Assert.True(await clientRead);
+                Assert.Equal(clientPayload, serverReceived);
+                Assert.Equal(serverPayload, clientReceived);
+            }
+            finally
+            {
+                await client.CloseAsync();
+                server.Stop();
+            }
+        }
+
+        [Fact]
         public async Task Integration_OrderedSmallSegments_AreDeliveredImmediately()
         {
             int mss = UcpConstants.MSS;
@@ -907,7 +1027,7 @@ namespace UcpTest
                 "BurstLoss",
                 UcpConstants.BENCHMARK_BASE_PORT + UcpConstants.BENCHMARK_PORT_OFFSET_BURST_LOSS,
                 UcpConstants.BENCHMARK_100_MBPS_BYTES_PER_SECOND,
-                UcpConstants.BENCHMARK_BURST_LOSS_PAYLOAD_BYTES,
+                UcpConstants.BENCHMARK_100M_PAYLOAD_BYTES,
                 UcpConstants.BENCHMARK_BURST_LOSS_DELAY_MILLISECONDS,
                 UcpConstants.BENCHMARK_BURST_LOSS_JITTER_MILLISECONDS,
                 0d,
@@ -1045,7 +1165,7 @@ namespace UcpTest
         [InlineData(1000000000 / 8, 0.03d, "1G_Loss3")]
         public async Task Integration_CoverageLossBandwidth(int bandwidthBytesPerSecond, double lossRate, string scenarioName)
         {
-            int payloadBytes = bandwidthBytesPerSecond >= UcpConstants.BENCHMARK_1_GBPS_BYTES_PER_SECOND ? UcpConstants.BENCHMARK_1G_LOSS_PAYLOAD_BYTES : 2 * 1024 * 1024;
+            int payloadBytes = bandwidthBytesPerSecond >= UcpConstants.BENCHMARK_1_GBPS_BYTES_PER_SECOND ? UcpConstants.BENCHMARK_1G_LOSS_PAYLOAD_BYTES : UcpConstants.BENCHMARK_100M_LOSS_PAYLOAD_BYTES;
             int seed = 20260506 + (int)(lossRate * 1000d);
             bool autoProbe = bandwidthBytesPerSecond >= UcpConstants.BENCHMARK_10_GBPS_BYTES_PER_SECOND;
             UcpPerformanceReport report = await RunLineRateBenchmarkAsync(
@@ -1073,7 +1193,7 @@ namespace UcpTest
                 "Mobile3G",
                 UcpConstants.BENCHMARK_BASE_PORT + UcpConstants.BENCHMARK_PORT_OFFSET_MOBILE_3G,
                 4 * 1000 * 1000 / 8,
-                512 * 1024,
+                UcpConstants.BENCHMARK_MOBILE_3G_PAYLOAD_BYTES,
                 75,
                 30,
                 0.03d,
@@ -1092,7 +1212,7 @@ namespace UcpTest
                 "Mobile4G",
                 UcpConstants.BENCHMARK_BASE_PORT + UcpConstants.BENCHMARK_PORT_OFFSET_MOBILE_4G,
                 20 * 1000 * 1000 / 8,
-                2 * 1024 * 1024,
+                UcpConstants.BENCHMARK_MOBILE_4G_PAYLOAD_BYTES,
                 30,
                 25,
                 0.01d,
@@ -1111,7 +1231,7 @@ namespace UcpTest
                 "Satellite",
                 UcpConstants.BENCHMARK_BASE_PORT + UcpConstants.BENCHMARK_PORT_OFFSET_SATELLITE,
                 10 * 1000 * 1000 / 8,
-                4 * 1024 * 1024,
+                UcpConstants.BENCHMARK_SATELLITE_PAYLOAD_BYTES,
                 150,
                 5,
                 0.001d,
@@ -1137,7 +1257,7 @@ namespace UcpTest
                 "VpnTunnel",
                 UcpConstants.BENCHMARK_BASE_PORT + UcpConstants.BENCHMARK_PORT_OFFSET_VPN,
                 UcpConstants.BENCHMARK_100_MBPS_BYTES_PER_SECOND,
-                4 * 1024 * 1024,
+                UcpConstants.BENCHMARK_VPN_PAYLOAD_BYTES,
                 50,
                 10,
                 0.005d,
@@ -1175,7 +1295,7 @@ namespace UcpTest
                 "Enterprise",
                 UcpConstants.BENCHMARK_BASE_PORT + UcpConstants.BENCHMARK_PORT_OFFSET_ENTERPRISE,
                 UcpConstants.BENCHMARK_1_GBPS_BYTES_PER_SECOND,
-                UcpConstants.BENCHMARK_1G_PAYLOAD_BYTES,
+                UcpConstants.BENCHMARK_1G_LOSS_PAYLOAD_BYTES,
                 15,
                 3,
                 0.001d,
@@ -1255,6 +1375,37 @@ namespace UcpTest
             return await readTask;
         }
 
+        private static async Task<byte[]> ReadInChunksWithinAsync(UcpConnection connection, int totalBytes, int[] chunkSizes, int timeoutMilliseconds)
+        {
+            byte[] buffer = new byte[totalBytes];
+            int offset = 0;
+            int chunkIndex = 0;
+            DateTime deadline = DateTime.UtcNow.AddMilliseconds(timeoutMilliseconds);
+            while (offset < totalBytes)
+            {
+                int remaining = totalBytes - offset;
+                int requested = Math.Min(remaining, chunkSizes[chunkIndex % chunkSizes.Length]);
+                int remainingTimeout = (int)Math.Max(1, (deadline - DateTime.UtcNow).TotalMilliseconds);
+                Task<int> receiveTask = connection.ReceiveAsync(buffer, offset, requested);
+                Task completed = await Task.WhenAny(receiveTask, Task.Delay(remainingTimeout));
+                if (completed != receiveTask)
+                {
+                    throw new TimeoutException("Chunked stream read timed out.");
+                }
+
+                int received = await receiveTask;
+                if (received <= 0)
+                {
+                    throw new InvalidOperationException("Chunked stream read made no progress.");
+                }
+
+                offset += received;
+                chunkIndex++;
+            }
+
+            return buffer;
+        }
+
         private static async Task<double> MeasureReadDurationAsync(Task<bool> readTask, DateTime start)
         {
             await readTask;
@@ -1312,18 +1463,21 @@ namespace UcpTest
                 config.SendQuantumBytes = config.Mss;
             }
 
-            config.EnableAggressiveSackRecovery = bandwidthBytesPerSecond >= UcpConstants.BENCHMARK_1_GBPS_BYTES_PER_SECOND && hasConfiguredLoss;
-
             config.MaxBandwidthLossPercent = maxLossPercent <= 0 ? UcpConstants.DEFAULT_MAX_BANDWIDTH_LOSS_PERCENT : maxLossPercent;
             int effectiveForwardDelayMilliseconds = forwardDelayMilliseconds >= 0 ? forwardDelayMilliseconds : fixedDelayMilliseconds;
             int effectiveBackwardDelayMilliseconds = backwardDelayMilliseconds >= 0 ? backwardDelayMilliseconds : fixedDelayMilliseconds;
             int estimatedRttMicros = (int)Math.Max(UcpConstants.MICROS_PER_MILLI, (effectiveForwardDelayMilliseconds + effectiveBackwardDelayMilliseconds) * UcpConstants.MICROS_PER_MILLI);
+            config.EnableAggressiveSackRecovery = hasConfiguredLoss;
             int estimatedBdpBytes = (int)Math.Min(int.MaxValue, bandwidthBytesPerSecond * (estimatedRttMicros / (double)UcpConstants.MICROS_PER_SECOND));
             int initialCwndBytes = CalculateBenchmarkInitialCwndBytes(config, bandwidthBytesPerSecond, estimatedBdpBytes, hasConfiguredLoss);
             config.InitialCwndBytes = (uint)initialCwndBytes;
-            if (fixedDelayMilliseconds >= UcpConstants.BENCHMARK_LONG_FAT_DELAY_MILLISECONDS || estimatedRttMicros >= UcpConstants.DEFAULT_RTO_MICROS)
+            if (!hasConfiguredLoss && (fixedDelayMilliseconds >= UcpConstants.BENCHMARK_LONG_FAT_DELAY_MILLISECONDS || estimatedRttMicros >= UcpConstants.DEFAULT_RTO_MICROS))
             {
                 config.MinRtoMicros = UcpConstants.BENCHMARK_LONG_FAT_MIN_RTO_MICROS;
+            }
+            else if (hasConfiguredLoss && estimatedRttMicros > 0)
+            {
+                config.MinRtoMicros = Math.Max(UcpConstants.DEFAULT_RTO_MICROS, estimatedRttMicros * 2L);
             }
 
             if (autoProbe)
@@ -1514,6 +1668,30 @@ namespace UcpTest
             }
 
             return payload;
+        }
+
+        private static byte[] BuildUniquePayload(int payloadBytes, int seed)
+        {
+            byte[] payload = new byte[payloadBytes];
+            uint state = (uint)seed;
+            for (int i = 0; i < payload.Length; i++)
+            {
+                state = unchecked(state * 1664525U + 1013904223U);
+                payload[i] = (byte)(state >> 24);
+            }
+
+            return payload;
+        }
+
+        private static byte[] BuildConcatenatedUniquePayload(int[] chunkSizes, int seed)
+        {
+            int totalBytes = 0;
+            for (int i = 0; i < chunkSizes.Length; i++)
+            {
+                totalBytes += chunkSizes[i];
+            }
+
+            return BuildUniquePayload(totalBytes, seed);
         }
 
         private static long EstimateConvergenceMilliseconds(UcpPerformanceReport report, int bandwidthBytesPerSecond, double elapsedSeconds)

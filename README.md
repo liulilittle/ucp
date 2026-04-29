@@ -6,8 +6,8 @@ A production-grade, QUIC-inspired reliable transport protocol implemented in C# 
 
 | Document | Description |
 |---|---|
-| [docs/index.md](docs/index.md) | Bilingual documentation index and maintenance map. |
-| [docs/performance.md](docs/performance.md) | Bilingual performance, reporting, route-model, and benchmark guide with Mermaid diagrams. |
+| [docs/index.md](docs/index.md) / [docs/index_CN.md](docs/index_CN.md) | English and Chinese documentation index with maintenance map. |
+| [docs/performance.md](docs/performance.md) / [docs/performance_CN.md](docs/performance_CN.md) | Performance, reporting, route-model, and benchmark guide with Mermaid diagrams. |
 | [docs/protocol.md](docs/protocol.md) | Protocol internals: packet format, BBR, loss detection, SACK/NAK/FEC. |
 | [docs/architecture.md](docs/architecture.md) | Runtime architecture and state-machine deep dive. |
 | [docs/constants.md](docs/constants.md) | Constants reference for tuning and C++ portability. |
@@ -39,7 +39,7 @@ await client.WriteAsync(data, 0, data.Length);
 |---|---|
 | **Reliability** | Cumulative ACK + SACK blocks + NAK retransmission, fast retransmit, RTO timeout recovery, tail-loss probe |
 | **Congestion Control** | BBRv1 with Startup → Drain → ProbeBW → ProbeRTT state machine, loss classifier (random vs congestion), adaptive pacing gain |
-| **Pacing** | Token-bucket rate limiter, configurable bucket duration, urgent-send bypass for dying connections |
+| **Pacing** | Token-bucket rate limiter, configurable bucket duration, urgent retransmit bypass with bounded pacing debt |
 | **Network Classification** | Real-time `NetworkClass` detection (LowLatencyLAN, MobileUnstable, LossyLongFat, CongestedBottleneck, SymmetricVPN) wired into BBR gain decisions |
 | **Forward Error Correction** | XOR-FEC with configurable group size and redundancy, repair packet type `FecRepair (0x08)` |
 | **Fair Queue** | Per-connection credit-based scheduling on the server side |
@@ -68,7 +68,7 @@ Transport                   UDP Socket
 ## Key Design Decisions
 
 - **Loss is not congestion.** Random packet loss triggers retransmission only — pacing gain and congestion window are NOT reduced unless RTT inflation, delivery-rate drop, and sustained elevated loss are all confirmed.
-- **QUIC-style loss detection.** SACK-based: first missing sequence requires 2 observations and a short RTT/8 reorder grace. Distance confirmation uses 2+ SACKed packets beyond the hole, while receiver-side NAK keeps a 60ms reorder guard to avoid false retransmits on high-jitter paths.
+- **QUIC-style loss detection.** SACK-based: first missing sequence requires 2 observations and a short RTT/8 reorder grace. Confirmed non-leading SACK holes can also be repaired in parallel, while receiver-side NAK keeps a 60ms reorder guard to avoid false retransmits on high-jitter paths.
 - **BBR over loss-based CC.** BBR probes bandwidth via delivery rate estimation rather than reacting to loss events. The loss classifier distinguishes random from congestion loss using deduplicated sliding windows and RTT median analysis.
 - **Jumbo MSS for high-bandwidth paths.** Benchmark scenarios ≥ 1 Gbps use 9000-byte MSS to avoid control-plane packet amplification (3500+ packets for 4 MB at 1220-byte MSS vs. ~470 at 9000-byte).
 
@@ -108,7 +108,7 @@ All tuning parameters live in `UcpConfiguration`. Call `UcpConfiguration.GetOpti
 
 | Parameter | Default | Description |
 |---|---|---|
-| `MinPacingIntervalMicros` | 1,000 μs | Minimum inter-packet pacing gap. |
+| `MinPacingIntervalMicros` | 0 μs | Optional minimum inter-packet pacing gap; token bucket controls pacing by default. |
 | `PacingBucketDurationMicros` | 10,000 μs | Token bucket refill window duration. |
 
 ### BBR Gains
@@ -149,7 +149,7 @@ All tuning parameters live in `UcpConfiguration`. Call `UcpConfiguration.GetOpti
 
 ## Benchmark Report
 
-Run `.\run-tests.ps1` to execute all 48 test scenarios and generate `reports/test_report.txt`.
+Run `dotnet test ".\Ucp.Tests\UcpTest.csproj"` to execute all 52 tests and generate `reports/test_report.txt`.
 
 Report columns distinguish transport behavior from network impairment:
 

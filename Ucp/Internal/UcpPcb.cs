@@ -35,6 +35,8 @@ namespace Ucp.Internal
             public bool InFlight;
             public bool Acked;
             public bool NeedsRetransmit;
+            /// <summary>True when recovery must bypass smooth pacing to avoid connection death.</summary>
+            public bool UrgentRetransmit;
             /// <summary>Count of times this segment was seen as missing in SACK blocks.</summary>
             public int MissingAckCount;
             /// <summary>Number of times transmitted (0 = never sent).</summary>
@@ -150,6 +152,8 @@ namespace Ucp.Internal
         private bool _tailLossProbePending;
         private readonly Queue<LossEvent> _recentLossEvents = new Queue<LossEvent>();
         private readonly HashSet<uint> _recentLossSequences = new HashSet<uint>();
+        private long _urgentRecoveryWindowMicros;
+        private int _urgentRecoveryPacketsInWindow;
 
         public UcpPcb(ITransport transport, IPEndPoint remoteEndPoint, bool isServerSide, bool useFairQueue, Action<UcpPcb> closedCallback, uint? connectionId, UcpConfiguration config)
             : this(transport, remoteEndPoint, isServerSide, useFairQueue, closedCallback, connectionId, config, null)
@@ -849,9 +853,14 @@ namespace Ucp.Internal
                                 segment.MissingAckCount++;
                             }
 
-                            if (segment.SendCount == 1 && !segment.NeedsRetransmit && ShouldFastRetransmitSackHoleUnsafe(segment, firstMissingSequence, highestSack, nowMicros))
+                            // Only non-leading holes bracketed by reported SACK ranges are
+                            // repaired in parallel; this avoids treating a truncated SACK
+                            // list as proof that every omitted sequence was lost.
+                            bool reportedSackHole = IsReportedSackHoleUnsafe(segment.SequenceNumber, ackPacket.AckNumber, sackBlocks);
+                            if (segment.SendCount == 1 && !segment.NeedsRetransmit && ShouldFastRetransmitSackHoleUnsafe(segment, firstMissingSequence, highestSack, reportedSackHole, nowMicros))
                             {
                                 segment.NeedsRetransmit = true;
+                                segment.UrgentRetransmit = true;
                                 _fastRetransmissions++;
                                 _sackFastRetransmitNotified.Add(segment.SequenceNumber);
                                 bool isCongestionLoss = IsCongestionLossUnsafe(segment.SequenceNumber, sampleRtt, nowMicros, 1);
@@ -933,6 +942,7 @@ namespace Ucp.Internal
                         if (!segment.NeedsRetransmit && !segment.Acked && ShouldAcceptRetransmitRequestUnsafe(segment, nowMicros))
                         {
                             segment.NeedsRetransmit = true;
+                            segment.UrgentRetransmit = true;
                             _tailLossProbePending = false;
                             notifiedLoss = true;
                         }
@@ -1011,7 +1021,7 @@ namespace Ucp.Internal
             });
         }
 
-        private bool ShouldFastRetransmitSackHoleUnsafe(OutboundSegment segment, uint firstMissingSequence, uint highestSack, long nowMicros)
+        private bool ShouldFastRetransmitSackHoleUnsafe(OutboundSegment segment, uint firstMissingSequence, uint highestSack, bool reportedSackHole, long nowMicros)
         {
             if (segment == null || segment.LastSendMicros <= 0)
             {
@@ -1034,20 +1044,66 @@ namespace Ucp.Internal
                 return false;
             }
 
-            if (segment.SequenceNumber == firstMissingSequence && segment.MissingAckCount >= UcpConstants.SACK_FAST_RETRANSMIT_THRESHOLD)
+            bool firstMissing = segment.SequenceNumber == firstMissingSequence;
+            int requiredObservations = firstMissing ? UcpConstants.SACK_FAST_RETRANSMIT_THRESHOLD : UcpConstants.SACK_FAST_RETRANSMIT_THRESHOLD + 1;
+            if (segment.MissingAckCount < requiredObservations)
+            {
+                return false;
+            }
+
+            if (firstMissing)
             {
                 return true;
             }
 
+            if (!reportedSackHole)
+            {
+                return false;
+            }
+
             uint distancePastHole = unchecked(highestSack - segment.SequenceNumber);
-            if (distancePastHole >= UcpConstants.SACK_FAST_RETRANSMIT_DISTANCE_THRESHOLD
-                && segment.SequenceNumber == firstMissingSequence
-                && segment.MissingAckCount >= UcpConstants.SACK_FAST_RETRANSMIT_THRESHOLD)
+            if (distancePastHole >= UcpConstants.SACK_FAST_RETRANSMIT_DISTANCE_THRESHOLD)
             {
                 return true;
             }
 
             return false;
+        }
+
+        private static bool IsReportedSackHoleUnsafe(uint sequenceNumber, uint cumulativeAckNumber, List<SackBlock> sackBlocks)
+        {
+            if (sackBlocks == null || sackBlocks.Count == 0)
+            {
+                return false;
+            }
+
+            // A non-leading hole is trustworthy only when lower data was
+            // cumulatively ACKed or SACKed and a later SACK block proves the
+            // receiver has moved past this exact sequence.
+            bool hasLowerAck = UcpSequenceComparer.IsBeforeOrEqual(cumulativeAckNumber, sequenceNumber);
+            bool hasHigherSack = false;
+            for (int i = 0; i < sackBlocks.Count; i++)
+            {
+                SackBlock block = sackBlocks[i];
+                if (UcpSequenceComparer.IsInForwardRange(sequenceNumber, block.Start, block.End))
+                {
+                    return false;
+                }
+
+                if (UcpSequenceComparer.IsBefore(block.End, sequenceNumber))
+                {
+                    hasLowerAck = true;
+                    continue;
+                }
+
+                if (UcpSequenceComparer.IsAfter(block.Start, sequenceNumber))
+                {
+                    hasHigherSack = true;
+                    break;
+                }
+            }
+
+            return hasLowerAck && hasHigherSack;
         }
 
         private long GetSackFastRetransmitReorderGraceMicrosUnsafe()
@@ -1081,6 +1137,7 @@ namespace Ucp.Internal
                         if (ShouldTriggerEarlyRetransmitUnsafe() || rttForFastRetransmit <= 0 || nowMicros - lostSegment.LastSendMicros >= rttForFastRetransmit)
                         {
                             lostSegment.NeedsRetransmit = true;
+                            lostSegment.UrgentRetransmit = true;
                             _fastRecoveryActive = true;
                             _fastRetransmissions++;
                             fastRetransmitTriggered = true;
@@ -1769,12 +1826,21 @@ namespace Ucp.Internal
                             }
 
                             int packetSize = UcpConstants.DataHeaderSize + segment.Payload.Length;
-                            if (_useFairQueue && _fairQueueCreditBytes < packetSize)
+                            bool urgentRecovery = segment.NeedsRetransmit && segment.SendCount > 0 && segment.UrgentRetransmit && CanUseUrgentRecoveryUnsafe(nowMicros);
+                            if (_useFairQueue && _fairQueueCreditBytes < packetSize && !urgentRecovery)
                             {
                                 break;
                             }
 
-                            if (!_pacing.TryConsume(packetSize, nowMicros))
+                            if (urgentRecovery)
+                            {
+                                // Urgent recovery bypasses the smooth pacing gate but
+                                // still charges the token bucket as debt, so the burst
+                                // is repaid by later non-urgent sends.
+                                _pacing.ForceConsume(packetSize, nowMicros);
+                                _urgentRecoveryPacketsInWindow++;
+                            }
+                            else if (!_pacing.TryConsume(packetSize, nowMicros))
                             {
                                 waitMicros = _pacing.GetWaitTimeMicros(packetSize, nowMicros);
                                 break;
@@ -1791,6 +1857,7 @@ namespace Ucp.Internal
 
                             segment.InFlight = true;
                             segment.NeedsRetransmit = false;
+                            segment.UrgentRetransmit = false;
                             if (segment.SendCount == 0)
                             {
                                 _flightBytes += segment.Payload.Length;
@@ -1950,6 +2017,34 @@ namespace Ucp.Internal
             return windowBytes;
         }
 
+        private bool CanUseUrgentRecoveryUnsafe(long nowMicros)
+        {
+            long windowMicros = _rtoEstimator.SmoothedRttMicros > 0 ? _rtoEstimator.SmoothedRttMicros : _config.MinRtoMicros;
+            if (windowMicros <= 0)
+            {
+                windowMicros = UcpConstants.DEFAULT_RTO_MICROS;
+            }
+
+            if (_urgentRecoveryWindowMicros == 0 || nowMicros - _urgentRecoveryWindowMicros >= windowMicros)
+            {
+                _urgentRecoveryWindowMicros = nowMicros;
+                _urgentRecoveryPacketsInWindow = 0;
+            }
+
+            return _urgentRecoveryPacketsInWindow < UcpConstants.URGENT_RETRANSMIT_BUDGET_PER_RTT;
+        }
+
+        private bool IsNearDisconnectTimeoutUnsafe(long nowMicros)
+        {
+            if (_config.DisconnectTimeoutMicros <= 0)
+            {
+                return false;
+            }
+
+            long idleMicros = nowMicros - _lastActivityMicros;
+            return idleMicros >= _config.DisconnectTimeoutMicros * UcpConstants.URGENT_RETRANSMIT_DISCONNECT_THRESHOLD_PERCENT / 100L;
+        }
+
         private uint GetReceiveWindowUsedBytesUnsafe()
         {
             long usedBytes = _queuedReceiveBytes;
@@ -2048,8 +2143,9 @@ namespace Ucp.Internal
                             break;
                         }
 
-                        segment.NeedsRetransmit = true;
-                        timedOut = true;
+                            segment.NeedsRetransmit = true;
+                            segment.UrgentRetransmit = true;
+                            timedOut = true;
                         rtoRetransmitBudget--;
                         timedOutForCongestion = timedOutForCongestion || segmentTimedOutForCongestion;
                         _timeoutRetransmissions++;
@@ -2077,6 +2173,7 @@ namespace Ucp.Internal
                             }
 
                             segment.NeedsRetransmit = true;
+                            segment.UrgentRetransmit = IsNearDisconnectTimeoutUnsafe(nowMicros);
                             _tailLossProbePending = true;
                             tailLossProbe = true;
                             break;

@@ -48,6 +48,10 @@ namespace Ucp
         public int AckSackBlockLimit = UcpConstants.DEFAULT_ACK_SACK_BLOCK_LIMIT;
         public bool LossControlEnable = true;
         public bool EnableDebugLog = false;
+        /// <summary>
+        /// Enables short-grace SACK repair for controlled lossy paths. This is
+        /// internal because it is still a policy toggle rather than public API.
+        /// </summary>
         internal bool EnableAggressiveSackRecovery = false;
         public double FecRedundancy = 0.0d;
         public int FecGroupSize = 8;

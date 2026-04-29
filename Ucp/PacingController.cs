@@ -3,9 +3,6 @@ using System;
 namespace Ucp
 {
     /// <summary>
-    /// Token-bucket based pacing controller. Tokens are measured in bytes.
-    /// </summary>
-    /// <summary>
     /// Token-bucket pacing controller. Tokens are measured in bytes and
     /// refilled proportionally to the elapsed time and current pacing rate.
     /// Capacity = rate × bucketDuration / 1s. Provides TryConsume for
@@ -80,6 +77,23 @@ namespace Ucp
             }
 
             return false;
+        }
+
+        /// <summary>
+        /// Charges bytes immediately even when the token bucket is empty.
+        /// This is used only for urgent recovery retransmits where waiting for
+        /// smooth pacing can cause the connection to time out. The negative token
+        /// balance is bounded by one bucket so later sends repay the burst as debt.
+        /// </summary>
+        public void ForceConsume(int bytes, long nowMicros)
+        {
+            Refill(nowMicros);
+            _tokens -= bytes;
+            double minimumDebt = -Math.Max(_capacity, bytes);
+            if (_tokens < minimumDebt)
+            {
+                _tokens = minimumDebt;
+            }
         }
 
         public long GetWaitTimeMicros(int bytes, long nowMicros)
