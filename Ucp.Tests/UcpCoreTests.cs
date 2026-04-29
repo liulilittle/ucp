@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Text;
 using System.Threading.Tasks;
@@ -116,7 +117,7 @@ namespace UcpTest
         }
 
         [Fact]
-        public void PacingController_ForceConsume_BypassesEmptyBucketAndCreatesDebt()
+        public void PacingController_ForceConsume_BypassesEmptyBucketWithoutPostRecoveryDebt()
         {
             UcpConfiguration config = new UcpConfiguration();
             config.PacingBucketDurationMicros = 1000000;
@@ -129,8 +130,8 @@ namespace UcpTest
             controller.ForceConsume(500, 1000000);
 
             Assert.False(controller.TryConsume(1, 1000000));
-            Assert.InRange(controller.GetWaitTimeMicros(1, 1000000), 499000, 501000);
-            Assert.True(controller.TryConsume(1, 1501000));
+            Assert.InRange(controller.GetWaitTimeMicros(1, 1000000), 900, 1100);
+            Assert.True(controller.TryConsume(1, 1001000));
         }
 
         [Fact]
@@ -456,6 +457,8 @@ namespace UcpTest
                 });
             UcpConfiguration highLossConfig = CreateScenarioConfig(highLossBandwidth);
             highLossConfig.EnableAggressiveSackRecovery = true;
+            highLossConfig.FecGroupSize = 32;
+            highLossConfig.FecRedundancy = 3d / highLossConfig.FecGroupSize;
             UcpServer server = new UcpServer(simulator.CreateTransport("server"), highLossConfig);
             server.Start(40004);
             UcpConnection client = new UcpConnection(simulator.CreateTransport("client"), true, highLossConfig.Clone(), null);
@@ -1129,6 +1132,70 @@ namespace UcpTest
         }
 
         [Fact]
+        public void FecCodec_RecoversTwoLossesWithTwoRepairs()
+        {
+            UcpFecCodec enc = new UcpFecCodec(8, 2);
+            byte[][] payloads = new byte[8][];
+            List<byte[]> repairs = null;
+            for (int i = 0; i < payloads.Length; i++)
+            {
+                payloads[i] = Encoding.ASCII.GetBytes("pkt-" + i.ToString("D2"));
+                repairs = enc.TryEncodeRepairs(payloads[i]);
+            }
+
+            Assert.NotNull(repairs);
+            Assert.Equal(2, repairs.Count);
+
+            UcpFecCodec dec = new UcpFecCodec(8, 2);
+            for (int i = 0; i < payloads.Length; i++)
+            {
+                if (i != 1 && i != 6)
+                {
+                    dec.FeedDataPacket((uint)i, payloads[i]);
+                }
+            }
+
+            Assert.Empty(dec.TryRecoverPacketsFromRepair(repairs[0], 0, 0));
+            List<UcpFecCodec.RecoveredPacket> recovered = dec.TryRecoverPacketsFromRepair(repairs[1], 0, 1);
+            Assert.Equal(2, recovered.Count);
+            Assert.Equal(payloads[1], recovered.Single(packet => packet.Slot == 1).Payload);
+            Assert.Equal(payloads[6], recovered.Single(packet => packet.Slot == 6).Payload);
+        }
+
+        [Fact]
+        public void FecCodec_RecoversThreeLossesWithThreeRepairs()
+        {
+            UcpFecCodec enc = new UcpFecCodec(32, 3);
+            byte[][] payloads = new byte[32][];
+            List<byte[]> repairs = null;
+            for (int i = 0; i < payloads.Length; i++)
+            {
+                payloads[i] = BuildUniquePayload(257 + i, 1000 + i);
+                repairs = enc.TryEncodeRepairs(payloads[i]);
+            }
+
+            Assert.NotNull(repairs);
+            Assert.Equal(3, repairs.Count);
+
+            UcpFecCodec dec = new UcpFecCodec(32, 3);
+            for (int i = 0; i < payloads.Length; i++)
+            {
+                if (i != 2 && i != 17 && i != 31)
+                {
+                    dec.FeedDataPacket((uint)i, payloads[i]);
+                }
+            }
+
+            Assert.Empty(dec.TryRecoverPacketsFromRepair(repairs[0], 0, 0));
+            Assert.Empty(dec.TryRecoverPacketsFromRepair(repairs[1], 0, 1));
+            List<UcpFecCodec.RecoveredPacket> recovered = dec.TryRecoverPacketsFromRepair(repairs[2], 0, 2);
+            Assert.Equal(3, recovered.Count);
+            Assert.Equal(payloads[2], recovered.Single(packet => packet.Slot == 2).Payload);
+            Assert.Equal(payloads[17], recovered.Single(packet => packet.Slot == 17).Payload);
+            Assert.Equal(payloads[31], recovered.Single(packet => packet.Slot == 31).Payload);
+        }
+
+        [Fact]
         public async Task Integration_Weak4G_RecoversFromOutage()
         {
             Func<NetworkSimulator.SimulatedDatagram, bool> outageDropRule = CreateWeak4GDropRule(
@@ -1468,6 +1535,13 @@ namespace UcpTest
             int effectiveBackwardDelayMilliseconds = backwardDelayMilliseconds >= 0 ? backwardDelayMilliseconds : fixedDelayMilliseconds;
             int estimatedRttMicros = (int)Math.Max(UcpConstants.MICROS_PER_MILLI, (effectiveForwardDelayMilliseconds + effectiveBackwardDelayMilliseconds) * UcpConstants.MICROS_PER_MILLI);
             config.EnableAggressiveSackRecovery = hasConfiguredLoss;
+            if (hasConfiguredLoss && dropRule != null)
+            {
+                config.FecGroupSize = lossRate < 0.01d ? 64 : 32;
+                int repairCount = lossRate >= UcpConstants.BENCHMARK_HEAVY_RANDOM_LOSS_RATE ? 3 : lossRate >= 0.03d ? 2 : 1;
+                config.FecRedundancy = repairCount / (double)config.FecGroupSize;
+            }
+
             int estimatedBdpBytes = (int)Math.Min(int.MaxValue, bandwidthBytesPerSecond * (estimatedRttMicros / (double)UcpConstants.MICROS_PER_SECOND));
             int initialCwndBytes = CalculateBenchmarkInitialCwndBytes(config, bandwidthBytesPerSecond, estimatedBdpBytes, hasConfiguredLoss);
             config.InitialCwndBytes = (uint)initialCwndBytes;
@@ -1477,7 +1551,8 @@ namespace UcpTest
             }
             else if (hasConfiguredLoss && estimatedRttMicros > 0)
             {
-                config.MinRtoMicros = Math.Max(UcpConstants.DEFAULT_RTO_MICROS, estimatedRttMicros * 2L);
+                long fecRepairBudgetMicros = config.FecRedundancy > 0d ? estimatedRttMicros * 4L : estimatedRttMicros * 4L;
+                config.MinRtoMicros = Math.Max(UcpConstants.DEFAULT_RTO_MICROS, fecRepairBudgetMicros);
             }
 
             if (autoProbe)

@@ -469,7 +469,8 @@ namespace Ucp
                 return _config.InitialCongestionWindowBytes;
             }
 
-            double bdp = BtlBwBytesPerSecond * (MinRttMicros / (double)UcpConstants.MICROS_PER_SECOND);
+            long modelRttMicros = GetCwndModelRttMicros();
+            double bdp = BtlBwBytesPerSecond * (modelRttMicros / (double)UcpConstants.MICROS_PER_SECOND);
             double effectiveCwndGain = GetEffectiveCwndGain();
             int cwnd = (int)Math.Ceiling(bdp * effectiveCwndGain);
             if (cwnd < _config.InitialCongestionWindowBytes)
@@ -621,6 +622,11 @@ namespace Ucp
 
             if (_networkCondition == NetworkCondition.Congested)
             {
+                if (EstimatedLossPercent <= _maxBandwidthLossPercent)
+                {
+                    return 1d;
+                }
+
                 return UcpConstants.BBR_PROBE_RTT_PACING_GAIN;
             }
 
@@ -742,17 +748,17 @@ namespace Ucp
             double lossRatio = GetRecentLossRatio(nowMicros);
             double rttIncrease = GetAverageRttIncreaseRatio();
             int congestionScore = 0;
-            if (deliveryRateChange <= UcpConstants.BBR_CONGESTION_RATE_DROP_RATIO)
+            if (deliveryRateChange <= UcpConstants.BBR_CONGESTION_RATE_DROP_RATIO && rttIncrease >= UcpConstants.BBR_CONGESTION_RTT_INCREASE_RATIO)
             {
                 congestionScore += UcpConstants.BBR_CONGESTION_RATE_DROP_SCORE;
             }
 
-            if (rttIncrease >= UcpConstants.BBR_MODERATE_RTT_INCREASE_RATIO)
+            if (rttIncrease >= UcpConstants.BBR_CONGESTION_RTT_INCREASE_RATIO)
             {
                 congestionScore += UcpConstants.BBR_CONGESTION_RTT_GROWTH_SCORE;
             }
 
-            if (lossRatio >= UcpConstants.BBR_MODERATE_LOSS_RATIO && rttIncrease >= UcpConstants.BBR_LOW_RTT_INCREASE_RATIO)
+            if (lossRatio >= UcpConstants.BBR_CONGESTION_LOSS_RATIO && rttIncrease >= UcpConstants.BBR_CONGESTION_RTT_INCREASE_RATIO)
             {
                 congestionScore += UcpConstants.BBR_CONGESTION_LOSS_SCORE;
             }
@@ -789,7 +795,29 @@ namespace Ucp
 
             double rttIncrease = GetAverageRttIncreaseRatio();
             double lossRatio = GetRecentLossRatio(nowMicros);
-            return rttIncrease >= UcpConstants.BBR_MODERATE_RTT_INCREASE_RATIO && lossRatio >= UcpConstants.BBR_MODERATE_LOSS_RATIO;
+            return rttIncrease >= UcpConstants.BBR_CONGESTION_RTT_INCREASE_RATIO && lossRatio >= UcpConstants.BBR_CONGESTION_LOSS_RATIO;
+        }
+
+        private long GetCwndModelRttMicros()
+        {
+            long modelRttMicros = MinRttMicros;
+            if (modelRttMicros <= 0)
+            {
+                return 0;
+            }
+
+            if (_networkCondition == NetworkCondition.Congested)
+            {
+                return modelRttMicros;
+            }
+
+            if (_currentRttMicros > modelRttMicros)
+            {
+                long cappedCurrentRttMicros = (long)Math.Min(_currentRttMicros, modelRttMicros * UcpConstants.BBR_RANDOM_LOSS_CWND_RTT_CUSHION);
+                modelRttMicros = Math.Max(modelRttMicros, cappedCurrentRttMicros);
+            }
+
+            return modelRttMicros;
         }
 
         private double GetAverageRttIncreaseRatio()
@@ -818,7 +846,15 @@ namespace Ucp
                 return;
             }
 
-            double bdpBytes = BtlBwBytesPerSecond * (MinRttMicros / (double)UcpConstants.MICROS_PER_SECOND);
+            long modelRttMicros = GetCwndModelRttMicros();
+            if (modelRttMicros <= 0)
+            {
+                _inflightHighBytes = 0;
+                _inflightLowBytes = 0;
+                return;
+            }
+
+            double bdpBytes = BtlBwBytesPerSecond * (modelRttMicros / (double)UcpConstants.MICROS_PER_SECOND);
             _inflightLowBytes = Math.Max(_config.InitialCongestionWindowBytes, bdpBytes * UcpConstants.BBR_INFLIGHT_LOW_GAIN);
             _inflightHighBytes = Math.Max(_inflightLowBytes, bdpBytes * UcpConstants.BBR_INFLIGHT_HIGH_GAIN);
         }

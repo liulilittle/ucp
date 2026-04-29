@@ -133,10 +133,10 @@ namespace Ucp
         public const int MAX_RETRANSMISSIONS = 10;
 
         /// <summary>Maximum timeout retransmits armed by one timer tick.</summary>
-        public const int RTO_RETRANSMIT_BUDGET_PER_TICK = 4;
+        public const int RTO_RETRANSMIT_BUDGET_PER_TICK = 64;
 
         /// <summary>Maximum urgent retransmits allowed to bypass pacing in one RTT window.</summary>
-        public const int URGENT_RETRANSMIT_BUDGET_PER_RTT = 16;
+        public const int URGENT_RETRANSMIT_BUDGET_PER_RTT = 512;
 
         /// <summary>Idle-time percentage after which a tail-loss probe may be urgent.</summary>
         public const int URGENT_RETRANSMIT_DISCONNECT_THRESHOLD_PERCENT = 75;
@@ -157,7 +157,7 @@ namespace Ucp
         public const int RTO_GAIN_MULTIPLIER = 4;
 
         /// <summary>Maximum accepted RTT sample multiplier relative to the current RTO during recovery.</summary>
-        public const double RTT_RECOVERY_SAMPLE_MAX_RTO_MULTIPLIER = 1.0d;
+        public const double RTT_RECOVERY_SAMPLE_MAX_RTO_MULTIPLIER = 4.0d;
 
         /// <summary>Maximum backoff multiple relative to the minimum RTO.</summary>
         public const int RTO_MAX_BACKOFF_MIN_RTO_MULTIPLIER = 2;
@@ -229,16 +229,16 @@ namespace Ucp
         public const double BBR_MEDIUM_LOSS_RATIO = 0.15d;
 
         /// <summary>BBR moderate probing gain used under low loss.</summary>
-        public const double BBR_MODERATE_PROBE_GAIN = 1.10d;
+        public const double BBR_MODERATE_PROBE_GAIN = 1.25d;
 
         /// <summary>BBR target-maintaining gain under light loss.</summary>
-        public const double BBR_LIGHT_LOSS_PACING_GAIN = 1.02d;
+        public const double BBR_LIGHT_LOSS_PACING_GAIN = 1.10d;
 
         /// <summary>BBR gentle pacing gain under medium loss.</summary>
-        public const double BBR_MEDIUM_LOSS_PACING_GAIN = 1.00d;
+        public const double BBR_MEDIUM_LOSS_PACING_GAIN = 1.05d;
 
         /// <summary>BBR severe loss pacing gain.</summary>
-        public const double BBR_HIGH_LOSS_PACING_GAIN = 0.98d;
+        public const double BBR_HIGH_LOSS_PACING_GAIN = 1.00d;
 
         /// <summary>BBR fast recovery pacing gain used after non-congestion loss recovery signals.</summary>
         public const double BBR_FAST_RECOVERY_PACING_GAIN = 1.25d;
@@ -316,10 +316,19 @@ namespace Ucp
         public const long BBR_BANDWIDTH_GROWTH_FALLBACK_INTERVAL_MICROS = 10000L;
 
         /// <summary>Maximum ratio used for the lower inflight guardrail relative to BDP.</summary>
-        public const double BBR_INFLIGHT_LOW_GAIN = 1.10d;
+        public const double BBR_INFLIGHT_LOW_GAIN = 2.00d;
 
         /// <summary>Maximum ratio used for the upper inflight guardrail relative to BDP.</summary>
-        public const double BBR_INFLIGHT_HIGH_GAIN = 1.50d;
+        public const double BBR_INFLIGHT_HIGH_GAIN = 4.00d;
+
+        /// <summary>RTT growth required before loss-driven delivery drops are classified as congestion.</summary>
+        public const double BBR_CONGESTION_RTT_INCREASE_RATIO = 0.50d;
+
+        /// <summary>Recent loss ratio required before loss-driven delivery drops are classified as congestion.</summary>
+        public const double BBR_CONGESTION_LOSS_RATIO = 0.10d;
+
+        /// <summary>Maximum RTT cushion multiplier used by CWND on non-congested lossy paths.</summary>
+        public const double BBR_RANDOM_LOSS_CWND_RTT_CUSHION = 4.0d;
 
         /// <summary>Delivery-rate sample history length used by the lightweight classifier.</summary>
         public const int BBR_DELIVERY_RATE_HISTORY_COUNT = 5;
@@ -352,10 +361,10 @@ namespace Ucp
         public const int BENCHMARK_NO_LOSS_INITIAL_CWND_BANDWIDTH_DIVISOR = 16;
 
         /// <summary>Initial congestion-window gain relative to estimated BDP for lossy benchmarks.</summary>
-        public const double BENCHMARK_LOSS_INITIAL_CWND_BDP_GAIN = 1.0d;
+        public const double BENCHMARK_LOSS_INITIAL_CWND_BDP_GAIN = 2.0d;
 
         /// <summary>Maximum initial congestion window used by random-loss benchmarks, in bytes.</summary>
-        public const int BENCHMARK_MAX_LOSS_INITIAL_CWND_BYTES = 4 * 1024 * 1024;
+        public const int BENCHMARK_MAX_LOSS_INITIAL_CWND_BYTES = 32 * 1024 * 1024;
 
         /// <summary>Minimum RTO used by long-fat-pipe benchmarks to avoid simulator serialization false positives.</summary>
         public const long BENCHMARK_LONG_FAT_MIN_RTO_MICROS = MICROS_PER_SECOND;
@@ -382,25 +391,25 @@ namespace Ucp
         public const int BENCHMARK_HIGH_JITTER_PAYLOAD_BYTES = 2 * 1024 * 1024;
 
         /// <summary>Payload size used by 4G weak-network benchmark scenarios, in bytes.</summary>
-        public const int BENCHMARK_WEAK_4G_PAYLOAD_BYTES = 4 * 1024 * 1024;
+        public const int BENCHMARK_WEAK_4G_PAYLOAD_BYTES = 16 * 1024 * 1024;
 
         /// <summary>Payload size used by 100 Mbps random-loss benchmark scenarios, in bytes.</summary>
-        public const int BENCHMARK_100M_LOSS_PAYLOAD_BYTES = 16 * 1024 * 1024;
+        public const int BENCHMARK_100M_LOSS_PAYLOAD_BYTES = 64 * 1024 * 1024;
 
         /// <summary>Payload size used by high-loss high-RTT benchmark scenarios, in bytes.</summary>
-        public const int BENCHMARK_HIGH_LOSS_HIGH_RTT_PAYLOAD_BYTES = 4 * 1024 * 1024;
+        public const int BENCHMARK_HIGH_LOSS_HIGH_RTT_PAYLOAD_BYTES = 16 * 1024 * 1024;
 
         /// <summary>Payload size used by mobile 3G lossy benchmark scenarios, in bytes.</summary>
-        public const int BENCHMARK_MOBILE_3G_PAYLOAD_BYTES = 4 * 1024 * 1024;
+        public const int BENCHMARK_MOBILE_3G_PAYLOAD_BYTES = 16 * 1024 * 1024;
 
         /// <summary>Payload size used by mobile 4G high-jitter benchmark scenarios, in bytes.</summary>
-        public const int BENCHMARK_MOBILE_4G_PAYLOAD_BYTES = 8 * 1024 * 1024;
+        public const int BENCHMARK_MOBILE_4G_PAYLOAD_BYTES = 32 * 1024 * 1024;
 
         /// <summary>Payload size used by satellite benchmark scenarios, in bytes.</summary>
-        public const int BENCHMARK_SATELLITE_PAYLOAD_BYTES = 8 * 1024 * 1024;
+        public const int BENCHMARK_SATELLITE_PAYLOAD_BYTES = 16 * 1024 * 1024;
 
         /// <summary>Payload size used by VPN benchmark scenarios, in bytes.</summary>
-        public const int BENCHMARK_VPN_PAYLOAD_BYTES = 32 * 1024 * 1024;
+        public const int BENCHMARK_VPN_PAYLOAD_BYTES = 128 * 1024 * 1024;
 
         /// <summary>Payload size used by the 100 Mbps long-fat-pipe benchmark, in bytes.</summary>
         public const int BENCHMARK_LONG_FAT_100M_PAYLOAD_BYTES = 16 * 1024 * 1024;
@@ -409,7 +418,7 @@ namespace Ucp
         public const int BENCHMARK_1G_PAYLOAD_BYTES = 4 * 1024 * 1024;
 
         /// <summary>Payload size used by 1 Gbps random-loss benchmark scenarios, in bytes.</summary>
-        public const int BENCHMARK_1G_LOSS_PAYLOAD_BYTES = 64 * 1024 * 1024;
+        public const int BENCHMARK_1G_LOSS_PAYLOAD_BYTES = 256 * 1024 * 1024;
 
         /// <summary>Jumbo MSS used by high-bandwidth benchmark paths to avoid control-plane packet amplification.</summary>
         public const int BENCHMARK_HIGH_BANDWIDTH_MSS = 9000;
@@ -421,7 +430,7 @@ namespace Ucp
         public const int BENCHMARK_BURST_LOSS_PAYLOAD_BYTES = 2 * 1024 * 1024;
 
         /// <summary>Default benchmark read timeout in milliseconds.</summary>
-        public const int BENCHMARK_READ_TIMEOUT_MILLISECONDS = 30000;
+        public const int BENCHMARK_READ_TIMEOUT_MILLISECONDS = 180000;
 
         /// <summary>Default ACK settlement timeout in milliseconds.</summary>
         public const int BENCHMARK_ACK_SETTLEMENT_TIMEOUT_MILLISECONDS = 1000;
@@ -632,31 +641,31 @@ namespace Ucp
         public const int SACK_FAST_RETRANSMIT_THRESHOLD = 2;
 
         /// <summary>Minimum SACK distance past a missing sequence before treating the hole as real loss.</summary>
-        public const int SACK_FAST_RETRANSMIT_DISTANCE_THRESHOLD = 2;
+        public const int SACK_FAST_RETRANSMIT_DISTANCE_THRESHOLD = 1;
 
         /// <summary>Lower bound for SACK-based reorder grace before fast retransmit, in microseconds.</summary>
-        public const long SACK_FAST_RETRANSMIT_MIN_REORDER_GRACE_MICROS = 5000L;
+        public const long SACK_FAST_RETRANSMIT_MIN_REORDER_GRACE_MICROS = 3000L;
 
         /// <summary>Missing observation count needed before the receiver sends a NAK.</summary>
         public const int NAK_MISSING_THRESHOLD = 2;
 
         /// <summary>Minimum packet-age delay before receiver NAKs a missing sequence, in microseconds.</summary>
-        public const long NAK_REORDER_GRACE_MICROS = 60000L;
+        public const long NAK_REORDER_GRACE_MICROS = 30000L;
 
         /// <summary>Missing observation count that makes a gap high-confidence despite reorder grace.</summary>
         public const int NAK_HIGH_CONFIDENCE_MISSING_THRESHOLD = 256;
 
         /// <summary>Minimum packet-age delay for high-confidence missing gaps, in microseconds.</summary>
-        public const long NAK_HIGH_CONFIDENCE_REORDER_GRACE_MICROS = 60000L;
+        public const long NAK_HIGH_CONFIDENCE_REORDER_GRACE_MICROS = 5000L;
 
         /// <summary>Missing observation count that makes a gap more likely to be real loss than jitter.</summary>
         public const int NAK_MEDIUM_CONFIDENCE_MISSING_THRESHOLD = 64;
 
         /// <summary>Minimum packet-age delay for medium-confidence missing gaps, in microseconds.</summary>
-        public const long NAK_MEDIUM_CONFIDENCE_REORDER_GRACE_MICROS = 60000L;
+        public const long NAK_MEDIUM_CONFIDENCE_REORDER_GRACE_MICROS = 5000L;
 
         /// <summary>Minimum interval before the receiver may re-emit a NAK for the same missing sequence.</summary>
-        public const long NAK_REPEAT_INTERVAL_MICROS = 250000L;
+        public const long NAK_REPEAT_INTERVAL_MICROS = 100000L;
 
         /// <summary>Maximum number of sequence slots scanned while building NAK state.</summary>
         public const int MAX_NAK_MISSING_SCAN = 4096;
@@ -671,7 +680,7 @@ namespace Ucp
         public const int IMMEDIATE_ACK_REORDERED_PACKET_THRESHOLD = 4;
 
         /// <summary>Minimum spacing between immediate reordered-data ACKs, in microseconds.</summary>
-        public const long REORDERED_ACK_MIN_INTERVAL_MICROS = 2000L;
+        public const long REORDERED_ACK_MIN_INTERVAL_MICROS = 250L;
 
         /// <summary>Default keep-alive interval in microseconds.</summary>
         public const long KEEP_ALIVE_INTERVAL_MICROS = MICROS_PER_SECOND;

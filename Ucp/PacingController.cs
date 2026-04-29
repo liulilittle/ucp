@@ -88,11 +88,9 @@ namespace Ucp
         public void ForceConsume(int bytes, long nowMicros)
         {
             Refill(nowMicros);
-            _tokens -= bytes;
-            double minimumDebt = -Math.Max(_capacity, bytes);
-            if (_tokens < minimumDebt)
+            if (_tokens > 0)
             {
-                _tokens = minimumDebt;
+                _tokens = 0;
             }
         }
 
