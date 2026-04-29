@@ -586,7 +586,7 @@ namespace Ucp
         public const long BBR_DEFAULT_RATE_WINDOW_MICROS = MICROS_PER_SECOND;
 
         /// <summary>Duplicate ACK count needed to trigger fast retransmit.</summary>
-        public const int DUPLICATE_ACK_THRESHOLD = 5;
+        public const int DUPLICATE_ACK_THRESHOLD = 8;
 
         /// <summary>SACK observations needed before a missing hole is retransmitted without waiting for RTO.</summary>
         public const int SACK_FAST_RETRANSMIT_THRESHOLD = 2;

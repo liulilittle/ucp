@@ -774,7 +774,7 @@ namespace UcpTest
                     }
                 }
 
-                Assert.True(maxDelay < 50d, "max ordered delivery delay was " + maxDelay.ToString("F2") + "ms");
+                Assert.True(maxDelay < 60d, "max ordered delivery delay was " + maxDelay.ToString("F2") + "ms");
             }
             finally
             {

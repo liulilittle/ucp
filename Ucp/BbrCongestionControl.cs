@@ -182,7 +182,8 @@ namespace Ucp
             if (minRttExpired && Mode != BbrMode.ProbeRtt)
             {
                 bool bandwidthGrowthStalled = _fullBandwidthRounds >= UcpConstants.RTO_MAX_BACKOFF_MIN_RTO_MULTIPLIER;
-                if (bandwidthGrowthStalled)
+                bool isLossyFat = CurrentNetworkClass == NetworkClass.LossyLongFat;
+                if (bandwidthGrowthStalled || !isLossyFat)
                 {
                     EnterProbeRtt(nowMicros);
                 }
@@ -605,6 +606,21 @@ namespace Ucp
                 return UcpConstants.BBR_PROBE_RTT_PACING_GAIN;
             }
 
+            if (CurrentNetworkClass == NetworkClass.MobileUnstable)
+            {
+                return UcpConstants.BBR_LIGHT_LOSS_PACING_GAIN;
+            }
+
+            if (CurrentNetworkClass == NetworkClass.LossyLongFat)
+            {
+                if (rttIncrease < UcpConstants.BBR_MODERATE_RTT_INCREASE_RATIO)
+                {
+                    return UcpConstants.BBR_MODERATE_PROBE_GAIN;
+                }
+
+                return 1d;
+            }
+
             if (_networkCondition == NetworkCondition.RandomLoss)
             {
                 if (rttIncrease < UcpConstants.BBR_LOW_RTT_INCREASE_RATIO)
@@ -618,6 +634,11 @@ namespace Ucp
                 }
 
                 return 1d;
+            }
+
+            if (CurrentNetworkClass == NetworkClass.LowLatencyLAN)
+            {
+                return _config.ProbeBwHighGain;
             }
 
             if (lossRatio < UcpConstants.BBR_LOW_LOSS_RATIO && rttIncrease < UcpConstants.BBR_LOW_RTT_INCREASE_RATIO)

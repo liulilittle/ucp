@@ -22,9 +22,10 @@ namespace UcpTest.TestTransport
         private const long SchedulerCoalescingMicros = 1000;
         private const long LogicalSenderIdleGapMicros = 500000;
         private const int HighBandwidthLogicalClockThresholdBytesPerSecond = 10 * 1024 * 1024;
-        private const int DefaultDynamicJitterRangeMilliseconds = 3;
-        private const int DefaultDynamicWaveAmplitudeMilliseconds = 2;
+        private const int DefaultDynamicJitterRangeMilliseconds = 1;
+        private const int DefaultDynamicWaveAmplitudeMilliseconds = 5;
         private const int DynamicWavePeriodMilliseconds = 5000;
+        private const int DirectionSkewMilliseconds = 5;
         private int _nextPort = 30000;
         private long _nextForwardTransmitAvailableMicros;
         private long _nextReverseTransmitAvailableMicros;
@@ -461,7 +462,12 @@ namespace UcpTest.TestTransport
                 jitter = _random.Next(-jitterMilliseconds, jitterMilliseconds + 1);
             }
 
-            int dynamicJitter = DynamicJitterRangeMilliseconds > 0 ? _random.Next(-DynamicJitterRangeMilliseconds, DynamicJitterRangeMilliseconds + 1) : 0;
+            int dynamicJitter = 0;
+            if (DynamicJitterRangeMilliseconds > 0)
+            {
+                int cappedRange = Math.Min(DynamicJitterRangeMilliseconds, Math.Max(1, fixedDelayMilliseconds / 3));
+                dynamicJitter = _random.Next(-cappedRange, cappedRange + 1);
+            }
             double phaseOffset = forwardDirection ? 0d : Math.PI / 2d;
             double wave = 0d;
             if (DynamicWaveAmplitudeMilliseconds > 0)
@@ -471,8 +477,10 @@ namespace UcpTest.TestTransport
                 wave = Math.Sin(phase + phaseOffset) * DynamicWaveAmplitudeMilliseconds;
             }
 
-            int directionBias = forwardDirection ? 1 : -1;
-            long propagationMicros = (long)Math.Round((fixedDelayMilliseconds + jitter + dynamicJitter + wave + directionBias) * 1000d);
+            int skew = forwardDirection ? DirectionSkewMilliseconds : -DirectionSkewMilliseconds;
+            int effectiveSkew = Math.Min(Math.Abs(skew), fixedDelayMilliseconds * 80 / 100) * (skew >= 0 ? 1 : -1);
+            double effectiveWave = wave * Math.Min(1d, fixedDelayMilliseconds / 30d);
+            long propagationMicros = (long)Math.Round((fixedDelayMilliseconds + jitter + dynamicJitter + effectiveWave + effectiveSkew) * 1000d);
             if (propagationMicros < 0)
             {
                 propagationMicros = 0;
