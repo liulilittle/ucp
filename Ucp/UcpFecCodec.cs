@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 namespace Ucp
 {
@@ -7,19 +8,12 @@ namespace Ucp
         private readonly int _groupSize;
         private readonly byte[][] _sendBuffer;
         private int _sendIndex;
-
-        private readonly byte[][] _recvBuffer;
-        private readonly bool[] _received;
-        private readonly bool[] _groupsSealed;
-        private int _recvGroupIndex;
+        private readonly Dictionary<uint, byte[][]> _recvGroups = new Dictionary<uint, byte[][]>();
 
         public UcpFecCodec(int groupSize)
         {
-            _groupSize = Math.Max(2, groupSize);
+            _groupSize = Math.Max(2, Math.Min(groupSize, 64));
             _sendBuffer = new byte[_groupSize][];
-            _recvBuffer = new byte[_groupSize][];
-            _received = new bool[_groupSize];
-            _groupsSealed = new bool[2];
         }
 
         public byte[] TryEncodeRepair(byte[] payload)
@@ -44,6 +38,11 @@ namespace Ucp
 
             if (maxLen == 0)
             {
+                for (int i = 0; i < _groupSize; i++)
+                {
+                    _sendBuffer[i] = null;
+                }
+
                 return null;
             }
 
@@ -71,50 +70,68 @@ namespace Ucp
             return repair;
         }
 
-        public byte[] TryRecoverFromRepair(byte[] repair, uint sequenceInGroup, byte[] dataPayload)
+        public void FeedDataPacket(uint sequenceNumber, byte[] payload)
         {
-            int index = (int)(sequenceInGroup % (uint)_groupSize);
-            if (dataPayload != null)
+            if (payload == null)
             {
-                _recvBuffer[index] = dataPayload;
-                _received[index] = true;
+                return;
             }
 
-            if (_recvGroupIndex != (int)(sequenceInGroup / (uint)_groupSize))
+            uint groupBase = sequenceNumber / (uint)_groupSize * (uint)_groupSize;
+            byte[][] group;
+            if (!_recvGroups.TryGetValue(groupBase, out group))
             {
-                _recvGroupIndex = (int)(sequenceInGroup / (uint)_groupSize);
-                for (int i = 0; i < _groupSize; i++)
-                {
-                    _recvBuffer[i] = null;
-                    _received[i] = false;
-                }
-
-                _groupsSealed[0] = false;
-                _groupsSealed[1] = false;
-                if (dataPayload != null)
-                {
-                    _recvBuffer[index] = dataPayload;
-                    _received[index] = true;
-                }
+                group = new byte[_groupSize][];
+                _recvGroups[groupBase] = group;
             }
 
+            int slot = (int)(sequenceNumber % (uint)_groupSize);
+            if (slot >= 0 && slot < _groupSize)
+            {
+                group[slot] = payload;
+            }
+
+            while (_recvGroups.Count > 16)
+            {
+                uint oldest = uint.MaxValue;
+                foreach (uint k in _recvGroups.Keys)
+                {
+                    if (k < oldest)
+                    {
+                        oldest = k;
+                    }
+                }
+
+                _recvGroups.Remove(oldest);
+            }
+        }
+
+        public byte[] TryRecoverFromRepair(byte[] repair, uint groupBase)
+        {
             if (repair == null)
             {
                 return null;
             }
 
+            byte[][] group;
+            if (!_recvGroups.TryGetValue(groupBase, out group))
+            {
+                group = new byte[_groupSize][];
+                _recvGroups[groupBase] = group;
+            }
+
             int missingCount = 0;
-            int missingIndex = -1;
+            int missingSlot = -1;
             for (int i = 0; i < _groupSize; i++)
             {
-                if (!_received[i])
+                if (group[i] == null)
                 {
                     missingCount++;
-                    missingIndex = i;
+                    missingSlot = i;
                 }
             }
 
-            if (missingCount != 1 || missingIndex < 0)
+            if (missingCount != 1 || missingSlot < 0)
             {
                 return null;
             }
@@ -124,12 +141,12 @@ namespace Ucp
 
             for (int i = 0; i < _groupSize; i++)
             {
-                if (i == missingIndex)
+                if (i == missingSlot)
                 {
                     continue;
                 }
 
-                byte[] p = _recvBuffer[i];
+                byte[] p = group[i];
                 if (p == null)
                 {
                     continue;
@@ -142,9 +159,7 @@ namespace Ucp
                 }
             }
 
-            _recvBuffer[missingIndex] = recovered;
-            _received[missingIndex] = true;
-
+            group[missingSlot] = recovered;
             return recovered;
         }
     }

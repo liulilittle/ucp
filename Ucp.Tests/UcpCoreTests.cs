@@ -974,6 +974,31 @@ namespace UcpTest
         }
 
         [Fact]
+        public void FecCodec_RecoversSingleLoss()
+        {
+            UcpFecCodec enc = new UcpFecCodec(4);
+            byte[] p0 = Encoding.ASCII.GetBytes("AAA");
+            byte[] p1 = Encoding.ASCII.GetBytes("BBB");
+            byte[] p2 = Encoding.ASCII.GetBytes("CCC");
+            byte[] p3 = Encoding.ASCII.GetBytes("DDD");
+
+            Assert.Null(enc.TryEncodeRepair(p0));
+            Assert.Null(enc.TryEncodeRepair(p1));
+            Assert.Null(enc.TryEncodeRepair(p2));
+            byte[] repair = enc.TryEncodeRepair(p3);
+            Assert.NotNull(repair);
+
+            UcpFecCodec dec = new UcpFecCodec(4);
+            dec.FeedDataPacket(0, p0);
+            dec.FeedDataPacket(2, p2);
+            dec.FeedDataPacket(3, p3);
+
+            byte[] recovered = dec.TryRecoverFromRepair(repair, 0);
+            Assert.NotNull(recovered);
+            Assert.Equal(p1, recovered);
+        }
+
+        [Fact]
         public async Task Integration_Weak4G_RecoversFromOutage()
         {
             Func<NetworkSimulator.SimulatedDatagram, bool> outageDropRule = CreateWeak4GDropRule(

@@ -64,6 +64,8 @@ namespace Ucp.Internal
         private readonly Dictionary<uint, long> _lastNakIssuedMicros = new Dictionary<uint, long>();
         private readonly HashSet<uint> _sackFastRetransmitNotified = new HashSet<uint>();
         private UcpFecCodec _fecCodec;
+        private uint _fecGroupBaseSeq;
+        private int _fecGroupSendCount;
         private readonly SemaphoreSlim _receiveSignal = new SemaphoreSlim(0, int.MaxValue);
         private readonly SemaphoreSlim _sendSpaceSignal = new SemaphoreSlim(0, int.MaxValue);
         private readonly SemaphoreSlim _flushLock = new SemaphoreSlim(1, 1);
@@ -1336,19 +1338,7 @@ namespace Ucp.Internal
 
                         if (_fecCodec != null)
                         {
-                            byte[] recovered = _fecCodec.TryRecoverFromRepair(null, dataPacket.SequenceNumber, dataPacket.Payload);
-                            if (recovered != null)
-                            {
-                                InboundSegment fecInbound = new InboundSegment();
-                                fecInbound.SequenceNumber = dataPacket.SequenceNumber - 1;
-                                fecInbound.FragmentTotal = 1;
-                                fecInbound.FragmentIndex = 0;
-                                fecInbound.Payload = recovered;
-                                if (!_recvBuffer.ContainsKey(fecInbound.SequenceNumber))
-                                {
-                                    _recvBuffer[fecInbound.SequenceNumber] = fecInbound;
-                                }
-                            }
+                            _fecCodec.FeedDataPacket(dataPacket.SequenceNumber, dataPacket.Payload);
                         }
                     }
 
@@ -1492,29 +1482,44 @@ namespace Ucp.Internal
                 return;
             }
 
+            uint groupBase = packet.GroupId;
+            byte[] recovered = _fecCodec.TryRecoverFromRepair(packet.Payload, groupBase);
+            if (recovered == null)
+            {
+                return;
+            }
+
+            uint recoveredSeq = groupBase;
+            for (int slot = 0; slot < _config.FecGroupSize; slot++)
+            {
+                uint candidate = groupBase + (uint)slot;
+                if (!_recvBuffer.ContainsKey(candidate))
+                {
+                    recoveredSeq = candidate;
+                    break;
+                }
+            }
+
             lock (_sync)
             {
-                byte[] recovered = _fecCodec.TryRecoverFromRepair(packet.Payload, packet.GroupId, null);
-                if (recovered == null)
+                if (_recvBuffer.ContainsKey(recoveredSeq))
                 {
                     return;
                 }
 
                 InboundSegment inbound = new InboundSegment();
-                inbound.SequenceNumber = packet.GroupId;
+                inbound.SequenceNumber = recoveredSeq;
                 inbound.FragmentTotal = 1;
                 inbound.FragmentIndex = 0;
                 inbound.Payload = recovered;
 
-                if (!_recvBuffer.ContainsKey(packet.GroupId))
-                {
-                    _recvBuffer[packet.GroupId] = inbound;
-                    _nakIssued.Remove(packet.GroupId);
-                    _missingSequenceCounts.Remove(packet.GroupId);
-                    _missingFirstSeenMicros.Remove(packet.GroupId);
-                    _lastNakIssuedMicros.Remove(packet.GroupId);
-                }
+                _recvBuffer[recoveredSeq] = inbound;
+                _nakIssued.Remove(recoveredSeq);
+                _missingSequenceCounts.Remove(recoveredSeq);
+                _missingFirstSeenMicros.Remove(recoveredSeq);
+                _lastNakIssuedMicros.Remove(recoveredSeq);
 
+                List<byte[]> fecReadyPayloads = new List<byte[]>();
                 while (_recvBuffer.Count > 0)
                 {
                     InboundSegment next;
@@ -1529,6 +1534,12 @@ namespace Ucp.Internal
                     _missingFirstSeenMicros.Remove(_nextExpectedSequence);
                     _lastNakIssuedMicros.Remove(_nextExpectedSequence);
                     _nextExpectedSequence = UcpSequenceComparer.Increment(_nextExpectedSequence);
+                    fecReadyPayloads.Add(next.Payload);
+                }
+
+                for (int i = 0; i < fecReadyPayloads.Count; i++)
+                {
+                    EnqueuePayload(fecReadyPayloads[i]);
                 }
             }
 
@@ -1801,16 +1812,23 @@ namespace Ucp.Internal
 
                         if (_fecCodec != null && segment.SendCount <= 1)
                         {
+                            if (_fecGroupSendCount == 0)
+                            {
+                                _fecGroupBaseSeq = segment.SequenceNumber;
+                            }
+
                             byte[] repair = _fecCodec.TryEncodeRepair(segment.Payload);
+                            _fecGroupSendCount++;
                             if (repair != null)
                             {
                                 UcpFecRepairPacket repairPacket = new UcpFecRepairPacket();
                                 repairPacket.Header = CreateHeader(UcpPacketType.FecRepair, UcpPacketFlags.None, nowMicros);
-                                repairPacket.GroupId = segment.SequenceNumber;
+                                repairPacket.GroupId = _fecGroupBaseSeq;
                                 repairPacket.GroupIndex = 0;
                                 repairPacket.Payload = repair;
                                 byte[] encodedRepair = UcpPacketCodec.Encode(repairPacket);
                                 _transport.Send(encodedRepair, _remoteEndPoint);
+                                _fecGroupSendCount = 0;
                             }
                         }
                     }
