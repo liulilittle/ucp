@@ -614,6 +614,15 @@ namespace Ucp
         /// <summary>FEC redundancy ratio for very heavy loss (>=10%) benchmark scenarios.</summary>
         public const double BENCHMARK_VERY_HEAVY_LOSS_FEC_REDUNDANCY = 0.50d;
 
+        /// <summary>Medium random loss rate (>=3%) threshold for increased FEC redundancy.</summary>
+        public const double BENCHMARK_MEDIUM_RANDOM_LOSS_RATE = 0.03d;
+
+        /// <summary>FEC redundancy ratio for medium loss (3-10%) benchmark scenarios.</summary>
+        public const double BENCHMARK_MEDIUM_LOSS_FEC_REDUNDANCY = 0.50d;
+
+        /// <summary>RTT threshold above which heavy FEC (0.50) is always used for lossy benchmarks.</summary>
+        public const long BENCHMARK_HIGH_RTT_FEC_THRESHOLD_MICROS = 80000L;
+
         /// <summary>First data packet index included in the burst-loss benchmark.</summary>
         public const int BENCHMARK_BURST_LOSS_FIRST_PACKET = 16;
 

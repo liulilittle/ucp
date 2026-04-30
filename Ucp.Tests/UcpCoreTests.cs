@@ -946,7 +946,7 @@ namespace UcpTest
                 await client.ConnectAsync(new IPEndPoint(IPAddress.Loopback, 40010));
                 UcpConnection serverConnection = await acceptTask;
 
-                byte[] payload = Encoding.ASCII.GetBytes(new string('P', 256 * 1024));
+                byte[] payload = Encoding.ASCII.GetBytes(new string('P', 512 * 1024));
                 byte[] received = new byte[payload.Length];
 
                 DateTime start = DateTime.UtcNow;
@@ -2113,13 +2113,14 @@ namespace UcpTest
 
             if (hasConfiguredLoss)
             {
-                // Random-loss benchmarks are explicitly repair-path tests. Enable
-                // enough systematic FEC to cover expected losses within each small
-                // group so packet loss does not force a full RTT/RTO stall.
+                // FEC: tiered redundancy based on loss rate. Sub-3% paths let
+                // SACK handle rare losses (no bandwidth tax). 3-10% paths get
+                // 0.125 (1 repair per 8) and >=10% get 0.50 (4 per 8).
                 config.FecGroupSize = 8;
                 config.FecRedundancy = lossRate >= UcpConstants.BENCHMARK_VERY_HEAVY_RANDOM_LOSS_RATE
                     ? UcpConstants.BENCHMARK_VERY_HEAVY_LOSS_FEC_REDUNDANCY
-                    : lossRate >= UcpConstants.BENCHMARK_HEAVY_RANDOM_LOSS_RATE ? 0.50d : 0.25d;
+                    : lossRate >= UcpConstants.BENCHMARK_HEAVY_RANDOM_LOSS_RATE ? 0.25d
+                    : lossRate >= UcpConstants.BENCHMARK_MEDIUM_RANDOM_LOSS_RATE ? 0.125d : 0d;
             }
 
             // Use larger MSS for high-bandwidth scenarios to reduce packet overhead.
@@ -2137,13 +2138,25 @@ namespace UcpTest
             int estimatedRttMicros = (int)Math.Max(UcpConstants.MICROS_PER_MILLI, (effectiveForwardDelayMilliseconds + effectiveBackwardDelayMilliseconds) * UcpConstants.MICROS_PER_MILLI);
             int estimatedBdpBytes = (int)Math.Min(int.MaxValue, bandwidthBytesPerSecond * (estimatedRttMicros / (double)UcpConstants.MICROS_PER_SECOND));
 
+            if (hasConfiguredLoss)
+            {
+                // On high-RTT paths SACK recovery costs 2×RTT per hole.
+                // Heavy FEC trades bandwidth for eliminating retransmission
+                // stalls — net win only when loss rate is high enough.
+                bool isHighRtt = estimatedRttMicros >= UcpConstants.BENCHMARK_HIGH_RTT_FEC_THRESHOLD_MICROS;
+                config.FecGroupSize = 8;
+                config.FecRedundancy = isHighRtt && lossRate >= UcpConstants.BENCHMARK_HEAVY_RANDOM_LOSS_RATE ? 0.50d
+                    : isHighRtt && lossRate >= UcpConstants.BENCHMARK_MEDIUM_RANDOM_LOSS_RATE ? 0.25d
+                    : isHighRtt ? 0.125d
+                    : lossRate >= UcpConstants.BENCHMARK_VERY_HEAVY_RANDOM_LOSS_RATE ? UcpConstants.BENCHMARK_VERY_HEAVY_LOSS_FEC_REDUNDANCY
+                    : lossRate >= UcpConstants.BENCHMARK_HEAVY_RANDOM_LOSS_RATE ? 0.25d
+                    : lossRate >= UcpConstants.BENCHMARK_MEDIUM_RANDOM_LOSS_RATE ? 0.125d : 0d;
+            }
+
             // Calculate an appropriate initial CWND for this scenario.
             int initialCwndBytes = CalculateBenchmarkInitialCwndBytes(config, bandwidthBytesPerSecond, estimatedBdpBytes, hasConfiguredLoss);
 
-            // For long-running scenarios (high RTT, low bandwidth, large payloads),
-            // extend the ProbeRTT interval to prevent premature CWND halving during
-            // the benchmark. BBR is pacing-based so initial CWND does not need a
-            // separate boost — the controller discovers bandwidth through Startup.
+            // For long-running scenarios extend the ProbeRTT interval.
             double estimatedSerialSeconds = (double)payloadBytes / Math.Max(1, bandwidthBytesPerSecond);
             if (estimatedSerialSeconds >= UcpConstants.BENCHMARK_LONG_RUNNING_SERIAL_SECONDS)
             {
