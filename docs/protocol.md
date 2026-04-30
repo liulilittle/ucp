@@ -83,7 +83,7 @@ stateDiagram-v2
 
 ### SACK Fast Retransmit
 
-Sender-side SACK recovery uses a short QUIC-style reorder grace: `max(5ms, RTT / 8)`. The first cumulative ACK hole can be repaired after two observations. Additional reported holes below the highest SACKed sequence can also be repaired after confirmed SACK observations, which lets random independent losses recover in parallel instead of one RTT at a time.
+Sender-side SACK recovery uses a short QUIC-style reorder grace: `max(3ms, RTT / 8)`. The first cumulative ACK hole can be repaired after two observations. Additional reported holes below the highest SACKed sequence can also be repaired after confirmed SACK observations, which lets random independent losses recover in parallel instead of one RTT at a time.
 
 ### Duplicate ACK Fast Retransmit
 
@@ -91,7 +91,11 @@ Two duplicate ACKs are enough to arm fast retransmit when the suspected lost seg
 
 ### Receiver NAK
 
-NAK is conservative by design. The receiver waits for `NAK_MISSING_THRESHOLD` observations and a 60ms reorder guard before emitting a NAK, then suppresses repeats for `NAK_REPEAT_INTERVAL_MICROS`.
+NAK is conservative by design. The receiver waits for `NAK_MISSING_THRESHOLD` observations and an RTT-aware reorder guard before emitting a NAK, then suppresses repeats for `NAK_REPEAT_INTERVAL_MICROS`. High-confidence gaps can shorten the guard, but never to a fixed tiny value that would mistake jitter for loss.
+
+### RTO / PTO Guard
+
+RTO is treated as a last-resort repair path. When ACK progress is recent, UCP suppresses bulk timeout scans and lets SACK, NAK, and FEC repair holes first. This mirrors QUIC PTO behavior and avoids retransmitting the whole BDP when the path is alive but reordered.
 
 ## Urgent Retransmit
 
@@ -117,7 +121,7 @@ This keeps dying connections alive without allowing unbounded bursts.
 
 | State | Behavior |
 |---|---|
-| Startup | Uses `pacing_gain=2.0` and `cwnd_gain=2.0` to discover bottleneck bandwidth. |
+| Startup | Uses `pacing_gain=2.5` and `cwnd_gain=2.0` to discover bottleneck bandwidth. |
 | Drain | Uses low pacing gain to drain startup queue, then enters ProbeBW. |
 | ProbeBW | Cycles gains around the estimated bottleneck rate. Random loss does not collapse the pipe. |
 | ProbeRTT | Temporarily lowers pacing/CWND to refresh MinRTT. Lossy long-fat paths avoid unnecessary ProbeRTT. |
@@ -136,7 +140,7 @@ The exported pacing rate is the controller's instantaneous rate. Benchmark throu
 
 ## FEC
 
-UCP can generate one XOR repair packet per FEC group. Recovery succeeds when exactly one DATA packet in the group is missing and the repair packet is available.
+UCP can generate one or more GF(256) repair packets per FEC group. Recovery succeeds when the receiver has at least as many independent repair packets as missing DATA packets. Recovered packets retain the original sequence number and fragment metadata so cumulative ACK and stream delivery remain correct.
 
 ```mermaid
 sequenceDiagram

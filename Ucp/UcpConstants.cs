@@ -99,7 +99,7 @@ namespace Ucp
         public const int DEFAULT_SEND_BUFFER_BYTES = 32 * 1024 * 1024;
 
         /// <summary>Default delayed ACK timeout in microseconds.</summary>
-        public const long DEFAULT_DELAYED_ACK_TIMEOUT_MICROS = 2000L;
+        public const long DEFAULT_DELAYED_ACK_TIMEOUT_MICROS = 500L;
 
         /// <summary>Default maximum tolerated bandwidth waste ratio, where 0.25 means 25%.</summary>
         public const double DEFAULT_MAX_BANDWIDTH_WASTE_RATIO = 0.25d;
@@ -143,10 +143,13 @@ namespace Ucp
         public const int MAX_RETRANSMISSIONS = 10;
 
         /// <summary>Maximum timeout retransmits armed by one timer tick.</summary>
-        public const int RTO_RETRANSMIT_BUDGET_PER_TICK = 64;
+        public const int RTO_RETRANSMIT_BUDGET_PER_TICK = 4;
+
+        /// <summary>ACK-progress window in which bulk RTO retransmission is suppressed.</summary>
+        public const long RTO_ACK_PROGRESS_SUPPRESSION_MICROS = 2 * MICROS_PER_MILLI;
 
         /// <summary>Maximum urgent retransmits allowed to bypass pacing in one RTT window.</summary>
-        public const int URGENT_RETRANSMIT_BUDGET_PER_RTT = 512;
+        public const int URGENT_RETRANSMIT_BUDGET_PER_RTT = 8192;
 
         /// <summary>Idle-time percentage after which a tail-loss probe may be urgent.</summary>
         public const int URGENT_RETRANSMIT_DISCONNECT_THRESHOLD_PERCENT = 75;
@@ -387,10 +390,10 @@ namespace Ucp
         public const int BENCHMARK_NO_LOSS_INITIAL_CWND_BANDWIDTH_DIVISOR = 16;
 
         /// <summary>Initial congestion-window gain relative to estimated BDP for lossy benchmarks.</summary>
-        public const double BENCHMARK_LOSS_INITIAL_CWND_BDP_GAIN = 2.0d;
+        public const double BENCHMARK_LOSS_INITIAL_CWND_BDP_GAIN = 4.0d;
 
         /// <summary>Maximum initial congestion window used by random-loss benchmarks, in bytes.</summary>
-        public const int BENCHMARK_MAX_LOSS_INITIAL_CWND_BYTES = 32 * 1024 * 1024;
+        public const int BENCHMARK_MAX_LOSS_INITIAL_CWND_BYTES = 128 * 1024 * 1024;
 
         /// <summary>Minimum RTO used by long-fat-pipe benchmarks to avoid simulator serialization false positives.</summary>
         public const long BENCHMARK_LONG_FAT_MIN_RTO_MICROS = MICROS_PER_SECOND;
@@ -408,19 +411,19 @@ namespace Ucp
         public const int BENCHMARK_CONTROLLER_MAX_CONVERGENCE_ROUNDS = 32;
 
         /// <summary>Payload size used by 100 Mbps benchmark scenarios, in bytes.</summary>
-        public const int BENCHMARK_100M_PAYLOAD_BYTES = 4 * 1024 * 1024;
+        public const int BENCHMARK_100M_PAYLOAD_BYTES = 16 * 1024 * 1024;
 
         /// <summary>Payload size used by asymmetric route benchmark scenarios, in bytes.</summary>
         public const int BENCHMARK_ASYM_PAYLOAD_BYTES = 8 * 1024 * 1024;
 
         /// <summary>Payload size used by high-jitter weak-network benchmark scenarios, in bytes.</summary>
-        public const int BENCHMARK_HIGH_JITTER_PAYLOAD_BYTES = 2 * 1024 * 1024;
+        public const int BENCHMARK_HIGH_JITTER_PAYLOAD_BYTES = 16 * 1024 * 1024;
 
         /// <summary>Payload size used by 4G weak-network benchmark scenarios, in bytes.</summary>
         public const int BENCHMARK_WEAK_4G_PAYLOAD_BYTES = 16 * 1024 * 1024;
 
         /// <summary>Payload size used by 100 Mbps random-loss benchmark scenarios, in bytes.</summary>
-        public const int BENCHMARK_100M_LOSS_PAYLOAD_BYTES = 64 * 1024 * 1024;
+        public const int BENCHMARK_100M_LOSS_PAYLOAD_BYTES = 32 * 1024 * 1024;
 
         /// <summary>Payload size used by high-loss high-RTT benchmark scenarios, in bytes.</summary>
         public const int BENCHMARK_HIGH_LOSS_HIGH_RTT_PAYLOAD_BYTES = 16 * 1024 * 1024;
@@ -435,22 +438,22 @@ namespace Ucp
         public const int BENCHMARK_SATELLITE_PAYLOAD_BYTES = 16 * 1024 * 1024;
 
         /// <summary>Payload size used by VPN benchmark scenarios, in bytes.</summary>
-        public const int BENCHMARK_VPN_PAYLOAD_BYTES = 4 * 1024 * 1024;
+        public const int BENCHMARK_VPN_PAYLOAD_BYTES = 16 * 1024 * 1024;
 
         /// <summary>Payload size used by the 100 Mbps long-fat-pipe benchmark, in bytes.</summary>
         public const int BENCHMARK_LONG_FAT_100M_PAYLOAD_BYTES = 16 * 1024 * 1024;
 
         /// <summary>Payload size used by 1 Gbps benchmark scenarios, in bytes.</summary>
-        public const int BENCHMARK_1G_PAYLOAD_BYTES = 4 * 1024 * 1024;
+        public const int BENCHMARK_1G_PAYLOAD_BYTES = 16 * 1024 * 1024;
 
         /// <summary>Payload size used by 1 Gbps random-loss benchmark scenarios, in bytes.</summary>
-        public const int BENCHMARK_1G_LOSS_PAYLOAD_BYTES = 8 * 1024 * 1024;
+        public const int BENCHMARK_1G_LOSS_PAYLOAD_BYTES = 64 * 1024 * 1024;
 
         /// <summary>Jumbo MSS used by high-bandwidth benchmark paths to avoid control-plane packet amplification.</summary>
         public const int BENCHMARK_HIGH_BANDWIDTH_MSS = 9000;
 
         /// <summary>Payload size used by 10 Gbps benchmark scenarios, in bytes.</summary>
-        public const int BENCHMARK_10G_PAYLOAD_BYTES = 8 * 1024 * 1024;
+        public const int BENCHMARK_10G_PAYLOAD_BYTES = 32 * 1024 * 1024;
 
         /// <summary>Payload size used by burst-loss recovery benchmark scenarios, in bytes.</summary>
         public const int BENCHMARK_BURST_LOSS_PAYLOAD_BYTES = 2 * 1024 * 1024;
@@ -663,7 +666,7 @@ namespace Ucp
         public const int SACK_FAST_RETRANSMIT_THRESHOLD = 2;
 
         /// <summary>Minimum SACK distance past a missing sequence before treating the hole as real loss.</summary>
-        public const int SACK_FAST_RETRANSMIT_DISTANCE_THRESHOLD = 100;
+        public const int SACK_FAST_RETRANSMIT_DISTANCE_THRESHOLD = 32;
 
         /// <summary>Lower bound for SACK-based reorder grace before fast retransmit, in microseconds.</summary>
         public const long SACK_FAST_RETRANSMIT_MIN_REORDER_GRACE_MICROS = 3000L;
@@ -672,28 +675,28 @@ namespace Ucp
         public const int NAK_MISSING_THRESHOLD = 2;
 
         /// <summary>Minimum packet-age delay before receiver NAKs a missing sequence, in microseconds.</summary>
-        public const long NAK_REORDER_GRACE_MICROS = 30000L;
+        public const long NAK_REORDER_GRACE_MICROS = 5000L;
 
         /// <summary>Missing observation count that makes a gap high-confidence despite reorder grace.</summary>
         public const int NAK_HIGH_CONFIDENCE_MISSING_THRESHOLD = 256;
 
         /// <summary>Minimum packet-age delay for high-confidence missing gaps, in microseconds.</summary>
-        public const long NAK_HIGH_CONFIDENCE_REORDER_GRACE_MICROS = 5000L;
+        public const long NAK_HIGH_CONFIDENCE_REORDER_GRACE_MICROS = 2000L;
 
         /// <summary>Missing observation count that makes a gap more likely to be real loss than jitter.</summary>
         public const int NAK_MEDIUM_CONFIDENCE_MISSING_THRESHOLD = 64;
 
         /// <summary>Minimum packet-age delay for medium-confidence missing gaps, in microseconds.</summary>
-        public const long NAK_MEDIUM_CONFIDENCE_REORDER_GRACE_MICROS = 5000L;
+        public const long NAK_MEDIUM_CONFIDENCE_REORDER_GRACE_MICROS = 2000L;
 
         /// <summary>Minimum interval before the receiver may re-emit a NAK for the same missing sequence.</summary>
-        public const long NAK_REPEAT_INTERVAL_MICROS = 100000L;
+        public const long NAK_REPEAT_INTERVAL_MICROS = 20000L;
 
         /// <summary>Maximum number of sequence slots scanned while building NAK state.</summary>
-        public const int MAX_NAK_MISSING_SCAN = 4096;
+        public const int MAX_NAK_MISSING_SCAN = 16384;
 
         /// <summary>Maximum missing sequences included in one NAK packet.</summary>
-        public const int MAX_NAK_SEQUENCES_PER_PACKET = 64;
+        public const int MAX_NAK_SEQUENCES_PER_PACKET = 256;
 
         /// <summary>Maximum SACK blocks emitted by default.</summary>
         public const int DEFAULT_ACK_SACK_BLOCK_LIMIT = 149;
@@ -711,7 +714,7 @@ namespace Ucp
         public const long DISCONNECT_TIMEOUT_MICROS = 4000000L;
 
         /// <summary>Default timer interval in milliseconds.</summary>
-        public const int TIMER_INTERVAL_MILLISECONDS = 20;
+        public const int TIMER_INTERVAL_MILLISECONDS = 1;
 
         /// <summary>Fair queue scheduling round in milliseconds.</summary>
         public const int FAIR_QUEUE_ROUND_MILLISECONDS = 10;

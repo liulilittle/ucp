@@ -65,6 +65,16 @@ namespace Ucp.Internal
             public long LastSendMicros;
         }
 
+        /// <summary>Original fragment metadata retained with each FEC-encoded payload.</summary>
+        private sealed class FecFragmentMetadata
+        {
+            /// <summary>Total fragments in the original application message.</summary>
+            public ushort FragmentTotal;
+
+            /// <summary>Zero-based fragment index within the original message.</summary>
+            public ushort FragmentIndex;
+        }
+
         /// <summary>Deduplicated loss event tracked for congestion classification.</summary>
         private sealed class LossEvent
         {
@@ -160,6 +170,9 @@ namespace Ucp.Internal
 
         /// <summary>FEC groups for which repair packets have been sent.</summary>
         private readonly HashSet<uint> _fecRepairSentGroups = new HashSet<uint>();
+
+        /// <summary>Fragment metadata for DATA packets whose payloads are covered by FEC repair packets.</summary>
+        private readonly Dictionary<uint, FecFragmentMetadata> _fecFragmentMetadata = new Dictionary<uint, FecFragmentMetadata>();
 
         // ---- FEC ----
 
@@ -1874,6 +1887,27 @@ namespace Ucp.Internal
         }
 
         /// <summary>
+        /// Returns the ACK-progress grace window used to suppress bulk RTO scans.
+        /// If ACKs are arriving, the path is alive and recovery should be driven
+        /// by SACK/NAK/FEC instead of retransmitting the entire outstanding pipe.
+        /// </summary>
+        private long GetRtoAckProgressSuppressionMicrosUnsafe()
+        {
+            long rttMicros = _rtoEstimator.SmoothedRttMicros > 0 ? _rtoEstimator.SmoothedRttMicros : _lastRttMicros;
+            if (rttMicros <= 0)
+            {
+                rttMicros = _config.MinRtoMicros;
+            }
+
+            if (rttMicros <= 0)
+            {
+                return UcpConstants.RTO_ACK_PROGRESS_SUPPRESSION_MICROS;
+            }
+
+            return Math.Max(UcpConstants.RTO_ACK_PROGRESS_SUPPRESSION_MICROS, rttMicros / 4);
+        }
+
+        /// <summary>
         /// Returns the overall retransmission ratio (retransmits / total sends).
         /// </summary>
         private double GetRetransmissionRatioUnsafe()
@@ -1947,6 +1981,7 @@ namespace Ucp.Internal
 
                         if (_fecCodec != null)
                         {
+                            _fecFragmentMetadata[dataPacket.SequenceNumber] = new FecFragmentMetadata { FragmentTotal = dataPacket.FragmentTotal, FragmentIndex = dataPacket.FragmentIndex };
                             _fecCodec.FeedDataPacket(dataPacket.SequenceNumber, dataPacket.Payload);
                             TryRecoverFecAroundUnsafe(dataPacket.SequenceNumber, readyPayloads);
                         }
@@ -1995,6 +2030,7 @@ namespace Ucp.Internal
                         _missingSequenceCounts.Remove(_nextExpectedSequence);
                         _missingFirstSeenMicros.Remove(_nextExpectedSequence);
                         _lastNakIssuedMicros.Remove(_nextExpectedSequence);
+                        _fecFragmentMetadata.Remove(_nextExpectedSequence);
                         _nextExpectedSequence = UcpSequenceComparer.Increment(_nextExpectedSequence);
                         readyPayloads.Add(next.Payload);
                     }
@@ -2068,7 +2104,7 @@ namespace Ucp.Internal
                     continue;
                 }
 
-                if (StoreRecoveredFecPacketsUnsafe(groupBase, _fecCodec.TryRecoverPacketsFromStoredRepair(candidateSeq), readyPayloads) > 0)
+                if (StoreRecoveredFecPacketsUnsafe(_fecCodec.TryRecoverPacketsFromStoredRepair(candidateSeq), readyPayloads) > 0)
                 {
                     return; // Recovery succeeded; stop scanning.
                 }
@@ -2080,7 +2116,7 @@ namespace Ucp.Internal
         /// any newly contiguous in-order data.
         /// </summary>
         /// <returns>Number of recovered packets stored.</returns>
-        private int StoreRecoveredFecPacketsUnsafe(uint groupBase, List<UcpFecCodec.RecoveredPacket> recoveredPackets, List<byte[]> readyPayloads)
+        private int StoreRecoveredFecPacketsUnsafe(List<UcpFecCodec.RecoveredPacket> recoveredPackets, List<byte[]> readyPayloads)
         {
             if (recoveredPackets == null || recoveredPackets.Count == 0)
             {
@@ -2096,8 +2132,7 @@ namespace Ucp.Internal
                     continue;
                 }
 
-                uint recoveredSeq = groupBase + (uint)recoveredPacket.Slot;
-                if (StoreRecoveredFecSegmentUnsafe(recoveredSeq, recoveredPacket.Payload))
+                if (StoreRecoveredFecSegmentUnsafe(recoveredPacket.SequenceNumber, recoveredPacket.Payload))
                 {
                     stored++;
                 }
@@ -2122,10 +2157,16 @@ namespace Ucp.Internal
                 return false;
             }
 
+            FecFragmentMetadata metadata;
+            if (!_fecFragmentMetadata.TryGetValue(recoveredSeq, out metadata))
+            {
+                metadata = new FecFragmentMetadata { FragmentTotal = 1, FragmentIndex = 0 };
+            }
+
             InboundSegment inbound = new InboundSegment();
             inbound.SequenceNumber = recoveredSeq;
-            inbound.FragmentTotal = 1;
-            inbound.FragmentIndex = 0;
+            inbound.FragmentTotal = metadata.FragmentTotal;
+            inbound.FragmentIndex = metadata.FragmentIndex;
             inbound.Payload = recovered;
 
             _recvBuffer[recoveredSeq] = inbound;
@@ -2163,6 +2204,7 @@ namespace Ucp.Internal
             _missingSequenceCounts.Remove(sequenceNumber);
             _missingFirstSeenMicros.Remove(sequenceNumber);
             _lastNakIssuedMicros.Remove(sequenceNumber);
+            _fecFragmentMetadata.Remove(sequenceNumber);
         }
 
         /// <summary>
@@ -2191,14 +2233,36 @@ namespace Ucp.Internal
         /// Checks whether the reorder grace period for a missing sequence has expired,
         /// using tiered confidence levels based on observation count.
         /// </summary>
-        private static bool HasNakReorderGraceExpiredUnsafe(int missingCount, long firstSeenMicros, long nowMicros)
+        private bool HasNakReorderGraceExpiredUnsafe(int missingCount, long firstSeenMicros, long nowMicros)
         {
+            long baseGraceMicros = GetAdaptiveNakReorderGraceMicrosUnsafe();
             long graceMicros = missingCount >= UcpConstants.NAK_HIGH_CONFIDENCE_MISSING_THRESHOLD
-                ? UcpConstants.NAK_HIGH_CONFIDENCE_REORDER_GRACE_MICROS
+                ? Math.Max(baseGraceMicros / 2, UcpConstants.NAK_HIGH_CONFIDENCE_REORDER_GRACE_MICROS)
                 : missingCount >= UcpConstants.NAK_MEDIUM_CONFIDENCE_MISSING_THRESHOLD
-                    ? UcpConstants.NAK_MEDIUM_CONFIDENCE_REORDER_GRACE_MICROS
-                : UcpConstants.NAK_REORDER_GRACE_MICROS;
+                    ? Math.Max(baseGraceMicros / 2, UcpConstants.NAK_MEDIUM_CONFIDENCE_REORDER_GRACE_MICROS)
+                : baseGraceMicros;
             return nowMicros - firstSeenMicros >= graceMicros;
+        }
+
+        /// <summary>
+        /// Computes a NAK reorder grace from RTT/jitter evidence. High-jitter
+        /// paths need a longer receiver-side gap delay so reordering is not
+        /// mistaken for packet loss and amplified into needless retransmits.
+        /// </summary>
+        private long GetAdaptiveNakReorderGraceMicrosUnsafe()
+        {
+            long rttMicros = _rtoEstimator.SmoothedRttMicros > 0 ? _rtoEstimator.SmoothedRttMicros : _lastRttMicros;
+            if (rttMicros <= 0)
+            {
+                rttMicros = _config.MinRtoMicros;
+            }
+
+            if (rttMicros <= 0)
+            {
+                return UcpConstants.NAK_REORDER_GRACE_MICROS;
+            }
+
+            return Math.Max(UcpConstants.NAK_REORDER_GRACE_MICROS, Math.Min(rttMicros / 2, _config.MinRtoMicros));
         }
 
         /// <summary>
@@ -2246,7 +2310,7 @@ namespace Ucp.Internal
 
             lock (_sync)
             {
-                recoveredCount = StoreRecoveredFecPacketsUnsafe(groupBase, recoveredPackets, fecReadyPayloads);
+                recoveredCount = StoreRecoveredFecPacketsUnsafe(recoveredPackets, fecReadyPayloads);
             }
 
             if (recoveredCount == 0)
@@ -2259,7 +2323,10 @@ namespace Ucp.Internal
                 EnqueuePayload(fecReadyPayloads[i]);
             }
 
-            ScheduleAck();
+            // FEC recovery advances the cumulative ACK immediately; delaying it
+            // leaves the sender with stale in-flight data and can create timeout
+            // storms even though the receiver already reconstructed the payload.
+            SendAckPacket(UcpPacketFlags.None, 0);
         }
 
         // ---- Packet handler: FIN ----
@@ -2577,6 +2644,11 @@ namespace Ucp.Internal
                         // FEC encoding: generate and send repair packets when a group is complete.
                         if (_fecCodec != null && segment.SendCount <= 1)
                         {
+                            lock (_sync)
+                            {
+                                _fecFragmentMetadata[segment.SequenceNumber] = new FecFragmentMetadata { FragmentTotal = segment.FragmentTotal, FragmentIndex = segment.FragmentIndex };
+                            }
+
                             if (_fecGroupSendCount == 0)
                             {
                                 _fecGroupBaseSeq = _fecCodec.GetGroupBase(segment.SequenceNumber);
@@ -2835,6 +2907,7 @@ namespace Ucp.Internal
             {
                 int inflightSegments = Math.Max(1, _config.MaxPayloadSize) <= 0 ? 0 : (int)Math.Ceiling(_flightBytes / (double)Math.Max(1, _config.MaxPayloadSize));
                 int rtoRetransmitBudget = UcpConstants.RTO_RETRANSMIT_BUDGET_PER_TICK;
+                bool ackProgressRecent = _lastAckReceivedMicros > 0 && nowMicros - _lastAckReceivedMicros <= GetRtoAckProgressSuppressionMicrosUnsafe();
                 foreach (KeyValuePair<uint, OutboundSegment> pair in _sendBuffer)
                 {
                     OutboundSegment segment = pair.Value;
@@ -2845,6 +2918,11 @@ namespace Ucp.Internal
 
                     if (nowMicros - segment.LastSendMicros >= _rtoEstimator.CurrentRtoMicros)
                     {
+                        if (ackProgressRecent && _sendBuffer.Count > UcpConstants.TLP_MAX_INFLIGHT_SEGMENTS)
+                        {
+                            continue; // ACK flow is alive; avoid bulk RTO amplification.
+                        }
+
                         if (rtoRetransmitBudget <= 0)
                         {
                             break; // Budget exhausted for this tick.

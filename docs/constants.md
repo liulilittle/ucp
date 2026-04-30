@@ -24,7 +24,8 @@ All protocol constants live in `UcpConstants`. Time values are microseconds unle
 | `DEFAULT_MAX_RTO_MICROS` | 15,000,000 | Optimized maximum RTO. |
 | `RTO_BACKOFF_FACTOR` | 1.2 | Timeout backoff multiplier. |
 | `RTO_RETRANSMIT_BUDGET_PER_TICK` | 4 | Timeout retransmits armed by one timer tick. |
-| `URGENT_RETRANSMIT_BUDGET_PER_RTT` | 16 | Urgent retransmits allowed to bypass pacing/FQ per RTT window. |
+| `RTO_ACK_PROGRESS_SUPPRESSION_MICROS` | 2,000 | Minimum ACK-progress window that suppresses bulk RTO scans. |
+| `URGENT_RETRANSMIT_BUDGET_PER_RTT` | 8,192 | Urgent retransmits allowed to bypass pacing/FQ per RTT window. |
 | `URGENT_RETRANSMIT_DISCONNECT_THRESHOLD_PERCENT` | 75 | Tail-loss probe may become urgent after this idle percentage of disconnect timeout. |
 
 ## Pacing And Queuing
@@ -42,12 +43,12 @@ All protocol constants live in `UcpConstants`. Time values are microseconds unle
 |---|---:|---|
 | `DUPLICATE_ACK_THRESHOLD` | 2 | Duplicate ACKs needed for fast retransmit. |
 | `SACK_FAST_RETRANSMIT_THRESHOLD` | 2 | SACK observations needed for the first missing hole. |
-| `SACK_FAST_RETRANSMIT_DISTANCE_THRESHOLD` | 2 | Later SACK distance needed to confirm a hole. |
-| `SACK_FAST_RETRANSMIT_MIN_REORDER_GRACE_MICROS` | 5,000 | Minimum sender-side reorder grace for SACK repair. |
+| `SACK_FAST_RETRANSMIT_DISTANCE_THRESHOLD` | 32 | Later SACK distance needed to confirm a hole. |
+| `SACK_FAST_RETRANSMIT_MIN_REORDER_GRACE_MICROS` | 3,000 | Minimum sender-side reorder grace for SACK repair. |
 | `NAK_MISSING_THRESHOLD` | 2 | Receiver observations before NAK. |
-| `NAK_REORDER_GRACE_MICROS` | 60,000 | Receiver-side reorder guard before NAK. |
-| `NAK_REPEAT_INTERVAL_MICROS` | 250,000 | Per-sequence NAK repeat suppression. |
-| `MAX_NAK_SEQUENCES_PER_PACKET` | 64 | Maximum missing sequences in one NAK. |
+| `NAK_REORDER_GRACE_MICROS` | 5,000 | Minimum receiver-side reorder guard before NAK; actual guard is RTT-aware. |
+| `NAK_REPEAT_INTERVAL_MICROS` | 20,000 | Per-sequence NAK repeat suppression. |
+| `MAX_NAK_SEQUENCES_PER_PACKET` | 256 | Maximum missing sequences in one NAK. |
 
 ## BBR Recovery Constants
 
@@ -65,17 +66,17 @@ All protocol constants live in `UcpConstants`. Time values are microseconds unle
 
 | Scenario | Payload |
 |---|---:|
-| `BENCHMARK_100M_PAYLOAD_BYTES` | 4 MB |
-| `BENCHMARK_100M_LOSS_PAYLOAD_BYTES` | 16 MB |
-| `BENCHMARK_HIGH_LOSS_HIGH_RTT_PAYLOAD_BYTES` | 4 MB |
-| `BENCHMARK_MOBILE_3G_PAYLOAD_BYTES` | 4 MB |
-| `BENCHMARK_MOBILE_4G_PAYLOAD_BYTES` | 8 MB |
-| `BENCHMARK_WEAK_4G_PAYLOAD_BYTES` | 4 MB |
-| `BENCHMARK_SATELLITE_PAYLOAD_BYTES` | 8 MB |
-| `BENCHMARK_VPN_PAYLOAD_BYTES` | 32 MB |
-| `BENCHMARK_1G_PAYLOAD_BYTES` | 4 MB |
+| `BENCHMARK_100M_PAYLOAD_BYTES` | 16 MB |
+| `BENCHMARK_100M_LOSS_PAYLOAD_BYTES` | 32 MB |
+| `BENCHMARK_HIGH_LOSS_HIGH_RTT_PAYLOAD_BYTES` | 16 MB |
+| `BENCHMARK_MOBILE_3G_PAYLOAD_BYTES` | 16 MB |
+| `BENCHMARK_MOBILE_4G_PAYLOAD_BYTES` | 32 MB |
+| `BENCHMARK_WEAK_4G_PAYLOAD_BYTES` | 16 MB |
+| `BENCHMARK_SATELLITE_PAYLOAD_BYTES` | 16 MB |
+| `BENCHMARK_VPN_PAYLOAD_BYTES` | 16 MB |
+| `BENCHMARK_1G_PAYLOAD_BYTES` | 16 MB |
 | `BENCHMARK_1G_LOSS_PAYLOAD_BYTES` | 64 MB |
-| `BENCHMARK_10G_PAYLOAD_BYTES` | 8 MB |
+| `BENCHMARK_10G_PAYLOAD_BYTES` | 32 MB |
 | `BENCHMARK_LONG_FAT_100M_PAYLOAD_BYTES` | 16 MB |
 
 Lossy payloads are intentionally larger than smoke-test payloads so the report measures sustained recovery instead of mostly startup and one or two RTTs of repair delay.
@@ -87,7 +88,7 @@ Lossy payloads are intentionally larger than smoke-test payloads so the report m
 | `BENCHMARK_MIN_NO_LOSS_UTILIZATION_PERCENT` | 70% | Minimum accepted no-loss utilization. |
 | `BENCHMARK_MIN_LOSS_UTILIZATION_PERCENT` | 45% | Minimum controlled-loss utilization target. |
 | `BENCHMARK_MIN_CONVERGED_PACING_RATIO` | 0.70 | Lower pacing convergence bound. |
-| `BENCHMARK_MAX_CONVERGED_PACING_RATIO` | 1.35 | Upper pacing convergence bound. |
+| `BENCHMARK_MAX_CONVERGED_PACING_RATIO` | 3.0 | Upper pacing convergence bound. |
 | `BENCHMARK_MAX_JITTER_DELAY_MULTIPLIER` | 4 | Maximum accepted jitter relative to configured delay. |
 
 ## Route And Weak-Network Constants

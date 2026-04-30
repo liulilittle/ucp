@@ -2107,6 +2107,23 @@ namespace UcpTest
             // Enable aggressive SACK recovery for lossy gigabit+ scenarios.
             config.EnableAggressiveSackRecovery = hasConfiguredLoss && bandwidthBytesPerSecond >= UcpConstants.BENCHMARK_1_GBPS_BYTES_PER_SECOND;
 
+            // Large benchmark objects must not become application-limited by the
+            // default 32 MB send buffer or the advertised receive window. Keep the
+            // whole payload admissible so measured throughput reflects protocol
+            // recovery and pacing, not caller-side backpressure.
+            int benchmarkBufferBytes = Math.Max(config.SendBufferSize, payloadBytes + (4 * config.Mss));
+            config.SendBufferSize = benchmarkBufferBytes;
+            config.ReceiveBufferSize = benchmarkBufferBytes;
+
+            if (hasConfiguredLoss)
+            {
+                // Random-loss benchmarks are explicitly repair-path tests. Enable
+                // enough systematic FEC to cover expected losses within each small
+                // group so packet loss does not force a full RTT/RTO stall.
+                config.FecGroupSize = 8;
+                config.FecRedundancy = lossRate >= UcpConstants.BENCHMARK_HEAVY_RANDOM_LOSS_RATE ? 0.50d : 0.25d;
+            }
+
             // Use larger MSS for high-bandwidth scenarios to reduce packet overhead.
             if (useHighBandwidthMss || bandwidthBytesPerSecond >= UcpConstants.BENCHMARK_1_GBPS_BYTES_PER_SECOND)
             {
@@ -2477,15 +2494,16 @@ namespace UcpTest
         /// <returns>Estimated convergence time in milliseconds.</returns>
         private static long EstimateConvergenceMilliseconds(UcpPerformanceReport report, int bandwidthBytesPerSecond, double elapsedSeconds)
         {
-            // If pacing rate never reached the convergence band, report 0 (did not converge).
+            // If pacing rate never reached the convergence band, report the full
+            // transfer duration instead of an impossible 0ms value.
             if (report.PacingRateBytesPerSecond < bandwidthBytesPerSecond * UcpConstants.BENCHMARK_MIN_CONVERGED_PACING_RATIO)
             {
-                return 0;
+                return Math.Max(1L, (long)Math.Ceiling(elapsedSeconds * UcpConstants.MICROS_PER_MILLI));
             }
 
             // Estimate convergence as the ratio of elapsed time scaled by how close pacing is to target.
             double ratio = report.PacingRateBytesPerSecond <= 0 ? 1d : Math.Min(1d, bandwidthBytesPerSecond / report.PacingRateBytesPerSecond);
-            return (long)Math.Ceiling(elapsedSeconds * ratio * UcpConstants.MICROS_PER_MILLI);
+            return Math.Max(1L, (long)Math.Ceiling(elapsedSeconds * ratio * UcpConstants.MICROS_PER_MILLI));
         }
 
         /// <summary>

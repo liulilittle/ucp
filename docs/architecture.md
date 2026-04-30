@@ -41,6 +41,7 @@ flowchart TD
 | `_receiveQueue` | Ordered payload chunks ready for application reads. |
 | `_missingSequenceCounts` | Gap observation count used by NAK generation. |
 | `_lastNakIssuedMicros` | Repeat suppression for receiver NAKs. |
+| `_fecFragmentMetadata` | Original fragment metadata for FEC-recovered DATA packets. |
 
 ## Ordered Delivery
 
@@ -75,7 +76,7 @@ The network classifier uses 200ms windows of RTT, jitter, loss, and throughput r
 
 ## Network Simulator
 
-`NetworkSimulator` is deterministic and in-process. It supports independent forward/reverse delay, per-direction jitter, bandwidth serialization, random/custom loss, duplication, and reordering. High-bandwidth no-loss scenarios use a virtual logical clock so OS scheduling does not inflate reported throughput.
+`NetworkSimulator` is deterministic and in-process. It supports independent forward/reverse delay, per-direction jitter, bandwidth serialization, random/custom loss, duplication, and reordering. High-bandwidth scenarios use a virtual logical clock so OS scheduling does not inflate or depress reported throughput; DATA retransmissions are deduplicated before throughput is calculated.
 
 ## Test Architecture
 

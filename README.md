@@ -37,7 +37,7 @@ await client.WriteAsync(data, 0, data.Length);
 
 | Layer | Capability |
 |---|---|
-| **Reliability** | Cumulative ACK + SACK blocks + NAK retransmission, fast retransmit, RTO timeout recovery, tail-loss probe |
+| **Reliability** | Cumulative ACK + SACK blocks + RTT-aware NAK, fast retransmit, RTO/PTO timeout recovery, tail-loss probe |
 | **Congestion Control** | BBRv1 with Startup → Drain → ProbeBW → ProbeRTT state machine, loss classifier (random vs congestion), adaptive pacing gain |
 | **Pacing** | Token-bucket rate limiter, configurable bucket duration, urgent retransmit bypass with bounded pacing debt |
 | **Network Classification** | Real-time `NetworkClass` detection (LowLatencyLAN, MobileUnstable, LossyLongFat, CongestedBottleneck, SymmetricVPN) wired into BBR gain decisions |
@@ -45,7 +45,7 @@ await client.WriteAsync(data, 0, data.Length);
 | **Fair Queue** | Per-connection credit-based scheduling on the server side |
 | **Strand Model** | Per-connection `SerialQueue` for lock-free serial protocol state mutation |
 | **Event Loop Driver** | `UcpNetwork.DoEvents()` drives timers, RTO, pacing delayed flushes, and FQ rounds deterministically |
-| **Simulation** | `NetworkSimulator` with configurable delay, jitter, dynamic wave skew, bandwidth serialization, selective drop rules |
+| **Simulation** | `NetworkSimulator` with configurable delay, jitter, dynamic wave skew, bandwidth serialization, selective drop rules, and high-bandwidth logical throughput accounting |
 
 ## Architecture
 
@@ -68,7 +68,8 @@ Transport                   UDP Socket
 ## Key Design Decisions
 
 - **Loss is not congestion.** Random packet loss triggers retransmission only — pacing gain and congestion window are NOT reduced unless RTT inflation, delivery-rate drop, and sustained elevated loss are all confirmed.
-- **QUIC-style loss detection.** SACK-based: first missing sequence requires 2 observations and a short RTT/8 reorder grace. Confirmed non-leading SACK holes can also be repaired in parallel, while receiver-side NAK keeps a 60ms reorder guard to avoid false retransmits on high-jitter paths.
+- **QUIC-style loss detection.** SACK-based: first missing sequence requires 2 observations and a short RTT/8 reorder grace. Confirmed non-leading SACK holes can also be repaired in parallel, while receiver-side NAK uses RTT-aware grace to avoid false retransmits on high-jitter paths.
+- **RTO is a last-resort repair path.** When ACKs are still arriving, UCP suppresses bulk RTO scans and lets SACK/NAK/FEC repair holes first. This avoids retransmission storms on high-BDP links.
 - **BBR over loss-based CC.** BBR probes bandwidth via delivery rate estimation rather than reacting to loss events. The loss classifier distinguishes random from congestion loss using deduplicated sliding windows and RTT median analysis.
 - **Jumbo MSS for high-bandwidth paths.** Benchmark scenarios ≥ 1 Gbps use 9000-byte MSS to avoid control-plane packet amplification (3500+ packets for 4 MB at 1220-byte MSS vs. ~470 at 9000-byte).
 
@@ -101,8 +102,8 @@ All tuning parameters live in `UcpConfiguration`. Call `UcpConfiguration.GetOpti
 | `ProbeRttDurationMicros` | 100,000 μs | BBR ProbeRTT minimum duration. |
 | `KeepAliveIntervalMicros` | 1,000,000 μs | Keep-alive interval (1 second). |
 | `DisconnectTimeoutMicros` | 4,000,000 μs | Idle disconnect timeout. |
-| `TimerIntervalMilliseconds` | 20 ms | Internal timer tick interval. |
-| `DelayedAckTimeoutMicros` | 2,000 μs | Delayed ACK coalescing timeout. Set to 0 to disable. |
+| `TimerIntervalMilliseconds` | 1 ms | Internal timer tick interval. |
+| `DelayedAckTimeoutMicros` | 500 μs | Delayed ACK coalescing timeout. Set to 0 to disable. |
 
 ### Pacing
 
@@ -115,10 +116,10 @@ All tuning parameters live in `UcpConfiguration`. Call `UcpConfiguration.GetOpti
 
 | Parameter | Default | Description |
 |---|---|---|
-| `StartupPacingGain` | 2.0 | BBR Startup pacing gain multiplier. |
+| `StartupPacingGain` | 2.5 | BBR Startup pacing gain multiplier. |
 | `StartupCwndGain` | 2.0 | BBR Startup congestion window gain. |
-| `DrainPacingGain` | 0.75 | BBR Drain pacing gain (reverts to 1.0 if no loss detected). |
-| `ProbeBwHighGain` | 1.25 | BBR ProbeBW up-phase gain. |
+| `DrainPacingGain` | 1.0 | BBR Drain pacing gain. |
+| `ProbeBwHighGain` | 1.35 | BBR ProbeBW up-phase gain. |
 | `ProbeBwLowGain` | 0.85 | BBR ProbeBW down-phase gain. |
 | `ProbeBwCwndGain` | 2.0 | BBR ProbeBW congestion window gain. |
 | `BbrWindowRtRounds` | 10 | BBR bandwidth filter window length in RTT rounds. |
@@ -149,7 +150,7 @@ All tuning parameters live in `UcpConfiguration`. Call `UcpConfiguration.GetOpti
 
 ## Benchmark Report
 
-Run `dotnet test ".\Ucp.Tests\UcpTest.csproj"` to execute all 52 tests and generate `reports/test_report.txt`.
+Run `dotnet test ".\Ucp.Tests\UcpTest.csproj"` to execute all 54 tests and generate `reports/test_report.txt`.
 
 Report columns distinguish transport behavior from network impairment:
 
@@ -160,6 +161,7 @@ Report columns distinguish transport behavior from network impairment:
 | `Loss%` | Simulator-observed data-packet loss before recovery. This is independent from retransmission overhead. |
 | `A->B ms` / `B->A ms` | Directional one-way propagation model. The benchmark matrix includes both forward-heavy and reverse-heavy routes, each with a 3-15ms direction gap. |
 | `CWND` / `RWND` | Congestion and receive windows rendered with adaptive units (`B`, `KB`, `MB`, `GB`). |
+| `Conv` | Convergence duration rendered as dynamic `us` / `ms` / `s`; zero-duration display is avoided. |
 
 Coverage:
 - **Bandwidths**: 4 Mbps → 10 Gbps

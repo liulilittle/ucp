@@ -25,6 +25,9 @@ namespace Ucp
             /// <summary>Slot index within the FEC group.</summary>
             public int Slot;
 
+            /// <summary>Sequence number of the original recovered data packet.</summary>
+            public uint SequenceNumber;
+
             /// <summary>Recovered payload bytes.</summary>
             public byte[] Payload;
         }
@@ -448,7 +451,7 @@ namespace Ucp
                 byte[] payload = new byte[missingLength];
                 Buffer.BlockCopy(rhs[i], 0, payload, 0, missingLength);
                 group[slot] = payload;
-                recoveredPackets.Add(new RecoveredPacket { Slot = slot, Payload = payload });
+                recoveredPackets.Add(new RecoveredPacket { Slot = slot, SequenceNumber = groupBase + (uint)slot, Payload = payload });
             }
 
             if (recoveredPackets.Count > 0)
