@@ -2140,17 +2140,12 @@ namespace UcpTest
 
             if (hasConfiguredLoss)
             {
-                // On high-RTT paths SACK recovery costs 2×RTT per hole.
-                // Heavy FEC trades bandwidth for eliminating retransmission
-                // stalls — net win only when loss rate is high enough.
-                bool isHighRtt = estimatedRttMicros >= UcpConstants.BENCHMARK_HIGH_RTT_FEC_THRESHOLD_MICROS;
+                // FEC repair adds bandwidth overhead. For bulk transfers where
+                // SACK handles losses concurrently, FEC is only a net win when
+                // loss rate is high enough to cause frequent RTO stalls.
                 config.FecGroupSize = 8;
-                config.FecRedundancy = isHighRtt && lossRate >= UcpConstants.BENCHMARK_HEAVY_RANDOM_LOSS_RATE ? 0.50d
-                    : isHighRtt && lossRate >= UcpConstants.BENCHMARK_MEDIUM_RANDOM_LOSS_RATE ? 0.25d
-                    : isHighRtt ? 0.125d
-                    : lossRate >= UcpConstants.BENCHMARK_VERY_HEAVY_RANDOM_LOSS_RATE ? UcpConstants.BENCHMARK_VERY_HEAVY_LOSS_FEC_REDUNDANCY
-                    : lossRate >= UcpConstants.BENCHMARK_HEAVY_RANDOM_LOSS_RATE ? 0.25d
-                    : lossRate >= UcpConstants.BENCHMARK_MEDIUM_RANDOM_LOSS_RATE ? 0.125d : 0d;
+                config.FecRedundancy = lossRate >= UcpConstants.BENCHMARK_VERY_HEAVY_RANDOM_LOSS_RATE
+                    ? UcpConstants.BENCHMARK_VERY_HEAVY_LOSS_FEC_REDUNDANCY : 0d;
             }
 
             // Calculate an appropriate initial CWND for this scenario.
@@ -2172,8 +2167,7 @@ namespace UcpTest
             }
             else if (hasConfiguredLoss && estimatedRttMicros > 0)
             {
-                // Allocate RTO budget for FEC repair when redundancy is active.
-                long fecRepairBudgetMicros = config.FecRedundancy > 0d ? estimatedRttMicros * 4L : estimatedRttMicros * 4L;
+                long fecRepairBudgetMicros = estimatedRttMicros * 2L;
                 config.MinRtoMicros = Math.Max(UcpConstants.DEFAULT_RTO_MICROS, fecRepairBudgetMicros);
             }
 

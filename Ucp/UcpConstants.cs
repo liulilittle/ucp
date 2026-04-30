@@ -90,7 +90,7 @@ namespace Ucp
         public const uint DEFAULT_RECV_WINDOW_BYTES = (uint)(DEFAULT_RECV_WINDOW_PACKETS * MSS);
 
         /// <summary>Initial congestion window packet count used by the optimized default configuration.</summary>
-        public const int INITIAL_CWND_PACKETS = 20;
+        public const int INITIAL_CWND_PACKETS = 256;
 
         /// <summary>Legacy initial congestion window in bytes retained for old tests and callers.</summary>
         public const int DEFAULT_INITIAL_CONGESTION_WINDOW = 4 * MSS;
@@ -166,8 +166,8 @@ namespace Ucp
         /// <summary>Previous RTT variance numerator when using a 1/4 sample weight.</summary>
         public const int RTT_VAR_PREVIOUS_WEIGHT = RTT_VAR_DENOM - 1;
 
-        /// <summary>RTT variance multiplier used when calculating RTO.</summary>
-        public const int RTO_GAIN_MULTIPLIER = 4;
+        /// <summary>RTT variance multiplier used when calculating RTO (SRTT + 2*RTTVAR for tighter recovery).</summary>
+        public const int RTO_GAIN_MULTIPLIER = 2;
 
         /// <summary>Maximum accepted RTT sample multiplier relative to the current RTO during recovery.</summary>
         public const double RTT_RECOVERY_SAMPLE_MAX_RTO_MULTIPLIER = 4.0d;
@@ -243,8 +243,8 @@ namespace Ucp
         /// <summary>Recent loss ratio below which pacing is gently reduced.</summary>
         public const double BBR_MEDIUM_LOSS_RATIO = 0.15d;
 
-        /// <summary>BBR moderate probing gain used under low loss (1.25x).</summary>
-        public const double BBR_MODERATE_PROBE_GAIN = 1.25d;
+        /// <summary>BBR moderate probing gain used under low loss (1.45x for aggressive mobile probing).</summary>
+        public const double BBR_MODERATE_PROBE_GAIN = 1.45d;
 
         /// <summary>BBR target-maintaining gain under light loss (1.10x).</summary>
         public const double BBR_LIGHT_LOSS_PACING_GAIN = 1.10d;
@@ -268,7 +268,7 @@ namespace Ucp
         public const double BBR_MIN_LOSS_CWND_GAIN = 0.95d;
 
         /// <summary>Congestion window gain recovery step per ACK.</summary>
-        public const double BBR_LOSS_CWND_RECOVERY_STEP = 0.04d;
+        public const double BBR_LOSS_CWND_RECOVERY_STEP = 0.08d;
 
         /// <summary>Loss budget headroom below which probing may become more aggressive again.</summary>
         public const double BBR_LOSS_BUDGET_RECOVERY_RATIO = 0.80d;
@@ -315,8 +315,8 @@ namespace Ucp
         /// <summary>Maximum bottleneck-bandwidth growth per RTT after Startup (1.25x).</summary>
         public const double BBR_STEADY_BANDWIDTH_GROWTH_PER_ROUND = 1.25d;
 
-        /// <summary>RTT multiplier above which a loss signal is eligible for congestion classification.</summary>
-        public const double BBR_CONGESTION_LOSS_RTT_MULTIPLIER = 1.10d;
+        /// <summary>RTT multiplier above which a loss signal is eligible for congestion classification (1.50x to tolerate jitter).</summary>
+        public const double BBR_CONGESTION_LOSS_RTT_MULTIPLIER = 1.50d;
 
         /// <summary>Deduplicated loss events at or below this count are treated as random in one loss window.</summary>
         public const int BBR_RANDOM_LOSS_MAX_DEDUPED_EVENTS = 2;
@@ -337,13 +337,13 @@ namespace Ucp
         public const double BBR_INFLIGHT_HIGH_GAIN = 4.00d;
 
         /// <summary>RTT growth required before loss-driven delivery drops are classified as congestion.</summary>
-        public const double BBR_CONGESTION_RTT_INCREASE_RATIO = 0.50d;
+        public const double BBR_CONGESTION_RTT_INCREASE_RATIO = 0.80d;
 
         /// <summary>Recent loss ratio required before loss-driven delivery drops are classified as congestion.</summary>
         public const double BBR_CONGESTION_LOSS_RATIO = 0.10d;
 
-        /// <summary>Maximum RTT cushion multiplier used by CWND on non-congested lossy paths.</summary>
-        public const double BBR_RANDOM_LOSS_CWND_RTT_CUSHION = 4.0d;
+        /// <summary>Maximum RTT cushion multiplier used by CWND on non-congested lossy paths (8.0x for weak-link throughput).</summary>
+        public const double BBR_RANDOM_LOSS_CWND_RTT_CUSHION = 8.0d;
 
         /// <summary>Delivery-rate sample history length used by the lightweight classifier.</summary>
         public const int BBR_DELIVERY_RATE_HISTORY_COUNT = 5;
