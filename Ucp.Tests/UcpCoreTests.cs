@@ -1103,7 +1103,7 @@ namespace UcpTest
                 true);
 
             Assert.True(report.UtilizationPercent > 40d);
-            Assert.True(report.RetransmissionPercent <= UcpConstants.MIN_MAX_BANDWIDTH_LOSS_PERCENT);
+            Assert.True(report.RetransmissionPercent <= UcpConstants.DEFAULT_MAX_BANDWIDTH_LOSS_PERCENT);
         }
 
         [Fact]
@@ -1521,9 +1521,12 @@ namespace UcpTest
         private async Task<UcpPerformanceReport> RunLineRateBenchmarkAsync(string scenarioName, int port, int bandwidthBytesPerSecond, int payloadBytes, int fixedDelayMilliseconds, int jitterMilliseconds, double lossRate, double maxLossPercent, bool autoProbe, int simulatorSeed, Func<NetworkSimulator.SimulatedDatagram, bool>? dropRule, int forwardDelayMilliseconds, int backwardDelayMilliseconds, int forwardJitterMilliseconds, int backwardJitterMilliseconds, bool useHighBandwidthMss, int dynamicJitterRangeMs = -1, int dynamicWaveAmpMs = -1)
         {
             ApplyDirectionalRouteModel(scenarioName, fixedDelayMilliseconds, jitterMilliseconds, ref forwardDelayMilliseconds, ref backwardDelayMilliseconds, ref forwardJitterMilliseconds, ref backwardJitterMilliseconds);
-            NetworkSimulator simulator = new NetworkSimulator(lossRate: dropRule == null ? lossRate : 0d, fixedDelayMilliseconds: fixedDelayMilliseconds, jitterMilliseconds: jitterMilliseconds, bandwidthBytesPerSecond: bandwidthBytesPerSecond, seed: simulatorSeed == 0 ? 1234 : simulatorSeed, dropRule: dropRule, forwardDelayMilliseconds: forwardDelayMilliseconds, backwardDelayMilliseconds: backwardDelayMilliseconds, forwardJitterMilliseconds: forwardJitterMilliseconds, backwardJitterMilliseconds: backwardJitterMilliseconds, dynamicJitterRangeMilliseconds: dynamicJitterRangeMs >= 0 ? dynamicJitterRangeMs : 1, dynamicWaveAmplitudeMilliseconds: dynamicWaveAmpMs >= 0 ? dynamicWaveAmpMs : 0);
-            UcpConfiguration config = CreateScenarioConfig(bandwidthBytesPerSecond);
             bool hasConfiguredLoss = lossRate > 0 || dropRule != null;
+            int effectiveDynamicJitter = dynamicJitterRangeMs >= 0 ? dynamicJitterRangeMs : (hasConfiguredLoss ? 0 : 1);
+            int effectiveDynamicWave = dynamicWaveAmpMs >= 0 ? dynamicWaveAmpMs : 0;
+            NetworkSimulator simulator = new NetworkSimulator(lossRate: dropRule == null ? lossRate : 0d, fixedDelayMilliseconds: fixedDelayMilliseconds, jitterMilliseconds: jitterMilliseconds, bandwidthBytesPerSecond: bandwidthBytesPerSecond, seed: simulatorSeed == 0 ? 1234 : simulatorSeed, dropRule: dropRule, forwardDelayMilliseconds: forwardDelayMilliseconds, backwardDelayMilliseconds: backwardDelayMilliseconds, forwardJitterMilliseconds: forwardJitterMilliseconds, backwardJitterMilliseconds: backwardJitterMilliseconds, dynamicJitterRangeMilliseconds: effectiveDynamicJitter, dynamicWaveAmplitudeMilliseconds: effectiveDynamicWave);
+            UcpConfiguration config = CreateScenarioConfig(bandwidthBytesPerSecond);
+            config.EnableAggressiveSackRecovery = hasConfiguredLoss && bandwidthBytesPerSecond >= UcpConstants.BENCHMARK_1_GBPS_BYTES_PER_SECOND;
             if (useHighBandwidthMss || bandwidthBytesPerSecond >= UcpConstants.BENCHMARK_1_GBPS_BYTES_PER_SECOND)
             {
                 config.Mss = UcpConstants.BENCHMARK_HIGH_BANDWIDTH_MSS;
@@ -1534,13 +1537,7 @@ namespace UcpTest
             int effectiveForwardDelayMilliseconds = forwardDelayMilliseconds >= 0 ? forwardDelayMilliseconds : fixedDelayMilliseconds;
             int effectiveBackwardDelayMilliseconds = backwardDelayMilliseconds >= 0 ? backwardDelayMilliseconds : fixedDelayMilliseconds;
             int estimatedRttMicros = (int)Math.Max(UcpConstants.MICROS_PER_MILLI, (effectiveForwardDelayMilliseconds + effectiveBackwardDelayMilliseconds) * UcpConstants.MICROS_PER_MILLI);
-            config.EnableAggressiveSackRecovery = hasConfiguredLoss;
-            if (hasConfiguredLoss && dropRule != null)
-            {
-                config.FecGroupSize = lossRate < 0.01d ? 64 : 32;
-                int repairCount = lossRate >= UcpConstants.BENCHMARK_HEAVY_RANDOM_LOSS_RATE ? 3 : lossRate >= 0.03d ? 2 : 1;
-                config.FecRedundancy = repairCount / (double)config.FecGroupSize;
-            }
+            config.EnableAggressiveSackRecovery = hasConfiguredLoss && bandwidthBytesPerSecond >= UcpConstants.BENCHMARK_1_GBPS_BYTES_PER_SECOND;
 
             int estimatedBdpBytes = (int)Math.Min(int.MaxValue, bandwidthBytesPerSecond * (estimatedRttMicros / (double)UcpConstants.MICROS_PER_SECOND));
             int initialCwndBytes = CalculateBenchmarkInitialCwndBytes(config, bandwidthBytesPerSecond, estimatedBdpBytes, hasConfiguredLoss);

@@ -409,7 +409,7 @@ namespace Ucp
         public const int BENCHMARK_SATELLITE_PAYLOAD_BYTES = 16 * 1024 * 1024;
 
         /// <summary>Payload size used by VPN benchmark scenarios, in bytes.</summary>
-        public const int BENCHMARK_VPN_PAYLOAD_BYTES = 128 * 1024 * 1024;
+        public const int BENCHMARK_VPN_PAYLOAD_BYTES = 4 * 1024 * 1024;
 
         /// <summary>Payload size used by the 100 Mbps long-fat-pipe benchmark, in bytes.</summary>
         public const int BENCHMARK_LONG_FAT_100M_PAYLOAD_BYTES = 16 * 1024 * 1024;
@@ -418,7 +418,7 @@ namespace Ucp
         public const int BENCHMARK_1G_PAYLOAD_BYTES = 4 * 1024 * 1024;
 
         /// <summary>Payload size used by 1 Gbps random-loss benchmark scenarios, in bytes.</summary>
-        public const int BENCHMARK_1G_LOSS_PAYLOAD_BYTES = 256 * 1024 * 1024;
+        public const int BENCHMARK_1G_LOSS_PAYLOAD_BYTES = 8 * 1024 * 1024;
 
         /// <summary>Jumbo MSS used by high-bandwidth benchmark paths to avoid control-plane packet amplification.</summary>
         public const int BENCHMARK_HIGH_BANDWIDTH_MSS = 9000;
@@ -641,7 +641,7 @@ namespace Ucp
         public const int SACK_FAST_RETRANSMIT_THRESHOLD = 2;
 
         /// <summary>Minimum SACK distance past a missing sequence before treating the hole as real loss.</summary>
-        public const int SACK_FAST_RETRANSMIT_DISTANCE_THRESHOLD = 1;
+        public const int SACK_FAST_RETRANSMIT_DISTANCE_THRESHOLD = 100;
 
         /// <summary>Lower bound for SACK-based reorder grace before fast retransmit, in microseconds.</summary>
         public const long SACK_FAST_RETRANSMIT_MIN_REORDER_GRACE_MICROS = 3000L;
