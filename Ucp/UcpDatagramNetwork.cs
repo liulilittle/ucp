@@ -7,45 +7,83 @@ using System.Threading.Tasks;
 namespace Ucp
 {
     /// <summary>
-    /// UDP socket based network implementation. The receive loop only injects datagrams
-    /// into Input; protocol progress is still driven by DoEvents.
+    /// UDP socket-based network implementation for UCP. Runs a background
+    /// receive loop that injects datagrams via <c>Input()</c>, sends encoded
+    /// packets via <c>Output()</c>, and delegates protocol progress to the
+    /// base <c>DoEvents()</c> event loop.
     /// </summary>
     public sealed class UcpDatagramNetwork : UcpNetwork
     {
+        /// <summary>Synchronization lock for socket lifecycle operations.</summary>
         private readonly object _sync = new object();
+
+        /// <summary>Underlying UDP client socket.</summary>
         private UdpClient _udpClient;
+
+        /// <summary>Cancellation token to stop the receive loop.</summary>
         private CancellationTokenSource _cts;
+
+        /// <summary>Background receive loop task.</summary>
         private Task _receiveLoopTask;
+
+        /// <summary>Whether this instance has been disposed.</summary>
         private bool _disposed;
 
+        /// <summary>
+        /// Creates an unstarted UcpDatagramNetwork with default configuration.
+        /// </summary>
         public UcpDatagramNetwork()
             : base(new UcpConfiguration())
         {
         }
 
+        /// <summary>
+        /// Creates and immediately starts a UcpDatagramNetwork on the given port.
+        /// </summary>
+        /// <param name="port">The local port to bind.</param>
         public UcpDatagramNetwork(int port)
             : base(new UcpConfiguration())
         {
             Start(port);
         }
 
+        /// <summary>
+        /// Creates and immediately starts a UcpDatagramNetwork on the given
+        /// address and port.
+        /// </summary>
+        /// <param name="localAddress">The local IP address to bind.</param>
+        /// <param name="port">The local port to bind.</param>
         public UcpDatagramNetwork(IPAddress localAddress, int port)
             : base(new UcpConfiguration())
         {
             Start(localAddress, port);
         }
 
+        /// <summary>
+        /// Creates an unstarted UcpDatagramNetwork with the given configuration.
+        /// </summary>
+        /// <param name="configuration">Protocol configuration.</param>
         public UcpDatagramNetwork(UcpConfiguration configuration)
             : base(configuration)
         {
         }
 
+        /// <summary>
+        /// Creates and immediately starts a UcpDatagramNetwork on the given
+        /// address and port with the given configuration.
+        /// </summary>
+        /// <param name="localAddress">The local IP address to bind.</param>
+        /// <param name="port">The local port to bind.</param>
+        /// <param name="configuration">Protocol configuration.</param>
         public UcpDatagramNetwork(IPAddress localAddress, int port, UcpConfiguration configuration)
             : base(configuration)
         {
             Start(localAddress, port);
         }
 
+        /// <summary>
+        /// Gets the local endpoint of the bound UDP socket.
+        /// </summary>
         public override EndPoint LocalEndPoint
         {
             get
@@ -57,11 +95,20 @@ namespace Ucp
             }
         }
 
+        /// <summary>
+        /// Starts the UDP socket on the given port, binding to all interfaces.
+        /// </summary>
+        /// <param name="port">The local port to bind.</param>
         public override void Start(int port)
         {
             Start(IPAddress.Any, port);
         }
 
+        /// <summary>
+        /// Starts the UDP socket on the given local address and port.
+        /// </summary>
+        /// <param name="localAddress">The local IP address.</param>
+        /// <param name="port">The local port.</param>
         public void Start(IPAddress localAddress, int port)
         {
             lock (_sync)
@@ -73,7 +120,7 @@ namespace Ucp
 
                 if (_udpClient != null)
                 {
-                    return;
+                    return; // Already started.
                 }
 
                 _udpClient = new UdpClient(new IPEndPoint(localAddress ?? IPAddress.Any, port));
@@ -82,6 +129,9 @@ namespace Ucp
             }
         }
 
+        /// <summary>
+        /// Stops the receive loop and disposes the UDP client.
+        /// </summary>
         public override void Stop()
         {
             UdpClient client = null;
@@ -107,6 +157,13 @@ namespace Ucp
             }
         }
 
+        /// <summary>
+        /// Sends an encoded datagram to the specified remote endpoint via UDP.
+        /// Lazy-starts the socket if not yet bound.
+        /// </summary>
+        /// <param name="datagram">The encoded packet bytes.</param>
+        /// <param name="remote">The destination endpoint.</param>
+        /// <param name="sender">The sending object (unused for direct UDP).</param>
         public override void Output(byte[] datagram, IPEndPoint remote, IUcpObject sender)
         {
             if (datagram == null)
@@ -129,7 +186,7 @@ namespace Ucp
 
                 if (_udpClient == null)
                 {
-                    Start(0);
+                    Start(0); // Lazy-start with OS-assigned port.
                 }
 
                 client = _udpClient;
@@ -138,6 +195,9 @@ namespace Ucp
             client.Send(datagram, datagram.Length, remote);
         }
 
+        /// <summary>
+        /// Disposes the network: stops the receive loop and releases resources.
+        /// </summary>
         public override void Dispose()
         {
             lock (_sync)
@@ -153,6 +213,10 @@ namespace Ucp
             base.Dispose();
         }
 
+        /// <summary>
+        /// Continuously receives UDP datagrams and injects them via Input()
+        /// until cancelled or the socket is disposed.
+        /// </summary>
         private async Task ReceiveLoopAsync()
         {
             while (true)
@@ -177,17 +241,19 @@ namespace Ucp
                 }
                 catch (ObjectDisposedException)
                 {
-                    break;
+                    break; // Socket disposed; exit gracefully.
                 }
                 catch (SocketException)
                 {
                     if (cancellation.IsCancellationRequested)
                     {
-                        break;
+                        break; // Cancelled; exit gracefully.
                     }
+                    // Otherwise transient socket error, continue.
                 }
                 catch
                 {
+                    // Swallow unexpected exceptions to keep the loop alive.
                 }
             }
         }

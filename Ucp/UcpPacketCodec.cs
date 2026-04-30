@@ -3,14 +3,19 @@ using System;
 namespace Ucp
 {
     /// <summary>
-    /// Encodes and decodes protocol packets in big-endian byte order.
-    /// </summary>
-    /// <summary>
     /// Encodes and decodes UCP protocol packets in big-endian byte order.
     /// Supports all packet types: Data, Ack, Nak, FecRepair, Control (Syn/SynAck/Fin/Rst).
     /// </summary>
     internal static class UcpPacketCodec
     {
+        /// <summary>
+        /// Encodes a UcpPacket into its big-endian wire format.
+        /// Dispatches to the appropriate type-specific encoder.
+        /// </summary>
+        /// <param name="packet">The packet to encode.</param>
+        /// <returns>Big-endian encoded byte array.</returns>
+        /// <exception cref="ArgumentNullException">Thrown if packet is null.</exception>
+        /// <exception cref="NotSupportedException">Thrown if packet type is unknown.</exception>
         public static byte[] Encode(UcpPacket packet)
         {
             if (packet == null)
@@ -46,6 +51,16 @@ namespace Ucp
             throw new NotSupportedException("Unknown UCP packet type.");
         }
 
+        /// <summary>
+        /// Attempts to decode a buffer into a typed UcpPacket.
+        /// Returns false if the buffer is too short, the common header is invalid,
+        /// or the packet type is unrecognized.
+        /// </summary>
+        /// <param name="buffer">The byte buffer containing encoded packet data.</param>
+        /// <param name="offset">Offset into the buffer where packet data starts.</param>
+        /// <param name="count">Number of bytes available from offset.</param>
+        /// <param name="packet">The decoded packet, or null if decoding failed.</param>
+        /// <returns>True if a packet was successfully decoded.</returns>
         public static bool TryDecode(byte[] buffer, int offset, int count, out UcpPacket packet)
         {
             packet = null;
@@ -74,6 +89,7 @@ namespace Ucp
                 case UcpPacketType.SynAck:
                 case UcpPacketType.Fin:
                 case UcpPacketType.Rst:
+                    // Control packets are fixed-size after the common header.
                     UcpControlPacket control = new UcpControlPacket();
                     control.Header = header;
                     if (count >= UcpConstants.CommonHeaderSize + UcpConstants.SEQUENCE_NUMBER_SIZE)
@@ -89,6 +105,10 @@ namespace Ucp
             }
         }
 
+        /// <summary>
+        /// Encodes a control packet (Syn, SynAck, Fin, Rst).
+        /// Optionally includes a sequence number for handshake packets.
+        /// </summary>
         private static byte[] EncodeControl(UcpControlPacket packet)
         {
             int size = packet.HasSequenceNumber ? UcpConstants.CommonHeaderSize + UcpConstants.SEQUENCE_NUMBER_SIZE : UcpConstants.CommonHeaderSize;
@@ -102,6 +122,9 @@ namespace Ucp
             return bytes;
         }
 
+        /// <summary>
+        /// Encodes a data packet: common header, sequence number, fragment info, payload.
+        /// </summary>
         private static byte[] EncodeData(UcpDataPacket packet)
         {
             int payloadLength = packet.Payload == null ? 0 : packet.Payload.Length;
@@ -124,12 +147,15 @@ namespace Ucp
             return bytes;
         }
 
+        /// <summary>
+        /// Encodes an ACK packet: common header, ack number, SACK blocks, window size, echo timestamp.
+        /// </summary>
         private static byte[] EncodeAck(UcpAckPacket packet)
         {
             int blockCount = packet.SackBlocks == null ? 0 : packet.SackBlocks.Count;
             if (blockCount > UcpConstants.MaxAckSackBlocks)
             {
-                blockCount = UcpConstants.MaxAckSackBlocks;
+                blockCount = UcpConstants.MaxAckSackBlocks; // Truncate to MSS limit.
             }
 
             byte[] bytes = new byte[UcpConstants.AckFixedSize + (blockCount * UcpConstants.SACK_BLOCK_SIZE)];
@@ -156,6 +182,9 @@ namespace Ucp
             return bytes;
         }
 
+        /// <summary>
+        /// Encodes a NAK packet: common header, count of missing sequences, and the sequence numbers.
+        /// </summary>
         private static byte[] EncodeNak(UcpNakPacket packet)
         {
             int count = packet.MissingSequences == null ? 0 : packet.MissingSequences.Count;
@@ -175,6 +204,9 @@ namespace Ucp
             return bytes;
         }
 
+        /// <summary>
+        /// Decodes a buffer into a UcpDataPacket with its payload.
+        /// </summary>
         private static bool TryDecodeData(byte[] buffer, int offset, int count, UcpCommonHeader header, out UcpPacket packet)
         {
             packet = null;
@@ -204,6 +236,9 @@ namespace Ucp
             return true;
         }
 
+        /// <summary>
+        /// Decodes a buffer into a UcpAckPacket with its SACK blocks, window, and echo timestamp.
+        /// </summary>
         private static bool TryDecodeAck(byte[] buffer, int offset, int count, UcpCommonHeader header, out UcpPacket packet)
         {
             packet = null;
@@ -243,6 +278,9 @@ namespace Ucp
             return true;
         }
 
+        /// <summary>
+        /// Decodes a buffer into a UcpNakPacket with its missing sequence list.
+        /// </summary>
         private static bool TryDecodeNak(byte[] buffer, int offset, int count, UcpCommonHeader header, out UcpPacket packet)
         {
             packet = null;
@@ -272,6 +310,10 @@ namespace Ucp
             return true;
         }
 
+        /// <summary>
+        /// Reads the 12-byte common header: Type, Flags, ConnectionId (uint32),
+        /// and Timestamp (uint48).
+        /// </summary>
         private static bool TryReadCommonHeader(byte[] buffer, int offset, int count, out UcpCommonHeader header)
         {
             header = new UcpCommonHeader();
@@ -287,6 +329,10 @@ namespace Ucp
             return true;
         }
 
+        /// <summary>
+        /// Writes the 12-byte common header: Type, Flags, ConnectionId (uint32),
+        /// and Timestamp (uint48).
+        /// </summary>
         private static void WriteCommonHeader(UcpCommonHeader header, byte[] buffer, int offset)
         {
             buffer[offset] = (byte)header.Type;
@@ -295,17 +341,26 @@ namespace Ucp
             WriteUInt48(header.Timestamp, buffer, offset + UcpConstants.PACKET_TYPE_FIELD_SIZE + UcpConstants.PACKET_FLAGS_FIELD_SIZE + UcpConstants.CONNECTION_ID_SIZE);
         }
 
+        /// <summary>
+        /// Writes a 16-bit unsigned integer in big-endian order.
+        /// </summary>
         private static void WriteUInt16(ushort value, byte[] buffer, int offset)
         {
             buffer[offset] = (byte)(value >> UcpConstants.BYTE_BITS);
             buffer[offset + 1] = (byte)value;
         }
 
+        /// <summary>
+        /// Reads a 16-bit unsigned integer in big-endian order.
+        /// </summary>
         private static ushort ReadUInt16(byte[] buffer, int offset)
         {
             return (ushort)((buffer[offset] << UcpConstants.BYTE_BITS) | buffer[offset + 1]);
         }
 
+        /// <summary>
+        /// Writes a 32-bit unsigned integer in big-endian order.
+        /// </summary>
         private static void WriteUInt32(uint value, byte[] buffer, int offset)
         {
             buffer[offset] = (byte)(value >> UcpConstants.UINT24_BITS);
@@ -314,6 +369,9 @@ namespace Ucp
             buffer[offset + 3] = (byte)value;
         }
 
+        /// <summary>
+        /// Reads a 32-bit unsigned integer in big-endian order.
+        /// </summary>
         private static uint ReadUInt32(byte[] buffer, int offset)
         {
             return ((uint)buffer[offset] << UcpConstants.UINT24_BITS)
@@ -322,6 +380,10 @@ namespace Ucp
                 | buffer[offset + 3];
         }
 
+        /// <summary>
+        /// Writes a 48-bit unsigned integer in big-endian order (stores as 6 bytes).
+        /// The value is masked to 48 bits before encoding.
+        /// </summary>
         private static void WriteUInt48(long value, byte[] buffer, int offset)
         {
             ulong normalized = (ulong)value & UcpConstants.UINT48_MASK;
@@ -333,6 +395,10 @@ namespace Ucp
             buffer[offset + 5] = (byte)normalized;
         }
 
+        /// <summary>
+        /// Reads a 48-bit unsigned integer in big-endian order.
+        /// Returns as a signed long with the value in the low 48 bits.
+        /// </summary>
         private static long ReadUInt48(byte[] buffer, int offset)
         {
             ulong value = ((ulong)buffer[offset] << UcpConstants.UINT40_BITS)
@@ -344,6 +410,9 @@ namespace Ucp
             return (long)value;
         }
 
+        /// <summary>
+        /// Encodes a FEC repair packet: common header, group ID, group index, parity payload.
+        /// </summary>
         private static byte[] EncodeFecRepair(UcpFecRepairPacket packet)
         {
             int payloadLen = packet.Payload == null ? 0 : packet.Payload.Length;
@@ -359,6 +428,9 @@ namespace Ucp
             return bytes;
         }
 
+        /// <summary>
+        /// Decodes a buffer into a UcpFecRepairPacket with its parity payload.
+        /// </summary>
         private static bool TryDecodeFecRepair(byte[] buffer, int offset, int count, UcpCommonHeader header, out UcpPacket packet)
         {
             packet = null;

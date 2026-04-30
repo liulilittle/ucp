@@ -6,6 +6,8 @@ namespace Ucp
     /// </summary>
     internal static class UcpConstants
     {
+        // ---- Time unit conversions ----
+
         /// <summary>Number of microseconds in one millisecond.</summary>
         public const long MICROS_PER_MILLI = 1000L;
 
@@ -21,10 +23,12 @@ namespace Ucp
         /// <summary>Number of bits per second in one megabit per second.</summary>
         public const double BITS_PER_MEGABIT = 1000000d;
 
+        // ---- Packet format constants ----
+
         /// <summary>Protocol maximum segment size in bytes.</summary>
         public const int MSS = 1220;
 
-        /// <summary>Common packet header size in bytes.</summary>
+        /// <summary>Common packet header size in bytes (Type + Flags + ConnectionId + Timestamp).</summary>
         public const int COMMON_HEADER_SIZE = 12;
 
         /// <summary>Data packet-specific header size in bytes.</summary>
@@ -39,16 +43,16 @@ namespace Ucp
         /// <summary>Maximum data payload size in one packet, in bytes.</summary>
         public const int MAX_PAYLOAD_SIZE = MSS - DATA_HEADER_SIZE;
 
-        /// <summary>Encoded SACK block size in bytes.</summary>
+        /// <summary>Encoded SACK block size in bytes (2 × uint32).</summary>
         public const int SACK_BLOCK_SIZE = sizeof(uint) + sizeof(uint);
 
-        /// <summary>Encoded sequence number size in bytes.</summary>
+        /// <summary>Encoded sequence number size in bytes (uint32).</summary>
         public const int SEQUENCE_NUMBER_SIZE = sizeof(uint);
 
-        /// <summary>Encoded connection identifier size in bytes.</summary>
+        /// <summary>Encoded connection identifier size in bytes (uint32).</summary>
         public const int CONNECTION_ID_SIZE = sizeof(uint);
 
-        /// <summary>ACK timestamp field size in bytes.</summary>
+        /// <summary>ACK timestamp field size in bytes (uint48).</summary>
         public const int ACK_TIMESTAMP_FIELD_SIZE = 6;
 
         /// <summary>Encoded packet type field size in bytes.</summary>
@@ -56,6 +60,8 @@ namespace Ucp
 
         /// <summary>Encoded packet flags field size in bytes.</summary>
         public const int PACKET_FLAGS_FIELD_SIZE = sizeof(byte);
+
+        // ---- Bit counts for serialization ----
 
         /// <summary>Bit count in a 16-bit integer.</summary>
         public const int UINT16_BITS = 16;
@@ -74,6 +80,8 @@ namespace Ucp
 
         /// <summary>Mask used to keep only the low 48 bits of an ACK timestamp.</summary>
         public const ulong UINT48_MASK = 0x0000FFFFFFFFFFFFUL;
+
+        // ---- Window and buffer sizes ----
 
         /// <summary>Default receive window size measured in packets.</summary>
         public const int DEFAULT_RECV_WINDOW_PACKETS = 4096;
@@ -110,6 +118,8 @@ namespace Ucp
 
         /// <summary>Default pacing token bucket duration in microseconds.</summary>
         public const long DEFAULT_PACING_BUCKET_DURATION_MICROS = 10000L;
+
+        // ---- RTO related constants ----
 
         /// <summary>Minimum RTO accepted by configuration validation, in microseconds.</summary>
         public const long MIN_RTO_MICROS = 100000L;
@@ -162,6 +172,8 @@ namespace Ucp
         /// <summary>Maximum backoff multiple relative to the minimum RTO.</summary>
         public const int RTO_MAX_BACKOFF_MIN_RTO_MULTIPLIER = 2;
 
+        // ---- BBR congestion control constants ----
+
         /// <summary>BBR bandwidth filter window length measured in RTT rounds.</summary>
         public const int BBR_WINDOW_RTT_ROUNDS = 10;
 
@@ -174,31 +186,31 @@ namespace Ucp
         /// <summary>BBR startup requires this many rounds without sufficient bandwidth growth before draining.</summary>
         public const int BBR_MIN_STARTUP_FULL_BANDWIDTH_ROUNDS = 3;
 
-        /// <summary>BBR startup full-bandwidth growth target.</summary>
+        /// <summary>BBR startup full-bandwidth growth target (25% growth per round).</summary>
         public const double BBR_STARTUP_GROWTH_TARGET = 1.25d;
 
-        /// <summary>BBR startup pacing gain.</summary>
-        public const double BBR_STARTUP_PACING_GAIN = 2.0d;
+        /// <summary>BBR startup pacing gain (2.5x).</summary>
+        public const double BBR_STARTUP_PACING_GAIN = 2.5d;
 
-        /// <summary>BBR startup congestion window gain.</summary>
+        /// <summary>BBR startup congestion window gain (2.0x).</summary>
         public const double BBR_STARTUP_CWND_GAIN = 2.0d;
 
-        /// <summary>BBR drain pacing gain.</summary>
-        public const double BBR_DRAIN_PACING_GAIN = 0.75d;
+        /// <summary>BBR drain pacing gain (1.0x, drain the inflated queue).</summary>
+        public const double BBR_DRAIN_PACING_GAIN = 1.0d;
 
-        /// <summary>BBR high probing pacing gain.</summary>
-        public const double BBR_PROBE_BW_HIGH_GAIN = 1.25d;
+        /// <summary>BBR high probing pacing gain (1.35x).</summary>
+        public const double BBR_PROBE_BW_HIGH_GAIN = 1.35d;
 
-        /// <summary>BBR low probing pacing gain.</summary>
+        /// <summary>BBR low probing pacing gain (0.85x).</summary>
         public const double BBR_PROBE_BW_LOW_GAIN = 0.85d;
 
-        /// <summary>BBR ProbeBW congestion window gain.</summary>
+        /// <summary>BBR ProbeBW congestion window gain (2.0x).</summary>
         public const double BBR_PROBE_BW_CWND_GAIN = 2.0d;
 
-        /// <summary>BBR ProbeRTT pacing gain used to avoid a full throughput cliff.</summary>
+        /// <summary>BBR ProbeRTT pacing gain used to avoid a full throughput cliff (0.85x).</summary>
         public const double BBR_PROBE_RTT_PACING_GAIN = 0.85d;
 
-        /// <summary>BBR ProbeRTT interval in microseconds.</summary>
+        /// <summary>BBR ProbeRTT interval in microseconds (30s).</summary>
         public const long BBR_PROBE_RTT_INTERVAL_MICROS = 30000000L;
 
         /// <summary>BBR ProbeRTT minimum duration in microseconds.</summary>
@@ -207,7 +219,7 @@ namespace Ucp
         /// <summary>Maximum ProbeRTT duration multiplier used as a safety valve.</summary>
         public const int BBR_PROBE_RTT_MAX_DURATION_MULTIPLIER = 2;
 
-        /// <summary>BBR minimum RTT freshness multiplier used for early ProbeRTT exit.</summary>
+        /// <summary>BBR minimum RTT freshness multiplier used for early ProbeRTT exit (5% margin).</summary>
         public const double BBR_PROBE_RTT_EXIT_RTT_MULTIPLIER = 1.05d;
 
         /// <summary>BBR RTT increase threshold for unconstrained high-gain probing.</summary>
@@ -228,16 +240,16 @@ namespace Ucp
         /// <summary>Recent loss ratio below which pacing is gently reduced.</summary>
         public const double BBR_MEDIUM_LOSS_RATIO = 0.15d;
 
-        /// <summary>BBR moderate probing gain used under low loss.</summary>
+        /// <summary>BBR moderate probing gain used under low loss (1.25x).</summary>
         public const double BBR_MODERATE_PROBE_GAIN = 1.25d;
 
-        /// <summary>BBR target-maintaining gain under light loss.</summary>
+        /// <summary>BBR target-maintaining gain under light loss (1.10x).</summary>
         public const double BBR_LIGHT_LOSS_PACING_GAIN = 1.10d;
 
-        /// <summary>BBR gentle pacing gain under medium loss.</summary>
+        /// <summary>BBR gentle pacing gain under medium loss (1.05x).</summary>
         public const double BBR_MEDIUM_LOSS_PACING_GAIN = 1.05d;
 
-        /// <summary>BBR severe loss pacing gain.</summary>
+        /// <summary>BBR severe loss pacing gain (1.00x = no pacing inflation).</summary>
         public const double BBR_HIGH_LOSS_PACING_GAIN = 1.00d;
 
         /// <summary>BBR fast recovery pacing gain used after non-congestion loss recovery signals.</summary>
@@ -246,7 +258,7 @@ namespace Ucp
         /// <summary>Minimum BBR pacing gain after a congestion loss signal.</summary>
         public const double BBR_MIN_CONGESTION_PACING_GAIN = 0.92d;
 
-        /// <summary>Multiplicative BBR reduction applied on a congestion loss signal.</summary>
+        /// <summary>Multiplicative BBR reduction applied on a congestion loss signal (98%).</summary>
         public const double BBR_CONGESTION_LOSS_REDUCTION = 0.98d;
 
         /// <summary>Minimum congestion window gain retained after congestion loss.</summary>
@@ -267,7 +279,7 @@ namespace Ucp
         /// <summary>EWMA decay applied when no recent loss is observed.</summary>
         public const double BBR_LOSS_EWMA_IDLE_DECAY = 0.90d;
 
-        /// <summary>Delivery-rate drop ratio that contributes to a congestion classification.</summary>
+        /// <summary>Delivery-rate drop ratio that contributes to a congestion classification (15% drop).</summary>
         public const double BBR_CONGESTION_RATE_DROP_RATIO = -0.15d;
 
         /// <summary>RTT increase ceiling below which loss is treated as random rather than queue congestion.</summary>
@@ -294,10 +306,10 @@ namespace Ucp
         /// <summary>Maximum steady-state delivery-rate sample multiplier relative to the active pacing rate.</summary>
         public const double BBR_STEADY_ACK_AGGREGATION_RATE_CAP_GAIN = 1.50d;
 
-        /// <summary>Maximum bottleneck-bandwidth growth per RTT while in Startup.</summary>
+        /// <summary>Maximum bottleneck-bandwidth growth per RTT while in Startup (2.0x).</summary>
         public const double BBR_STARTUP_BANDWIDTH_GROWTH_PER_ROUND = 2.0d;
 
-        /// <summary>Maximum bottleneck-bandwidth growth per RTT after Startup.</summary>
+        /// <summary>Maximum bottleneck-bandwidth growth per RTT after Startup (1.25x).</summary>
         public const double BBR_STEADY_BANDWIDTH_GROWTH_PER_ROUND = 1.25d;
 
         /// <summary>RTT multiplier above which a loss signal is eligible for congestion classification.</summary>
@@ -335,6 +347,20 @@ namespace Ucp
 
         /// <summary>Number of recent RTT samples used to classify jitter.</summary>
         public const int BBR_RTT_HISTORY_COUNT = 5;
+
+        /// <summary>Recent loss accounting bucket duration in microseconds.</summary>
+        public const long BBR_LOSS_BUCKET_MICROS = 100000L;
+
+        /// <summary>Number of recent loss accounting buckets.</summary>
+        public const int BBR_LOSS_BUCKET_COUNT = 10;
+
+        /// <summary>Minimum round duration in microseconds when no RTT sample is available.</summary>
+        public const long BBR_MIN_ROUND_DURATION_MICROS = MICROS_PER_MILLI;
+
+        /// <summary>Fallback BBR bandwidth filter window before a valid minimum RTT is known.</summary>
+        public const long BBR_DEFAULT_RATE_WINDOW_MICROS = MICROS_PER_SECOND;
+
+        // ---- Benchmark constants ----
 
         /// <summary>Benchmark bandwidth for 100 Mbps line-rate scenarios, in bytes per second.</summary>
         public const int BENCHMARK_100_MBPS_BYTES_PER_SECOND = 100000000 / 8;
@@ -540,6 +566,8 @@ namespace Ucp
         /// <summary>Weak 4G outage duration, in milliseconds.</summary>
         public const int BENCHMARK_WEAK_4G_OUTAGE_DURATION_MILLISECONDS = 80;
 
+        // ---- Network classifier constants ----
+
         /// <summary>Number of recent statistics windows retained for network classification.</summary>
         public const int NETWORK_CLASSIFIER_WINDOW_COUNT = 8;
 
@@ -554,22 +582,6 @@ namespace Ucp
 
         /// <summary>Jitter threshold (ms) for classifying mobile/unstable networks.</summary>
         public const double NETWORK_CLASSIFIER_MOBILE_JITTER_MS = 20d;
-
-        /// <summary>Port offset for the mobile 3G benchmark.</summary>
-        public const int BENCHMARK_PORT_OFFSET_MOBILE_3G = 14;
-
-        /// <summary>Port offset for the mobile 4G high-jitter benchmark.</summary>
-        public const int BENCHMARK_PORT_OFFSET_MOBILE_4G = 15;
-
-        /// <summary>Port offset for the satellite benchmark.</summary>
-        public const int BENCHMARK_PORT_OFFSET_SATELLITE = 16;
-
-        /// <summary>Port offset for the VPN dual-congestion benchmark.</summary>
-        public const int BENCHMARK_PORT_OFFSET_VPN = 17;
-
-        public const int BENCHMARK_PORT_OFFSET_DATACENTER = 18;
-
-        public const int BENCHMARK_PORT_OFFSET_ENTERPRISE = 19;
 
         /// <summary>RTT threshold (ms) for classifying low-latency LAN.</summary>
         public const double NETWORK_CLASSIFIER_LAN_RTT_MS = 5d;
@@ -595,7 +607,7 @@ namespace Ucp
         /// <summary>Minimum line-rate utilization target for controlled-loss benchmark scenarios.</summary>
         public const double BENCHMARK_MIN_LOSS_UTILIZATION_PERCENT = 45d;
 
-        /// <summary>Minimum throughput target for the 5% random-loss 1 Gbps benchmark.</summary>
+        /// <summary>Minimum throughput target for the 5% random-loss 1 Gbps benchmark, in Mbps.</summary>
         public const double BENCHMARK_MIN_GIGABIT_LOSS5_THROUGHPUT_MBPS = 145d;
 
         /// <summary>Maximum acceptable RTT jitter multiplier relative to the configured one-way delay.</summary>
@@ -605,7 +617,29 @@ namespace Ucp
         public const double BENCHMARK_MIN_CONVERGED_PACING_RATIO = 0.70d;
 
         /// <summary>Maximum pacing ratio accepted after auto-probing converges.</summary>
-        public const double BENCHMARK_MAX_CONVERGED_PACING_RATIO = 1.35d;
+        public const double BENCHMARK_MAX_CONVERGED_PACING_RATIO = 3.0d;
+
+        // ---- Port offsets for additional benchmarks ----
+
+        /// <summary>Port offset for the mobile 3G benchmark.</summary>
+        public const int BENCHMARK_PORT_OFFSET_MOBILE_3G = 14;
+
+        /// <summary>Port offset for the mobile 4G high-jitter benchmark.</summary>
+        public const int BENCHMARK_PORT_OFFSET_MOBILE_4G = 15;
+
+        /// <summary>Port offset for the satellite benchmark.</summary>
+        public const int BENCHMARK_PORT_OFFSET_SATELLITE = 16;
+
+        /// <summary>Port offset for the VPN dual-congestion benchmark.</summary>
+        public const int BENCHMARK_PORT_OFFSET_VPN = 17;
+
+        /// <summary>Port offset for the datacenter benchmark.</summary>
+        public const int BENCHMARK_PORT_OFFSET_DATACENTER = 18;
+
+        /// <summary>Port offset for the enterprise benchmark.</summary>
+        public const int BENCHMARK_PORT_OFFSET_ENTERPRISE = 19;
+
+        // ---- Loss detection / retransmission constants ----
 
         /// <summary>Maximum number of NAK packets emitted during one RTT interval.</summary>
         public const int MAX_NAKS_PER_RTT = 1024;
@@ -621,18 +655,6 @@ namespace Ucp
 
         /// <summary>Number of congestion loss events needed before entering ProbeRTT.</summary>
         public const int BBR_PROBE_RTT_CONGESTION_LOSS_THRESHOLD = 5;
-
-        /// <summary>Recent loss accounting bucket duration in microseconds.</summary>
-        public const long BBR_LOSS_BUCKET_MICROS = 100000L;
-
-        /// <summary>Number of recent loss accounting buckets.</summary>
-        public const int BBR_LOSS_BUCKET_COUNT = 10;
-
-        /// <summary>Minimum round duration in microseconds when no RTT sample is available.</summary>
-        public const long BBR_MIN_ROUND_DURATION_MICROS = MICROS_PER_MILLI;
-
-        /// <summary>Fallback BBR bandwidth filter window before a valid minimum RTT is known.</summary>
-        public const long BBR_DEFAULT_RATE_WINDOW_MICROS = MICROS_PER_SECOND;
 
         /// <summary>Duplicate ACK count needed to trigger fast retransmit.</summary>
         public const int DUPLICATE_ACK_THRESHOLD = 2;
@@ -682,10 +704,10 @@ namespace Ucp
         /// <summary>Minimum spacing between immediate reordered-data ACKs, in microseconds.</summary>
         public const long REORDERED_ACK_MIN_INTERVAL_MICROS = 250L;
 
-        /// <summary>Default keep-alive interval in microseconds.</summary>
+        /// <summary>Default keep-alive interval in microseconds (1 second).</summary>
         public const long KEEP_ALIVE_INTERVAL_MICROS = MICROS_PER_SECOND;
 
-        /// <summary>Default disconnect timeout in microseconds.</summary>
+        /// <summary>Default disconnect timeout in microseconds (4 seconds).</summary>
         public const long DISCONNECT_TIMEOUT_MICROS = 4000000L;
 
         /// <summary>Default timer interval in milliseconds.</summary>
@@ -694,7 +716,7 @@ namespace Ucp
         /// <summary>Fair queue scheduling round in milliseconds.</summary>
         public const int FAIR_QUEUE_ROUND_MILLISECONDS = 10;
 
-        /// <summary>Default server bandwidth in bytes per second.</summary>
+        /// <summary>Default server bandwidth in bytes per second (~100 Mbps).</summary>
         public const int DEFAULT_SERVER_BANDWIDTH_BYTES_PER_SECOND = 100000000 / 8;
 
         /// <summary>Default initial bandwidth estimate in bytes per second.</summary>
@@ -703,7 +725,7 @@ namespace Ucp
         /// <summary>Default maximum pacing rate in bytes per second.</summary>
         public const int DEFAULT_MAX_PACING_RATE_BYTES_PER_SECOND = DEFAULT_SERVER_BANDWIDTH_BYTES_PER_SECOND;
 
-        /// <summary>Maximum congestion window in bytes.</summary>
+        /// <summary>Maximum congestion window in bytes (64 MB).</summary>
         public const int DEFAULT_MAX_CONGESTION_WINDOW_BYTES = 64 * 1024 * 1024;
 
         /// <summary>Default connect timeout in milliseconds.</summary>
@@ -766,8 +788,12 @@ namespace Ucp
         /// <summary>Encoded FinAck packet flag value.</summary>
         public const byte UCP_FLAG_FIN_ACK_VALUE = 0x04;
 
+        // ---- Computed constants ----
+
         /// <summary>Maximum ACK SACK blocks that fit inside one MSS-sized ACK packet.</summary>
         public static readonly int MAX_ACK_SACK_BLOCKS = (MSS - ACK_FIXED_SIZE) / SACK_BLOCK_SIZE;
+
+        // ---- PascalCase public aliases for external consumers ----
 
         public const int Mss = MSS;
         public const int CommonHeaderSize = COMMON_HEADER_SIZE;

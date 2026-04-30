@@ -28,21 +28,39 @@ namespace Ucp.Internal
         /// <summary>Tracks a single outbound data segment in the send buffer.</summary>
         private sealed class OutboundSegment
         {
+            /// <summary>Sequence number assigned to this segment.</summary>
             public uint SequenceNumber;
+
+            /// <summary>Total fragments in the logical message (1 = single-fragment).</summary>
             public ushort FragmentTotal;
+
+            /// <summary>Zero-based index of this fragment within the message.</summary>
             public ushort FragmentIndex;
+
+            /// <summary>Application payload bytes.</summary>
             public byte[] Payload;
+
+            /// <summary>Whether this segment is currently in flight (sent but not acked).</summary>
             public bool InFlight;
+
+            /// <summary>Whether this segment has been acknowledged by the peer.</summary>
             public bool Acked;
+
+            /// <summary>Whether this segment is marked for retransmission.</summary>
             public bool NeedsRetransmit;
+
             /// <summary>True when recovery must bypass smooth pacing to avoid connection death.</summary>
             public bool UrgentRetransmit;
+
             /// <summary>Count of times this segment was seen as missing in SACK blocks.</summary>
             public int MissingAckCount;
+
             /// <summary>Microsecond timestamp of the first SACK observation for this hole.</summary>
             public long FirstMissingAckMicros;
+
             /// <summary>Number of times transmitted (0 = never sent).</summary>
             public int SendCount;
+
             /// <summary>Microsecond timestamp of the most recent send.</summary>
             public long LastSendMicros;
         }
@@ -50,119 +68,346 @@ namespace Ucp.Internal
         /// <summary>Deduplicated loss event tracked for congestion classification.</summary>
         private sealed class LossEvent
         {
+            /// <summary>Sequence number of the lost segment.</summary>
             public uint SequenceNumber;
+
+            /// <summary>Microsecond timestamp of the loss detection.</summary>
             public long TimestampMicros;
+
+            /// <summary>RTT at the time the loss was detected.</summary>
             public long RttMicros;
         }
 
+        /// <summary>Tracks a received (possibly out-of-order) data segment.</summary>
         private sealed class InboundSegment
         {
+            /// <summary>Sequence number of this received segment.</summary>
             public uint SequenceNumber;
+
+            /// <summary>Total fragments in the logical message.</summary>
             public ushort FragmentTotal;
+
+            /// <summary>Zero-based index of this fragment.</summary>
             public ushort FragmentIndex;
+
+            /// <summary>Payload bytes received.</summary>
             public byte[] Payload;
         }
 
+        /// <summary>Chunk of contiguous in-order data ready for application delivery.</summary>
         private sealed class ReceiveChunk
         {
+            /// <summary>Buffer containing the data.</summary>
             public byte[] Buffer;
+
+            /// <summary>Current read offset within the buffer.</summary>
             public int Offset;
+
+            /// <summary>Total number of bytes in the buffer.</summary>
             public int Count;
         }
 
+        /// <summary>Cryptographically secure RNG for connection ID generation.</summary>
         private static readonly RandomNumberGenerator ConnectionIdGenerator = RandomNumberGenerator.Create();
 
+        // ---- Core dependencies ----
+
+        /// <summary>Lock protecting all protocol state mutation.</summary>
         private readonly object _sync = new object();
+
+        /// <summary>Underlying transport for I/O operations.</summary>
         private readonly ITransport _transport;
+
+        /// <summary>Whether fair-queue scheduling is enabled for this connection.</summary>
         private readonly bool _useFairQueue;
+
+        /// <summary>Whether this connection was created server-side.</summary>
         private readonly bool _isServerSide;
+
+        /// <summary>Protocol configuration (cloned from the source).</summary>
         private readonly UcpConfiguration _config;
+
+        /// <summary>Callback invoked when this PCB transitions to Closed state.</summary>
         private readonly Action<UcpPcb> _closedCallback;
+
+        // ---- Send/receive data structures ----
+
+        /// <summary>Outbound data segments keyed by sequence number (sorted for in-order sending).</summary>
         private readonly SortedDictionary<uint, OutboundSegment> _sendBuffer = new SortedDictionary<uint, OutboundSegment>(UcpSequenceComparer.Instance);
+
+        /// <summary>Received out-of-order data segments keyed by sequence number.</summary>
         private readonly SortedDictionary<uint, InboundSegment> _recvBuffer = new SortedDictionary<uint, InboundSegment>(UcpSequenceComparer.Instance);
+
+        /// <summary>Queue of in-order data chunks ready for application read.</summary>
         private readonly Queue<ReceiveChunk> _receiveQueue = new Queue<ReceiveChunk>();
+
+        // ---- NAK and loss tracking ----
+
+        /// <summary>Set of sequence numbers for which a NAK has already been issued.</summary>
         private readonly HashSet<uint> _nakIssued = new HashSet<uint>();
+
+        /// <summary>Counts how many times each sequence was observed as missing.</summary>
         private readonly Dictionary<uint, int> _missingSequenceCounts = new Dictionary<uint, int>();
+
+        /// <summary>First-seen timestamp for each missing sequence.</summary>
         private readonly Dictionary<uint, long> _missingFirstSeenMicros = new Dictionary<uint, long>();
+
+        /// <summary>Last-NAK-issued timestamp for each sequence.</summary>
         private readonly Dictionary<uint, long> _lastNakIssuedMicros = new Dictionary<uint, long>();
+
+        /// <summary>Sequences for which SACK-based fast retransmit has already been triggered.</summary>
         private readonly HashSet<uint> _sackFastRetransmitNotified = new HashSet<uint>();
+
+        /// <summary>FEC groups for which repair packets have been sent.</summary>
         private readonly HashSet<uint> _fecRepairSentGroups = new HashSet<uint>();
+
+        // ---- FEC ----
+
+        /// <summary>Forward Error Correction encoder/decoder (null if disabled).</summary>
         private UcpFecCodec _fecCodec;
+
+        /// <summary>Base sequence number of the current FEC group being built.</summary>
         private uint _fecGroupBaseSeq;
+
+        /// <summary>Number of data packets sent in the current FEC group.</summary>
         private int _fecGroupSendCount;
+
+        // ---- Async coordination ----
+
+        /// <summary>Signal released when new data is available for ReceiveAsync.</summary>
         private readonly SemaphoreSlim _receiveSignal = new SemaphoreSlim(0, int.MaxValue);
+
+        /// <summary>Signal released when send buffer space frees up.</summary>
         private readonly SemaphoreSlim _sendSpaceSignal = new SemaphoreSlim(0, int.MaxValue);
+
+        /// <summary>Lock ensuring only one flush operation runs at a time.</summary>
         private readonly SemaphoreSlim _flushLock = new SemaphoreSlim(1, 1);
+
+        /// <summary>Cancellation token for all async operations on this PCB.</summary>
         private readonly CancellationTokenSource _cts = new CancellationTokenSource();
+
+        /// <summary>Completes when the connection handshake succeeds or fails.</summary>
         private readonly TaskCompletionSource<bool> _connectedTcs = new TaskCompletionSource<bool>();
+
+        /// <summary>Completes when the connection is fully closed.</summary>
         private readonly TaskCompletionSource<bool> _closedTcs = new TaskCompletionSource<bool>();
+
+        // ---- Protocol engines ----
+
+        /// <summary>Generates SACK blocks from the receive buffer.</summary>
         private readonly UcpSackGenerator _sackGenerator = new UcpSackGenerator();
+
+        /// <summary>RTO estimator (RFC 6298 style).</summary>
         private readonly UcpRtoEstimator _rtoEstimator;
+
+        /// <summary>BBRv1 congestion control engine.</summary>
         private readonly BbrCongestionControl _bbr;
+
+        /// <summary>Token-bucket pacing controller.</summary>
         private readonly PacingController _pacing;
+
+        /// <summary>Optional .NET timer for standalone mode (null when using UcpNetwork).</summary>
         private readonly Timer _timer;
+
+        /// <summary>Network engine reference (null in standalone mode).</summary>
         private readonly UcpNetwork _network;
 
+        // ---- Connection state ----
+
+        /// <summary>Current connection state machine state.</summary>
         private UcpConnectionState _state;
+
+        /// <summary>Remote endpoint of this connection.</summary>
         private IPEndPoint _remoteEndPoint;
+
+        /// <summary>Unique connection identifier assigned by cryptographically secure RNG.</summary>
         private uint _connectionId;
+
+        /// <summary>Next sequence number to assign to an outbound data segment.</summary>
         private uint _nextSendSequence;
+
+        /// <summary>Next in-order sequence number expected from the peer.</summary>
         private uint _nextExpectedSequence;
+
+        /// <summary>Peer-advertised receive window in bytes.</summary>
         private uint _remoteWindowBytes = UcpConstants.DefaultReceiveWindowBytes;
+
+        /// <summary>Current bytes in flight (sent but not yet acknowledged).</summary>
         private int _flightBytes;
+
+        /// <summary>Accumulated fair-queue credit in bytes; spent on sends.</summary>
         private double _fairQueueCreditBytes;
+
+        /// <summary>Last echo timestamp received from the peer.</summary>
         private long _lastEchoTimestamp;
+
+        /// <summary>Timestamp of the last protocol activity (send or receive).</summary>
         private long _lastActivityMicros;
+
+        /// <summary>Timestamp of the last ACK packet sent.</summary>
         private long _lastAckSentMicros;
+
+        /// <summary>Most recent accepted RTT sample in microseconds.</summary>
         private long _lastRttMicros;
+
+        // ---- Handshake / close flags ----
+
+        /// <summary>Whether a SYN has been sent.</summary>
         private bool _synSent;
+
+        /// <summary>Whether a SYN-ACK has been sent (server side).</summary>
         private bool _synAckSent;
+
+        /// <summary>Timestamp of the most recent SYN-ACK send.</summary>
         private long _synAckSentMicros;
+
+        /// <summary>Whether a FIN has been sent.</summary>
         private bool _finSent;
+
+        /// <summary>Whether the FIN has been acknowledged by the peer.</summary>
         private bool _finAcked;
+
+        /// <summary>Whether a FIN was received from the peer.</summary>
         private bool _peerFinReceived;
+
+        /// <summary>Whether a RST was received from the peer.</summary>
         private bool _rstReceived;
+
+        // ---- Lifecycle ----
+
+        /// <summary>Whether this PCB has been disposed.</summary>
         private bool _disposed;
+
+        /// <summary>Whether a delayed flush has been scheduled.</summary>
         private bool _flushDelayed;
+
+        /// <summary>Whether a delayed ACK has been scheduled.</summary>
         private bool _ackDelayed;
+
+        /// <summary>Timer ID from the network engine (0 if not scheduled).</summary>
         private uint _timerId;
+
+        /// <summary>Timer ID for the delayed flush (0 if not scheduled).</summary>
         private uint _flushTimerId;
+
+        /// <summary>Whether the Connected event has been raised.</summary>
         private bool _connectedRaised;
+
+        /// <summary>Whether the Disconnected event has been raised.</summary>
         private bool _disconnectedRaised;
+
+        /// <summary>Whether cleanup resources have been released.</summary>
         private bool _closedResourcesReleased;
+
+        // ---- Duplicate ACK tracking ----
+
+        /// <summary>Largest cumulative ACK number seen so far.</summary>
         private uint _largestCumulativeAckNumber;
+
+        /// <summary>Whether _largestCumulativeAckNumber has been set.</summary>
         private bool _hasLargestCumulativeAckNumber;
+
+        /// <summary>Last ACK number received (for duplicate ACK detection).</summary>
         private uint _lastAckNumber;
+
+        /// <summary>Whether _lastAckNumber has been set.</summary>
         private bool _hasLastAckNumber;
+
+        /// <summary>Count of consecutive duplicate ACKs received.</summary>
         private int _duplicateAckCount;
+
+        /// <summary>Whether fast recovery is currently active.</summary>
         private bool _fastRecoveryActive;
+
+        // ---- Receive window ----
+
+        /// <summary>Local receive window size in bytes advertised to the peer.</summary>
         private uint _localReceiveWindowBytes = UcpConstants.DefaultReceiveWindowBytes;
+
+        /// <summary>Bytes currently queued for application delivery (in _receiveQueue).</summary>
         private int _queuedReceiveBytes;
+
+        // ---- Counters ----
+
+        /// <summary>Cumulative user payload bytes sent.</summary>
         private long _bytesSent;
+
+        /// <summary>Cumulative user payload bytes received.</summary>
         private long _bytesReceived;
+
+        /// <summary>Count of original data packets transmitted.</summary>
         private int _sentDataPackets;
+
+        /// <summary>Count of retransmitted data packets.</summary>
         private int _retransmittedPackets;
+
+        /// <summary>Count of ACK packets transmitted.</summary>
         private int _sentAckPackets;
+
+        /// <summary>Count of NAK packets transmitted.</summary>
         private int _sentNakPackets;
+
+        /// <summary>Count of RST packets transmitted.</summary>
         private int _sentRstPackets;
+
+        /// <summary>Count of fast retransmissions.</summary>
         private int _fastRetransmissions;
+
+        /// <summary>Count of RTO-triggered retransmissions.</summary>
         private int _timeoutRetransmissions;
+
+        // ---- RTT sample history ----
+
+        /// <summary>Retained RTT samples for diagnostics.</summary>
         private readonly List<long> _rttSamplesMicros = new List<long>();
+
+        // ---- NAK rate limiting ----
+
+        /// <summary>Start timestamp of the current NAK rate-limit window.</summary>
         private long _lastNakWindowMicros;
+
+        /// <summary>Number of NAKs sent in the current RTT window.</summary>
         private int _naksSentThisRttWindow;
+
+        // ---- Delayed ACK / reordering ----
+
+        /// <summary>Timestamp of the last ACK received.</summary>
         private long _lastAckReceivedMicros;
+
+        /// <summary>Timestamp of the last reordered-data ACK sent.</summary>
         private long _lastReorderedAckSentMicros;
+
+        /// <summary>Whether a tail-loss probe has been armed (not yet retransmitted).</summary>
         private bool _tailLossProbePending;
+
+        // ---- Loss classification ----
+
+        /// <summary>Queue of recent deduplicated loss events.</summary>
         private readonly Queue<LossEvent> _recentLossEvents = new Queue<LossEvent>();
+
+        /// <summary>Hash set of recent loss sequence numbers for fast deduplication.</summary>
         private readonly HashSet<uint> _recentLossSequences = new HashSet<uint>();
+
+        /// <summary>Start timestamp of the current urgent recovery budget window.</summary>
         private long _urgentRecoveryWindowMicros;
+
+        /// <summary>Number of urgent recovery packets sent in the current RTT window.</summary>
         private int _urgentRecoveryPacketsInWindow;
 
+        // ---- Constructors ----
+
+        /// <summary>
+        /// Creates a PCB with an optional connection ID and null network.
+        /// </summary>
         public UcpPcb(ITransport transport, IPEndPoint remoteEndPoint, bool isServerSide, bool useFairQueue, Action<UcpPcb> closedCallback, uint? connectionId, UcpConfiguration config)
             : this(transport, remoteEndPoint, isServerSide, useFairQueue, closedCallback, connectionId, config, null)
         {
         }
 
+        /// <summary>
+        /// Full constructor: initializes all sub-components (RTO estimator, BBR,
+        /// pacing controller, FEC codec if enabled) and schedules the first timer.
+        /// </summary>
         public UcpPcb(ITransport transport, IPEndPoint remoteEndPoint, bool isServerSide, bool useFairQueue, Action<UcpPcb> closedCallback, uint? connectionId, UcpConfiguration config, UcpNetwork network)
         {
             _transport = transport;
@@ -189,46 +434,64 @@ namespace Ucp.Internal
             _localReceiveWindowBytes = _config.ReceiveWindowBytes;
             if (_network == null)
             {
+                // Standalone mode: use a .NET Timer.
                 _timer = new Timer(OnTimer, null, _config.TimerIntervalMilliseconds, _config.TimerIntervalMilliseconds);
             }
             else
             {
+                // Network-managed mode: register with the network and schedule via network timers.
                 _network.RegisterPcb(this);
                 ScheduleTimer();
             }
         }
 
+        // ---- Events ----
+
+        /// <summary>Raised when new in-order data is available for application delivery.</summary>
         public event Action<byte[], int, int> DataReceived;
 
+        /// <summary>Raised when the connection handshake completes successfully.</summary>
         public event Action Connected;
 
+        /// <summary>Raised when the connection is fully closed.</summary>
         public event Action Disconnected;
 
+        // ---- Public properties ----
+
+        /// <summary>Unique connection identifier.</summary>
         public uint ConnectionId
         {
             get { return _connectionId; }
         }
 
+        /// <summary>Remote endpoint of this connection.</summary>
         public IPEndPoint RemoteEndPoint
         {
             get { return _remoteEndPoint; }
         }
 
+        /// <summary>Current connection state (thread-safe).</summary>
         public UcpConnectionState State
         {
             get { lock (_sync) { return _state; } }
         }
 
+        /// <summary>Current pacing rate from the BBR controller (thread-safe).</summary>
         public double CurrentPacingRateBytesPerSecond
         {
             get { lock (_sync) { return _bbr.PacingRateBytesPerSecond; } }
         }
 
+        /// <summary>Whether the send buffer contains unsent segments (thread-safe).</summary>
         public bool HasPendingSendData
         {
             get { lock (_sync) { return _sendBuffer.Count > 0; } }
         }
 
+        /// <summary>
+        /// Creates a snapshot of all diagnostic counters and state for reporting.
+        /// </summary>
+        /// <returns>An immutable snapshot of the current diagnostics.</returns>
         public UcpConnectionDiagnostics GetDiagnosticsSnapshot()
         {
             lock (_sync)
@@ -265,6 +528,10 @@ namespace Ucp.Internal
             }
         }
 
+        /// <summary>
+        /// Aborts the connection immediately. Optionally sends a RST to the peer.
+        /// </summary>
+        /// <param name="sendReset">If true, sends a RST packet before closing.</param>
         public void Abort(bool sendReset)
         {
             if (sendReset && _remoteEndPoint != null)
@@ -275,6 +542,7 @@ namespace Ucp.Internal
             TransitionToClosed();
         }
 
+        /// <summary>Test hook: overrides the next send sequence number.</summary>
         public void SetNextSendSequenceForTest(uint nextSendSequence)
         {
             lock (_sync)
@@ -283,6 +551,7 @@ namespace Ucp.Internal
             }
         }
 
+        /// <summary>Test hook: overrides the advertised receive window.</summary>
         public void SetAdvertisedReceiveWindowForTest(uint windowBytes)
         {
             lock (_sync)
@@ -291,6 +560,7 @@ namespace Ucp.Internal
             }
         }
 
+        /// <summary>Sets or updates the remote endpoint for this connection.</summary>
         public void SetRemoteEndPoint(IPEndPoint remoteEndPoint)
         {
             lock (_sync)
@@ -299,6 +569,11 @@ namespace Ucp.Internal
             }
         }
 
+        /// <summary>
+        /// Validates that the given remote endpoint matches the current one.
+        /// If the current endpoint is null, accepts the new one (first packet).
+        /// </summary>
+        /// <returns>True if the endpoint is valid for this connection.</returns>
         public bool ValidateRemoteEndPoint(IPEndPoint remoteEndPoint)
         {
             if (remoteEndPoint == null)
@@ -318,6 +593,11 @@ namespace Ucp.Internal
             }
         }
 
+        /// <summary>
+        /// Performs the UCP SYN handshake: sends SYN, waits for SYN-ACK with
+        /// exponential backoff, up to the configured connect timeout.
+        /// </summary>
+        /// <param name="remoteEndPoint">The remote endpoint to connect to.</param>
         public async Task ConnectAsync(IPEndPoint remoteEndPoint)
         {
             SetRemoteEndPoint(remoteEndPoint);
@@ -325,7 +605,7 @@ namespace Ucp.Internal
             {
                 if (_state == UcpConnectionState.Established)
                 {
-                    return;
+                    return; // Already connected.
                 }
 
                 _state = UcpConnectionState.HandshakeSynSent;
@@ -347,16 +627,25 @@ namespace Ucp.Internal
                 {
                     if (await _connectedTcs.Task.ConfigureAwait(false))
                     {
-                        return;
+                        return; // Connection established.
                     }
 
-                    break;
+                    break; // Connection attempt failed.
                 }
             }
 
             throw new TimeoutException("UCP connection handshake timed out.");
         }
 
+        /// <summary>
+        /// Enqueues data for sending. Accepts up to the max payload size times
+        /// ushort.MaxValue bytes, fragmenting into MSS-sized segments.
+        /// Returns the number of bytes accepted.
+        /// </summary>
+        /// <param name="buffer">Source buffer.</param>
+        /// <param name="offset">Offset into the source buffer.</param>
+        /// <param name="count">Number of bytes to send.</param>
+        /// <returns>Number of bytes accepted, or -1 if the connection is not sendable.</returns>
         public async Task<int> SendAsync(byte[] buffer, int offset, int count)
         {
             ValidateBuffer(buffer, offset, count);
@@ -389,7 +678,7 @@ namespace Ucp.Internal
                 {
                     if (_sendBuffer.Count >= maxBufferedSegments)
                     {
-                        break;
+                        break; // Send buffer full; caller should retry.
                     }
                 }
 
@@ -417,6 +706,12 @@ namespace Ucp.Internal
             return acceptedBytes;
         }
 
+        /// <summary>
+        /// Copies up to <paramref name="count"/> bytes from the receive queue
+        /// into the provided buffer. Blocks until data is available or the
+        /// connection closes.
+        /// </summary>
+        /// <returns>Number of bytes copied, 0 if closed, or -1 on error.</returns>
         public async Task<int> ReceiveAsync(byte[] buffer, int offset, int count)
         {
             ValidateBuffer(buffer, offset, count);
@@ -464,6 +759,10 @@ namespace Ucp.Internal
             }
         }
 
+        /// <summary>
+        /// Reads exactly <paramref name="count"/> bytes into the buffer.
+        /// Returns false if the connection closed before all bytes were received.
+        /// </summary>
         public async Task<bool> ReadAsync(byte[] buffer, int offset, int count)
         {
             ValidateBuffer(buffer, offset, count);
@@ -482,6 +781,10 @@ namespace Ucp.Internal
             return true;
         }
 
+        /// <summary>
+        /// Writes exactly <paramref name="count"/> bytes, retrying until all data
+        /// is accepted or the connection closes. Returns false on error or close.
+        /// </summary>
         public async Task<bool> WriteAsync(byte[] buffer, int offset, int count)
         {
             ValidateBuffer(buffer, offset, count);
@@ -506,6 +809,10 @@ namespace Ucp.Internal
             return true;
         }
 
+        /// <summary>
+        /// Gracefully closes the connection: drains the send buffer, sends FIN,
+        /// and waits for the peer's FIN-ACK before transitioning to Closed.
+        /// </summary>
         public async Task CloseAsync()
         {
             bool needSendFin = false;
@@ -547,6 +854,11 @@ namespace Ucp.Internal
             TransitionToClosed();
         }
 
+        /// <summary>
+        /// Dispatches an inbound packet to the appropriate handler based on type.
+        /// Records activity timestamp on every received packet.
+        /// </summary>
+        /// <param name="packet">The decoded UCP packet.</param>
         public async Task HandleInboundAsync(UcpPacket packet)
         {
             if (packet == null)
@@ -608,6 +920,10 @@ namespace Ucp.Internal
             }
         }
 
+        /// <summary>
+        /// Adds fair-queue credit bytes to this PCB, capped at a maximum buffer.
+        /// </summary>
+        /// <param name="bytes">Credit bytes to add.</param>
         public void AddFairQueueCredit(double bytes)
         {
             if (!_useFairQueue || bytes <= 0)
@@ -626,11 +942,18 @@ namespace Ucp.Internal
             }
         }
 
+        /// <summary>Requests an immediate flush of the send buffer.</summary>
         public void RequestFlush()
         {
             _ = FlushSendQueueAsync();
         }
 
+        /// <summary>
+        /// Performs one tick of timer processing (used by UcpNetwork.DoEvents).
+        /// Returns 1 if work was done, 0 if idle.
+        /// </summary>
+        /// <param name="nowMicros">Current network time in microseconds.</param>
+        /// <returns>Number of work items processed.</returns>
         public int OnTick(long nowMicros)
         {
             if (_disposed)
@@ -654,6 +977,12 @@ namespace Ucp.Internal
             return work;
         }
 
+        /// <summary>
+        /// Dispatches a decoded packet from the network directly to this PCB
+        /// (used by UcpNetwork.Input for known connections).
+        /// </summary>
+        /// <param name="packet">The decoded UCP packet.</param>
+        /// <param name="remoteEndPoint">The source endpoint.</param>
         public void DispatchFromNetwork(UcpPacket packet, IPEndPoint remoteEndPoint)
         {
             if (ValidateRemoteEndPoint(remoteEndPoint))
@@ -662,6 +991,10 @@ namespace Ucp.Internal
             }
         }
 
+        /// <summary>
+        /// Disposes the PCB: cancels async operations, disposes timers and
+        /// semaphores, unregisters from the network, and transitions to Closed.
+        /// </summary>
         public void Dispose()
         {
             if (_disposed)
@@ -684,6 +1017,12 @@ namespace Ucp.Internal
             _flushLock.Dispose();
         }
 
+        // ---- Packet handler: SYN ----
+
+        /// <summary>
+        /// Handles an incoming SYN packet. Accepts the connection ID, sets the
+        /// initial expected sequence, and replies with SYN-ACK.
+        /// </summary>
         private void HandleSyn(UcpControlPacket packet)
         {
             bool shouldReply = false;
@@ -718,6 +1057,12 @@ namespace Ucp.Internal
             }
         }
 
+        // ---- Packet handler: SYN-ACK ----
+
+        /// <summary>
+        /// Handles an incoming SYN-ACK: sets the expected sequence, acknowledges
+        /// it, and transitions to Established if in the correct state.
+        /// </summary>
         private void HandleSynAck(UcpControlPacket packet)
         {
             bool shouldAck = false;
@@ -746,6 +1091,14 @@ namespace Ucp.Internal
             }
         }
 
+        // ---- Packet handler: ACK ----
+
+        /// <summary>
+        /// Handles an incoming ACK packet: validates plausibility, processes
+        /// cumulative ACK and SACK blocks, removes acknowledged segments,
+        /// updates RTT and BBR estimates, and triggers fast retransmits.
+        /// </summary>
+        /// <param name="ackPacket">The decoded ACK packet.</param>
         private async Task HandleAckAsync(UcpAckPacket ackPacket)
         {
             bool establishByHandshake = false;
@@ -787,6 +1140,7 @@ namespace Ucp.Internal
 
                 UpdateDuplicateAckStateUnsafe(ackPacket, nowMicros, out fastRetransmitTriggered);
 
+                // Walk the send buffer and mark segments as ACKed (cumulative or SACK).
                 int sackIndex = 0;
                 List<SackBlock> sackBlocks = ackPacket.SackBlocks;
                 bool hasSackBlocks = sackBlocks != null && sackBlocks.Count > 0;
@@ -803,6 +1157,7 @@ namespace Ucp.Internal
                     bool acked = UcpSequenceComparer.IsBeforeOrEqual(segment.SequenceNumber, ackPacket.AckNumber);
                     if (!acked && sackBlocks != null)
                     {
+                        // Scan SACK blocks to check if this segment is selectively ACKed.
                         while (sackIndex < sackBlocks.Count && UcpSequenceComparer.IsBefore(sackBlocks[sackIndex].End, segment.SequenceNumber))
                         {
                             sackIndex++;
@@ -848,6 +1203,7 @@ namespace Ucp.Internal
                         continue;
                     }
 
+                    // Check for SACK-based fast retransmit eligibility.
                     if (hasSackBlocks)
                     {
                         if (UcpSequenceComparer.IsBefore(segment.SequenceNumber, highestSack))
@@ -880,6 +1236,7 @@ namespace Ucp.Internal
                     }
                 }
 
+                // Remove ACKed segments from the send buffer.
                 for (int i = 0; i < removeKeys.Count; i++)
                 {
                     _sackFastRetransmitNotified.Remove(removeKeys[i]);
@@ -905,7 +1262,7 @@ namespace Ucp.Internal
                 remainingFlight = _flightBytes;
                 if (deliveredBytes > 0 && sampleRtt == 0 && echoRtt > 0 && echoRtt <= _rtoEstimator.CurrentRtoMicros)
                 {
-                    sampleRtt = echoRtt;
+                    sampleRtt = echoRtt; // Fall back to echo-based RTT.
                 }
 
                 bool acceptableRttSample = sampleRtt > 0 && sampleRtt <= (long)(_rtoEstimator.CurrentRtoMicros * UcpConstants.RTT_RECOVERY_SAMPLE_MAX_RTO_MULTIPLIER);
@@ -916,6 +1273,7 @@ namespace Ucp.Internal
                     _rtoEstimator.Update(sampleRtt);
                 }
 
+                // Update BBR and pacing with the new ACK information.
                 _bbr.OnAck(nowMicros, deliveredBytes, sampleRtt, _flightBytes);
                 _pacing.SetRate(_bbr.PacingRateBytesPerSecond, nowMicros);
             }
@@ -936,6 +1294,14 @@ namespace Ucp.Internal
             }
         }
 
+        // ---- Packet handler: NAK ----
+
+        /// <summary>
+        /// Handles an incoming NAK packet: marks the reported sequences for
+        /// retransmission if the segment hasn't already been retransmitted
+        /// too recently.
+        /// </summary>
+        /// <param name="nakPacket">The decoded NAK packet.</param>
         private async Task HandleNakAsync(UcpNakPacket nakPacket)
         {
             bool notifiedLoss = false;
@@ -969,6 +1335,12 @@ namespace Ucp.Internal
             await FlushSendQueueAsync().ConfigureAwait(false);
         }
 
+        // ---- ACK validation ----
+
+        /// <summary>
+        /// Validates that the ACK packet is plausible: correct connection ID,
+        /// non-receding cumulative ACK, and valid SACK block ordering.
+        /// </summary>
         private bool IsAckPlausibleUnsafe(UcpAckPacket ackPacket)
         {
             if (ackPacket == null)
@@ -983,7 +1355,7 @@ namespace Ucp.Internal
 
             if (_hasLargestCumulativeAckNumber && UcpSequenceComparer.IsBefore(ackPacket.AckNumber, _largestCumulativeAckNumber))
             {
-                return false;
+                return false; // ACK cannot recede.
             }
 
             if (ackPacket.SackBlocks != null)
@@ -993,7 +1365,7 @@ namespace Ucp.Internal
                     SackBlock block = ackPacket.SackBlocks[i];
                     if (UcpSequenceComparer.IsAfter(block.Start, block.End))
                     {
-                        return false;
+                        return false; // Malformed SACK block.
                     }
                 }
             }
@@ -1001,6 +1373,9 @@ namespace Ucp.Internal
             return true;
         }
 
+        /// <summary>
+        /// Returns the highest End value across all SACK blocks.
+        /// </summary>
         private static uint GetHighestSackEnd(List<SackBlock> blocks)
         {
             uint highest = 0;
@@ -1017,6 +1392,9 @@ namespace Ucp.Internal
             return highest;
         }
 
+        /// <summary>
+        /// Sorts SACK blocks by their Start sequence number for efficient scanning.
+        /// </summary>
         private static void SortSackBlocksUnsafe(List<SackBlock> blocks)
         {
             if (blocks == null || blocks.Count <= 1)
@@ -1030,6 +1408,13 @@ namespace Ucp.Internal
             });
         }
 
+        // ---- SACK-based fast retransmit ----
+
+        /// <summary>
+        /// Determines whether a segment identified as missing via SACK should
+        /// be fast-retransmitted. Applies reorder grace, observation thresholds,
+        /// and FEC pending-repair checks.
+        /// </summary>
         private bool ShouldFastRetransmitSackHoleUnsafe(OutboundSegment segment, uint firstMissingSequence, uint highestSack, bool reportedSackHole, long nowMicros)
         {
             if (segment == null || segment.LastSendMicros <= 0)
@@ -1039,7 +1424,7 @@ namespace Ucp.Internal
 
             if (_sackFastRetransmitNotified.Contains(segment.SequenceNumber))
             {
-                return false;
+                return false; // Already notified.
             }
 
             if (!_config.EnableAggressiveSackRecovery)
@@ -1050,12 +1435,12 @@ namespace Ucp.Internal
             long reorderGraceMicros = GetSackFastRetransmitReorderGraceMicrosUnsafe();
             if (nowMicros - segment.LastSendMicros < reorderGraceMicros)
             {
-                return false;
+                return false; // Still within reorder grace period.
             }
 
             if (HasPendingFecRepairUnsafe(segment, nowMicros))
             {
-                return false;
+                return false; // FEC might still recover this.
             }
 
             bool firstMissing = segment.SequenceNumber == firstMissingSequence;
@@ -1089,6 +1474,10 @@ namespace Ucp.Internal
             return false;
         }
 
+        /// <summary>
+        /// Checks whether FEC repair for this segment's group is still pending,
+        /// in which case SACK-based fast retransmit should wait.
+        /// </summary>
         private bool HasPendingFecRepairUnsafe(OutboundSegment segment, long nowMicros)
         {
             if (_fecCodec == null || segment == null || segment.FirstMissingAckMicros <= 0)
@@ -1106,6 +1495,10 @@ namespace Ucp.Internal
             return nowMicros - segment.FirstMissingAckMicros < graceMicros;
         }
 
+        /// <summary>
+        /// Returns the grace period in microseconds during which FEC repair is
+        /// expected before SACK fast retransmit triggers.
+        /// </summary>
         private long GetFecFastRetransmitGraceMicrosUnsafe()
         {
             long rttMicros = _rtoEstimator.SmoothedRttMicros > 0 ? _rtoEstimator.SmoothedRttMicros : _lastRttMicros;
@@ -1124,6 +1517,11 @@ namespace Ucp.Internal
             return Math.Max(UcpConstants.SACK_FAST_RETRANSMIT_MIN_REORDER_GRACE_MICROS, Math.Min(adaptiveGraceMicros, maxGraceMicros));
         }
 
+        /// <summary>
+        /// Determines whether a non-leading hole is "reported" by SACK blocks:
+        /// a lower range has been ACKed and a higher range has been SACKed,
+        /// bracketing this sequence as a real hole.
+        /// </summary>
         private static bool IsReportedSackHoleUnsafe(uint sequenceNumber, uint cumulativeAckNumber, List<SackBlock> sackBlocks)
         {
             if (sackBlocks == null || sackBlocks.Count == 0)
@@ -1141,7 +1539,7 @@ namespace Ucp.Internal
                 SackBlock block = sackBlocks[i];
                 if (UcpSequenceComparer.IsInForwardRange(sequenceNumber, block.Start, block.End))
                 {
-                    return false;
+                    return false; // Sequence is inside a SACK block, not a hole.
                 }
 
                 if (UcpSequenceComparer.IsBefore(block.End, sequenceNumber))
@@ -1160,6 +1558,10 @@ namespace Ucp.Internal
             return hasLowerAck && hasHigherSack;
         }
 
+        /// <summary>
+        /// Returns the minimum time a segment must wait before SACK fast
+        /// retransmit triggers, scaled to a fraction of the RTT.
+        /// </summary>
         private long GetSackFastRetransmitReorderGraceMicrosUnsafe()
         {
             long rttMicros = _rtoEstimator.SmoothedRttMicros > 0 ? _rtoEstimator.SmoothedRttMicros : _lastRttMicros;
@@ -1173,6 +1575,12 @@ namespace Ucp.Internal
             return Math.Max(UcpConstants.SACK_FAST_RETRANSMIT_MIN_REORDER_GRACE_MICROS, rttMicros / 8);
         }
 
+        // ---- Duplicate ACK handling ----
+
+        /// <summary>
+        /// Updates duplicate ACK counters and triggers fast retransmit if the
+        /// duplicate ACK threshold is reached for the inferred lost segment.
+        /// </summary>
         private void UpdateDuplicateAckStateUnsafe(UcpAckPacket ackPacket, long nowMicros, out bool fastRetransmitTriggered)
         {
             fastRetransmitTriggered = false;
@@ -1183,6 +1591,7 @@ namespace Ucp.Internal
                 _duplicateAckCount++;
                 if (_duplicateAckCount >= UcpConstants.DUPLICATE_ACK_THRESHOLD && !_fastRecoveryActive)
                 {
+                    // The next sequence after the cumulative ACK is inferred as lost.
                     uint lostSeq = UcpSequenceComparer.Increment(ackPacket.AckNumber);
                     OutboundSegment lostSegment;
                     if (_sendBuffer.TryGetValue(lostSeq, out lostSegment) && !lostSegment.Acked && lostSegment.SendCount == 1 && !lostSegment.NeedsRetransmit)
@@ -1212,6 +1621,11 @@ namespace Ucp.Internal
             _hasLastAckNumber = true;
         }
 
+        // ---- Loss classification ----
+
+        /// <summary>
+        /// Classifies whether a single sequence loss is congestion-related.
+        /// </summary>
         private bool IsCongestionLossUnsafe(uint sequenceNumber, long sampleRttMicros, long nowMicros, int contiguousLossCount)
         {
             List<uint> sequences = new List<uint>(1);
@@ -1219,11 +1633,18 @@ namespace Ucp.Internal
             return ClassifyLossesUnsafe(sequences, nowMicros, sampleRttMicros, contiguousLossCount);
         }
 
+        /// <summary>
+        /// Classifies multiple sequence losses as congestion or random.
+        /// </summary>
         private bool ClassifyLossesUnsafe(IList<uint> sequenceNumbers, long nowMicros, long sampleRttMicros)
         {
             return ClassifyLossesUnsafe(sequenceNumbers, nowMicros, sampleRttMicros, GetMaxContiguousLossRun(sequenceNumbers));
         }
 
+        /// <summary>
+        /// Classifies losses as congestion based on deduplicated loss event count,
+        /// contiguous loss run length, and RTT inflation relative to the minimum.
+        /// </summary>
         private bool ClassifyLossesUnsafe(IList<uint> sequenceNumbers, long nowMicros, long sampleRttMicros, int contiguousLossCount)
         {
             long windowMicros = GetLossClassifierWindowMicrosUnsafe();
@@ -1257,7 +1678,7 @@ namespace Ucp.Internal
             int maxContiguousLossCount = Math.Max(contiguousLossCount, GetMaxContiguousRecentLossRunUnsafe());
             if (dedupedLossCount <= UcpConstants.BBR_RANDOM_LOSS_MAX_DEDUPED_EVENTS && maxContiguousLossCount < UcpConstants.BBR_CONGESTION_LOSS_BURST_THRESHOLD)
             {
-                return false;
+                return false; // Too few losses to classify as congestion.
             }
 
             bool clusteredLoss = maxContiguousLossCount >= UcpConstants.BBR_CONGESTION_LOSS_BURST_THRESHOLD || dedupedLossCount > UcpConstants.BBR_CONGESTION_LOSS_WINDOW_THRESHOLD;
@@ -1273,9 +1694,13 @@ namespace Ucp.Internal
                 return false;
             }
 
+            // Congestion requires RTT inflation (queue buildup).
             return medianRttMicros > (long)(minRttMicros * UcpConstants.BBR_CONGESTION_LOSS_RTT_MULTIPLIER);
         }
 
+        /// <summary>
+        /// Returns the time window in microseconds for recent loss classification.
+        /// </summary>
         private long GetLossClassifierWindowMicrosUnsafe()
         {
             long minRttMicros = GetMinimumObservedRttMicrosUnsafe();
@@ -1287,6 +1712,9 @@ namespace Ucp.Internal
             return Math.Max(UcpConstants.MICROS_PER_MILLI, minRttMicros * 2);
         }
 
+        /// <summary>
+        /// Removes loss events older than the classification window.
+        /// </summary>
         private void PruneLossEventsUnsafe(long nowMicros, long windowMicros)
         {
             while (_recentLossEvents.Count > 0 && nowMicros - _recentLossEvents.Peek().TimestampMicros > windowMicros)
@@ -1296,6 +1724,9 @@ namespace Ucp.Internal
             }
         }
 
+        /// <summary>
+        /// Returns the median RTT across recent loss events for congestion detection.
+        /// </summary>
         private long GetLossWindowMedianRttMicrosUnsafe()
         {
             List<long> samples = new List<long>();
@@ -1321,6 +1752,9 @@ namespace Ucp.Internal
             return samples[samples.Count / 2];
         }
 
+        /// <summary>
+        /// Returns the minimum observed RTT from all collected RTT samples.
+        /// </summary>
         private long GetMinimumObservedRttMicrosUnsafe()
         {
             long minRttMicros = 0;
@@ -1341,6 +1775,9 @@ namespace Ucp.Internal
             return minRttMicros;
         }
 
+        /// <summary>
+        /// Returns the maximum contiguous loss run among recent loss events.
+        /// </summary>
         private int GetMaxContiguousRecentLossRunUnsafe()
         {
             if (_recentLossEvents.Count == 0)
@@ -1357,6 +1794,9 @@ namespace Ucp.Internal
             return GetMaxContiguousLossRun(sequenceNumbers);
         }
 
+        /// <summary>
+        /// Computes the longest run of consecutive sequence numbers in a list.
+        /// </summary>
         private static int GetMaxContiguousLossRun(IList<uint> sequenceNumbers)
         {
             if (sequenceNumbers == null || sequenceNumbers.Count == 0)
@@ -1372,7 +1812,7 @@ namespace Ucp.Internal
             {
                 if (sorted[i] == sorted[i - 1])
                 {
-                    continue;
+                    continue; // Skip duplicates.
                 }
 
                 if (unchecked(sorted[i] - sorted[i - 1]) == 1U)
@@ -1385,13 +1825,17 @@ namespace Ucp.Internal
                 }
                 else
                 {
-                    currentRun = 1;
+                    currentRun = 1; // Gap found, reset run.
                 }
             }
 
             return maxRun;
         }
 
+        /// <summary>
+        /// Returns the minimum age before a segment is eligible for duplicate-ACK
+        /// fast retransmit, scaled to RTT / 8 with a minimum reorder grace.
+        /// </summary>
         private long GetFastRetransmitAgeThresholdUnsafe()
         {
             long rttMicros = _rtoEstimator.SmoothedRttMicros > 0 ? _rtoEstimator.SmoothedRttMicros : _lastRttMicros;
@@ -1400,17 +1844,24 @@ namespace Ucp.Internal
             return rttMicros <= 0 ? 0 : Math.Max(UcpConstants.SACK_FAST_RETRANSMIT_MIN_REORDER_GRACE_MICROS, rttMicros / 8);
         }
 
+        /// <summary>
+        /// Returns true if early retransmit should trigger (when inflight is tiny).
+        /// </summary>
         private bool ShouldTriggerEarlyRetransmitUnsafe()
         {
             int inflightSegments = Math.Max(1, _config.MaxPayloadSize) <= 0 ? 0 : (int)Math.Ceiling(_flightBytes / (double)Math.Max(1, _config.MaxPayloadSize));
             return inflightSegments > 0 && inflightSegments <= UcpConstants.EARLY_RETRANSMIT_MAX_INFLIGHT_SEGMENTS;
         }
 
+        /// <summary>
+        /// Guards against redundant retransmits: a segment must wait at least one
+        /// RTT (or RTO) before being retransmitted again after the first send.
+        /// </summary>
         private bool ShouldAcceptRetransmitRequestUnsafe(OutboundSegment segment, long nowMicros)
         {
             if (segment == null || segment.SendCount <= 1 || segment.LastSendMicros <= 0)
             {
-                return true;
+                return true; // First retransmit is always accepted.
             }
 
             long graceMicros = _rtoEstimator.SmoothedRttMicros > 0 ? _rtoEstimator.SmoothedRttMicros : _rtoEstimator.CurrentRtoMicros;
@@ -1422,12 +1873,18 @@ namespace Ucp.Internal
             return nowMicros - segment.LastSendMicros >= graceMicros;
         }
 
+        /// <summary>
+        /// Returns the overall retransmission ratio (retransmits / total sends).
+        /// </summary>
         private double GetRetransmissionRatioUnsafe()
         {
             int total = _sentDataPackets + _retransmittedPackets;
             return total == 0 ? 0d : _retransmittedPackets / (double)total;
         }
 
+        /// <summary>
+        /// Conditionally writes a debug trace message for the PCB.
+        /// </summary>
         private void TraceLogUnsafe(string message)
         {
             if (_config.EnableDebugLog)
@@ -1436,6 +1893,14 @@ namespace Ucp.Internal
             }
         }
 
+        // ---- Packet handler: DATA ----
+
+        /// <summary>
+        /// Handles an incoming DATA packet: stores it in the receive buffer if
+        /// within the window, drains consecutive in-order segments to the receive
+        /// queue, generates NAK for detected gaps, and attempts FEC recovery.
+        /// </summary>
+        /// <param name="dataPacket">The decoded data packet.</param>
         private void HandleData(UcpDataPacket dataPacket)
         {
             List<uint> missing = new List<uint>();
@@ -1446,6 +1911,7 @@ namespace Ucp.Internal
 
             lock (_sync)
             {
+                // Validate packet integrity.
                 if (dataPacket.Payload == null || dataPacket.Payload.Length > _config.MaxPayloadSize || dataPacket.FragmentTotal == 0 || dataPacket.FragmentIndex >= dataPacket.FragmentTotal)
                 {
                     return;
@@ -1467,6 +1933,7 @@ namespace Ucp.Internal
                     shouldStore = usedBytes + dataPacket.Payload.Length <= _localReceiveWindowBytes;
                     if (shouldStore && !_recvBuffer.ContainsKey(dataPacket.SequenceNumber))
                     {
+                        // Store the segment in the receive buffer.
                         InboundSegment inbound = new InboundSegment();
                         inbound.SequenceNumber = dataPacket.SequenceNumber;
                         inbound.FragmentTotal = dataPacket.FragmentTotal;
@@ -1487,6 +1954,7 @@ namespace Ucp.Internal
 
                     if (shouldStore && UcpSequenceComparer.IsAfter(dataPacket.SequenceNumber, _nextExpectedSequence))
                     {
+                        // Gap detected: scan and collect NAK-eligible sequences.
                         sendImmediateAck = ShouldSendImmediateReorderedAckUnsafe(NowMicros());
                         uint current = _nextExpectedSequence;
                         int remainingNakSlots = UcpConstants.MAX_NAK_MISSING_SCAN;
@@ -1513,6 +1981,7 @@ namespace Ucp.Internal
                         }
                     }
 
+                    // Drain contiguous in-order segments.
                     while (_recvBuffer.Count > 0)
                     {
                         InboundSegment next;
@@ -1530,6 +1999,7 @@ namespace Ucp.Internal
                         readyPayloads.Add(next.Payload);
                     }
 
+                    // Check if the first gap should trigger a NAK.
                     if (_recvBuffer.Count > 0 && !_recvBuffer.ContainsKey(_nextExpectedSequence))
                     {
                         if (_recvBuffer.Count >= UcpConstants.IMMEDIATE_ACK_REORDERED_PACKET_THRESHOLD && ShouldSendImmediateReorderedAckUnsafe(NowMicros()))
@@ -1549,6 +2019,7 @@ namespace Ucp.Internal
                 }
             }
 
+            // Deliver ready payloads to the application outside the lock.
             for (int i = 0; i < readyPayloads.Count; i++)
             {
                 EnqueuePayload(readyPayloads[i]);
@@ -1574,6 +2045,12 @@ namespace Ucp.Internal
             }
         }
 
+        // ---- FEC recovery helpers ----
+
+        /// <summary>
+        /// Attempts to recover missing packets around a freshly received sequence
+        /// using stored FEC repair data.
+        /// </summary>
         private void TryRecoverFecAroundUnsafe(uint receivedSequenceNumber, List<byte[]> readyPayloads)
         {
             if (_fecCodec == null || readyPayloads == null)
@@ -1593,11 +2070,16 @@ namespace Ucp.Internal
 
                 if (StoreRecoveredFecPacketsUnsafe(groupBase, _fecCodec.TryRecoverPacketsFromStoredRepair(candidateSeq), readyPayloads) > 0)
                 {
-                    return;
+                    return; // Recovery succeeded; stop scanning.
                 }
             }
         }
 
+        /// <summary>
+        /// Stores FEC-recovered packets into the receive buffer and drains
+        /// any newly contiguous in-order data.
+        /// </summary>
+        /// <returns>Number of recovered packets stored.</returns>
         private int StoreRecoveredFecPacketsUnsafe(uint groupBase, List<UcpFecCodec.RecoveredPacket> recoveredPackets, List<byte[]> readyPayloads)
         {
             if (recoveredPackets == null || recoveredPackets.Count == 0)
@@ -1629,6 +2111,10 @@ namespace Ucp.Internal
             return stored;
         }
 
+        /// <summary>
+        /// Stores a single FEC-recovered segment into the receive buffer.
+        /// </summary>
+        /// <returns>True if the segment was stored successfully.</returns>
         private bool StoreRecoveredFecSegmentUnsafe(uint recoveredSeq, byte[] recovered)
         {
             if (recovered == null || UcpSequenceComparer.IsBefore(recoveredSeq, _nextExpectedSequence) || _recvBuffer.ContainsKey(recoveredSeq))
@@ -1647,6 +2133,10 @@ namespace Ucp.Internal
             return true;
         }
 
+        /// <summary>
+        /// Drains all contiguous in-order segments from the receive buffer into
+        /// the ready payloads list.
+        /// </summary>
         private void DrainReadyPayloadsUnsafe(List<byte[]> readyPayloads)
         {
             while (_recvBuffer.Count > 0)
@@ -1664,6 +2154,9 @@ namespace Ucp.Internal
             }
         }
 
+        /// <summary>
+        /// Clears all tracking state for a given sequence number.
+        /// </summary>
         private void ClearMissingReceiveStateUnsafe(uint sequenceNumber)
         {
             _nakIssued.Remove(sequenceNumber);
@@ -1672,11 +2165,17 @@ namespace Ucp.Internal
             _lastNakIssuedMicros.Remove(sequenceNumber);
         }
 
+        /// <summary>
+        /// Returns true if a NAK hasn't already been issued for the given sequence.
+        /// </summary>
         private bool ShouldIssueNakUnsafe(uint sequenceNumber)
         {
             return !_nakIssued.Contains(sequenceNumber);
         }
 
+        /// <summary>
+        /// Throttles immediate reordered-data ACKs: allows one per minimum interval.
+        /// </summary>
         private bool ShouldSendImmediateReorderedAckUnsafe(long nowMicros)
         {
             if (_lastReorderedAckSentMicros == 0 || nowMicros - _lastReorderedAckSentMicros >= UcpConstants.REORDERED_ACK_MIN_INTERVAL_MICROS)
@@ -1688,6 +2187,10 @@ namespace Ucp.Internal
             return false;
         }
 
+        /// <summary>
+        /// Checks whether the reorder grace period for a missing sequence has expired,
+        /// using tiered confidence levels based on observation count.
+        /// </summary>
         private static bool HasNakReorderGraceExpiredUnsafe(int missingCount, long firstSeenMicros, long nowMicros)
         {
             long graceMicros = missingCount >= UcpConstants.NAK_HIGH_CONFIDENCE_MISSING_THRESHOLD
@@ -1698,12 +2201,19 @@ namespace Ucp.Internal
             return nowMicros - firstSeenMicros >= graceMicros;
         }
 
+        /// <summary>
+        /// Marks a sequence number as having had a NAK issued.
+        /// </summary>
         private void MarkNakIssuedUnsafe(uint sequenceNumber)
         {
             _nakIssued.Add(sequenceNumber);
             _lastNakIssuedMicros[sequenceNumber] = NowMicros();
         }
 
+        /// <summary>
+        /// Returns the first-seen timestamp for a missing sequence, recording it
+        /// if this is the first observation.
+        /// </summary>
         private long GetMissingFirstSeenMicrosUnsafe(uint sequenceNumber)
         {
             long firstSeenMicros;
@@ -1716,6 +2226,12 @@ namespace Ucp.Internal
             return firstSeenMicros;
         }
 
+        // ---- Packet handler: FEC repair ----
+
+        /// <summary>
+        /// Handles an incoming FEC repair packet: feeds it to the FEC codec,
+        /// stores recovered packets, and delivers them to the application.
+        /// </summary>
         private void HandleFecRepair(UcpFecRepairPacket packet)
         {
             if (_fecCodec == null || packet.Payload == null)
@@ -1746,6 +2262,12 @@ namespace Ucp.Internal
             ScheduleAck();
         }
 
+        // ---- Packet handler: FIN ----
+
+        /// <summary>
+        /// Handles an incoming FIN: acknowledges it, sends our own FIN if not
+        /// yet sent, and checks if both FINs are acknowledged for final close.
+        /// </summary>
         private void HandleFin(UcpControlPacket packet)
         {
             bool needSendOwnFin = false;
@@ -1772,6 +2294,13 @@ namespace Ucp.Internal
             }
         }
 
+        // ---- Packet sending helpers ----
+
+        /// <summary>
+        /// Sends a NAK packet with the given list of missing sequences.
+        /// Respects the per-RTT NAK emission rate limit.
+        /// </summary>
+        /// <param name="missing">List of missing sequence numbers to report.</param>
         private void SendNak(List<uint> missing)
         {
             if (missing == null || missing.Count == 0)
@@ -1791,12 +2320,12 @@ namespace Ucp.Internal
                 if (_lastNakWindowMicros == 0 || nowMicros - _lastNakWindowMicros >= rttWindowMicros)
                 {
                     _lastNakWindowMicros = nowMicros;
-                    _naksSentThisRttWindow = 0;
+                    _naksSentThisRttWindow = 0; // Reset NAK rate limit window.
                 }
 
                 if (_naksSentThisRttWindow >= UcpConstants.MAX_NAKS_PER_RTT)
                 {
-                    return;
+                    return; // Rate limit exceeded; drop NAK.
                 }
 
                 _naksSentThisRttWindow++;
@@ -1810,6 +2339,12 @@ namespace Ucp.Internal
             _transport.Send(encoded, _remoteEndPoint);
         }
 
+        /// <summary>
+        /// Sends a control packet (Syn, SynAck, Fin, Rst). Syn and SynAck
+        /// include the current next-send-sequence for handshake validation.
+        /// </summary>
+        /// <param name="type">The control packet type.</param>
+        /// <param name="flags">Packet flags.</param>
         private void SendControl(UcpPacketType type, UcpPacketFlags flags)
         {
             UcpControlPacket packet = new UcpControlPacket();
@@ -1829,6 +2364,12 @@ namespace Ucp.Internal
             _transport.Send(encoded, _remoteEndPoint);
         }
 
+        /// <summary>
+        /// Sends an ACK packet with the current cumulative ACK number, SACK blocks,
+        /// advertised window, and echo timestamp.
+        /// </summary>
+        /// <param name="flags">Packet flags (e.g. FinAck).</param>
+        /// <param name="overrideEchoTimestamp">Override echo timestamp (0 = use stored, -1 = send keepalive).</param>
         private void SendAckPacket(UcpPacketFlags flags, long overrideEchoTimestamp)
         {
             UcpAckPacket packet;
@@ -1849,6 +2390,10 @@ namespace Ucp.Internal
             _transport.Send(encoded, _remoteEndPoint);
         }
 
+        /// <summary>
+        /// Schedules a delayed ACK to allow potential piggybacking. If the
+        /// delayed ACK timeout is zero or the RTT is very short, sends immediately.
+        /// </summary>
         private void ScheduleAck()
         {
             if (_config.DelayedAckTimeoutMicros <= 0)
@@ -1860,14 +2405,14 @@ namespace Ucp.Internal
             long ackDelayMicros = _config.DelayedAckTimeoutMicros;
             if (_lastRttMicros > 30L * UcpConstants.MICROS_PER_MILLI)
             {
-                ackDelayMicros = Math.Min(ackDelayMicros, UcpConstants.MICROS_PER_MILLI);
+                ackDelayMicros = Math.Min(ackDelayMicros, UcpConstants.MICROS_PER_MILLI); // Shorter delay on high-latency paths.
             }
 
             lock (_sync)
             {
                 if (_ackDelayed)
                 {
-                    return;
+                    return; // Already scheduled.
                 }
 
                 _ackDelayed = true;
@@ -1875,6 +2420,7 @@ namespace Ucp.Internal
 
             if (_network == null)
             {
+                // Standalone: use Task.Delay.
                 Task.Run(async delegate
                 {
                     try
@@ -1894,6 +2440,7 @@ namespace Ucp.Internal
                 return;
             }
 
+            // Network-managed: use network timer.
             _network.AddTimer(_network.CurrentTimeUs + ackDelayMicros, delegate
             {
                 lock (_sync)
@@ -1905,6 +2452,13 @@ namespace Ucp.Internal
             });
         }
 
+        // ---- Send queue flush ----
+
+        /// <summary>
+        /// Flushes the send buffer: collects pending segments, applies pacing
+        /// and fair-queue credit, encodes and sends via the transport.
+        /// Reschedules itself if pacing wait time is needed.
+        /// </summary>
         private async Task FlushSendQueueAsync()
         {
             await _flushLock.WaitAsync().ConfigureAwait(false);
@@ -1934,14 +2488,14 @@ namespace Ucp.Internal
 
                             if (!segment.NeedsRetransmit && !segment.InFlight && _flightBytes + segment.Payload.Length > windowBytes)
                             {
-                                break;
+                                break; // Send window is full.
                             }
 
                             int packetSize = UcpConstants.DataHeaderSize + segment.Payload.Length;
                             bool urgentRecovery = segment.NeedsRetransmit && segment.SendCount > 0 && segment.UrgentRetransmit && CanUseUrgentRecoveryUnsafe(nowMicros);
                             if (_useFairQueue && _fairQueueCreditBytes < packetSize && !urgentRecovery)
                             {
-                                break;
+                                break; // Not enough fair-queue credit.
                             }
 
             if (urgentRecovery)
@@ -1954,7 +2508,7 @@ namespace Ucp.Internal
                             else if (!_pacing.TryConsume(packetSize, nowMicros))
                             {
                                 waitMicros = _pacing.GetWaitTimeMicros(packetSize, nowMicros);
-                                break;
+                                break; // Pacing gate; cannot send now.
                             }
 
                             if (_useFairQueue)
@@ -1996,6 +2550,7 @@ namespace Ucp.Internal
                         break;
                     }
 
+                    // Encode and send all collected segments outside the lock.
                     for (int i = 0; i < segmentsToSend.Count; i++)
                     {
                         OutboundSegment segment = segmentsToSend[i];
@@ -2019,6 +2574,7 @@ namespace Ucp.Internal
                         _bytesSent += segment.Payload.Length;
                         _transport.Send(encoded, _remoteEndPoint);
 
+                        // FEC encoding: generate and send repair packets when a group is complete.
                         if (_fecCodec != null && segment.SendCount <= 1)
                         {
                             if (_fecGroupSendCount == 0)
@@ -2054,11 +2610,15 @@ namespace Ucp.Internal
             }
         }
 
+        /// <summary>
+        /// Schedules a delayed flush after the given wait time elapses.
+        /// </summary>
+        /// <param name="waitMicros">Wait time in microseconds.</param>
         private void ScheduleDelayedFlush(long waitMicros)
         {
             if (_flushDelayed)
             {
-                return;
+                return; // Already scheduled.
             }
 
             _flushDelayed = true;
@@ -2070,6 +2630,7 @@ namespace Ucp.Internal
 
             if (_network == null)
             {
+                // Standalone: use Task.Delay.
                 Task.Run(async () =>
                 {
                     try
@@ -2086,6 +2647,7 @@ namespace Ucp.Internal
                 return;
             }
 
+            // Network-managed: use network timer.
             _flushTimerId = _network.AddTimer(_network.NowMicroseconds + (delayMs * UcpConstants.MICROS_PER_MILLI), delegate
             {
                 _flushDelayed = false;
@@ -2094,6 +2656,11 @@ namespace Ucp.Internal
             });
         }
 
+        /// <summary>
+        /// Enqueues a received payload for application delivery and fires the
+        /// DataReceived event.
+        /// </summary>
+        /// <param name="payload">The in-order payload bytes.</param>
         private void EnqueuePayload(byte[] payload)
         {
             if (payload == null || payload.Length == 0)
@@ -2120,6 +2687,11 @@ namespace Ucp.Internal
             _receiveSignal.Release();
         }
 
+        // ---- Send window management ----
+
+        /// <summary>
+        /// Returns the effective send window in bytes: min(congestion_window, remote_receive_window).
+        /// </summary>
         private int GetSendWindowBytesUnsafe()
         {
             int receiveWindowBytes = (int)_remoteWindowBytes;
@@ -2133,6 +2705,10 @@ namespace Ucp.Internal
             return windowBytes;
         }
 
+        /// <summary>
+        /// Returns true if the urgent recovery budget hasn't been exhausted
+        /// in the current RTT window.
+        /// </summary>
         private bool CanUseUrgentRecoveryUnsafe(long nowMicros)
         {
             long windowMicros = _rtoEstimator.SmoothedRttMicros > 0 ? _rtoEstimator.SmoothedRttMicros : _config.MinRtoMicros;
@@ -2144,12 +2720,16 @@ namespace Ucp.Internal
             if (_urgentRecoveryWindowMicros == 0 || nowMicros - _urgentRecoveryWindowMicros >= windowMicros)
             {
                 _urgentRecoveryWindowMicros = nowMicros;
-                _urgentRecoveryPacketsInWindow = 0;
+                _urgentRecoveryPacketsInWindow = 0; // Reset window budget.
             }
 
             return _urgentRecoveryPacketsInWindow < UcpConstants.URGENT_RETRANSMIT_BUDGET_PER_RTT;
         }
 
+        /// <summary>
+        /// Returns true if the connection is nearing the disconnect timeout,
+        /// making urgent recovery more critical.
+        /// </summary>
         private bool IsNearDisconnectTimeoutUnsafe(long nowMicros)
         {
             if (_config.DisconnectTimeoutMicros <= 0)
@@ -2161,6 +2741,9 @@ namespace Ucp.Internal
             return idleMicros >= _config.DisconnectTimeoutMicros * UcpConstants.URGENT_RETRANSMIT_DISCONNECT_THRESHOLD_PERCENT / 100L;
         }
 
+        /// <summary>
+        /// Returns the total bytes used in the local receive buffer (queued + out-of-order).
+        /// </summary>
         private uint GetReceiveWindowUsedBytesUnsafe()
         {
             long usedBytes = _queuedReceiveBytes;
@@ -2182,6 +2765,12 @@ namespace Ucp.Internal
             return (uint)usedBytes;
         }
 
+        /// <summary>
+        /// Creates a common header for outbound packets.
+        /// </summary>
+        /// <param name="type">The packet type.</param>
+        /// <param name="flags">Packet flags.</param>
+        /// <param name="timestampMicros">Microsecond timestamp.</param>
         private UcpCommonHeader CreateHeader(UcpPacketType type, UcpPacketFlags flags, long timestampMicros)
         {
             UcpCommonHeader header = new UcpCommonHeader();
@@ -2192,6 +2781,9 @@ namespace Ucp.Internal
             return header;
         }
 
+        // ---- Timer management ----
+
+        /// <summary>Timer callback invoked when using a .NET Timer (standalone mode).</summary>
         private void OnTimer(object state)
         {
             if (_disposed)
@@ -2202,10 +2794,11 @@ namespace Ucp.Internal
             _ = OnTimerAsync();
             if (_network != null)
             {
-                ScheduleTimer();
+                ScheduleTimer(); // Reschedule for network-managed mode.
             }
         }
 
+        /// <summary>Schedules the next timer tick via the network engine.</summary>
         private void ScheduleTimer()
         {
             if (_network == null || _disposed)
@@ -2217,11 +2810,17 @@ namespace Ucp.Internal
             _timerId = _network.AddTimer(_network.NowMicroseconds + intervalMicros, delegate { OnTimer(null); });
         }
 
+        /// <summary>Delegates to the microsecond-aware timer handler.</summary>
         private async Task OnTimerAsync()
         {
             await OnTimerAsync(NowMicros()).ConfigureAwait(false);
         }
 
+        /// <summary>
+        /// Core timer handler: checks for RTO timeouts, tail-loss probes,
+        /// keep-alive expiration, disconnection timeouts, and collects NAK gaps.
+        /// </summary>
+        /// <param name="nowMicros">Current time in microseconds.</param>
         private async Task OnTimerAsync(long nowMicros)
         {
             bool timedOut = false;
@@ -2248,7 +2847,7 @@ namespace Ucp.Internal
                     {
                         if (rtoRetransmitBudget <= 0)
                         {
-                            break;
+                            break; // Budget exhausted for this tick.
                         }
 
                         bool segmentTimedOutForCongestion = IsCongestionLossUnsafe(segment.SequenceNumber, 0, nowMicros, 1);
@@ -2256,7 +2855,7 @@ namespace Ucp.Internal
                         {
                             _timeoutRetransmissions++;
                             maxRetransmissionsExceeded = true;
-                            break;
+                            break; // Max retransmissions exceeded; abort.
                         }
 
                             segment.NeedsRetransmit = true;
@@ -2268,6 +2867,7 @@ namespace Ucp.Internal
                     }
                 }
 
+                // Tail-loss probe: when inflight is low and no ACK received recently.
                 if (!timedOut && !_tailLossProbePending && inflightSegments > 0 && inflightSegments <= UcpConstants.TLP_MAX_INFLIGHT_SEGMENTS)
                 {
                     long tlpTimeoutMicros = _rtoEstimator.SmoothedRttMicros > 0
@@ -2303,7 +2903,7 @@ namespace Ucp.Internal
                     TraceLogUnsafe("RTO loss congestion=" + timedOutForCongestion + " rto=" + _rtoEstimator.CurrentRtoMicros);
                     if (timedOutForCongestion)
                     {
-                        _rtoEstimator.Backoff();
+                        _rtoEstimator.Backoff(); // Exponential backoff for congestion timeouts.
                     }
                 }
 
@@ -2345,7 +2945,7 @@ namespace Ucp.Internal
 
             if (sendKeepAlive)
             {
-                SendAckPacket(UcpPacketFlags.None, -1);
+                SendAckPacket(UcpPacketFlags.None, -1); // -1 = keepalive (no echo timestamp).
             }
 
             if ((_state == UcpConnectionState.HandshakeSynSent || _state == UcpConnectionState.HandshakeSynReceived || _state == UcpConnectionState.Established || _state == UcpConnectionState.ClosingFinSent || _state == UcpConnectionState.ClosingFinReceived)
@@ -2361,6 +2961,10 @@ namespace Ucp.Internal
             }
         }
 
+        /// <summary>
+        /// Scans the receive buffer for missing sequences and collects up to
+        /// MAX_NAK_SEQUENCES_PER_PACKET entries for NAK emission.
+        /// </summary>
         private void CollectMissingForNakUnsafe(List<uint> missing, long nowMicros)
         {
             if (missing == null || _recvBuffer.Count == 0 || _recvBuffer.ContainsKey(_nextExpectedSequence))
@@ -2407,6 +3011,12 @@ namespace Ucp.Internal
             }
         }
 
+        // ---- State transitions ----
+
+        /// <summary>
+        /// Transitions the connection to Established state. Raises the Connected
+        /// event and signals the connection TCS.
+        /// </summary>
         private void TransitionToEstablished()
         {
             Action connected = null;
@@ -2432,6 +3042,11 @@ namespace Ucp.Internal
             }
         }
 
+        /// <summary>
+        /// Transitions the connection to Closed state. Raises the Disconnected
+        /// event, signals both TCSes, releases receive signal, and invokes
+        /// the closed callback.
+        /// </summary>
         private void TransitionToClosed()
         {
             Action disconnected = null;
@@ -2443,7 +3058,7 @@ namespace Ucp.Internal
                 {
                     if (_closedResourcesReleased)
                     {
-                        return;
+                        return; // Already fully cleaned up.
                     }
                 }
 
@@ -2465,7 +3080,7 @@ namespace Ucp.Internal
 
             _connectedTcs.TrySetResult(false);
             _closedTcs.TrySetResult(true);
-            _receiveSignal.Release();
+            _receiveSignal.Release(); // Unblocks any waiting ReceiveAsync callers.
             if (releaseResources)
             {
                 ReleaseNetworkRegistrations();
@@ -2482,6 +3097,10 @@ namespace Ucp.Internal
             }
         }
 
+        /// <summary>
+        /// Unregisters this PCB from the network engine and cancels all
+        /// registered timers.
+        /// </summary>
         private void ReleaseNetworkRegistrations()
         {
             if (_network == null)
@@ -2503,6 +3122,11 @@ namespace Ucp.Internal
             }
         }
 
+        // ---- Utility methods ----
+
+        /// <summary>
+        /// Waits for a task to complete with a timeout; returns true if completed.
+        /// </summary>
         private static async Task<bool> WaitWithTimeoutAsync(Task task, int timeoutMilliseconds)
         {
             Task completed = await Task.WhenAny(task, Task.Delay(timeoutMilliseconds)).ConfigureAwait(false);
@@ -2515,6 +3139,9 @@ namespace Ucp.Internal
             return true;
         }
 
+        /// <summary>
+        /// Generates a non-zero cryptographically random connection ID.
+        /// </summary>
         private static uint NextConnectionId()
         {
             byte[] bytes = new byte[UcpConstants.CONNECTION_ID_SIZE];
@@ -2524,16 +3151,24 @@ namespace Ucp.Internal
                 ConnectionIdGenerator.GetBytes(bytes);
                 connectionId = BitConverter.ToUInt32(bytes, 0);
             }
-            while (connectionId == 0);
+            while (connectionId == 0); // Zero is reserved; retry until non-zero.
 
             return connectionId;
         }
 
+        /// <summary>
+        /// Returns the current protocol time in microseconds, preferring the
+        /// network's shared clock when available.
+        /// </summary>
         private long NowMicros()
         {
             return _network == null ? UcpTime.NowMicroseconds() : _network.CurrentTimeUs;
         }
 
+        /// <summary>
+        /// Adds an RTT sample to the history buffer, maintaining the maximum
+        /// sample count.
+        /// </summary>
         private void AddRttSampleUnsafe(long sampleRttMicros)
         {
             if (sampleRttMicros <= 0)
@@ -2544,10 +3179,13 @@ namespace Ucp.Internal
             _rttSamplesMicros.Add(sampleRttMicros);
             if (_rttSamplesMicros.Count > UcpConstants.MaxRttSamples)
             {
-                _rttSamplesMicros.RemoveAt(0);
+                _rttSamplesMicros.RemoveAt(0); // Drop oldest sample when at capacity.
             }
         }
 
+        /// <summary>
+        /// Validates send/receive buffer arguments.
+        /// </summary>
         private static void ValidateBuffer(byte[] buffer, int offset, int count)
         {
             if (buffer == null)
