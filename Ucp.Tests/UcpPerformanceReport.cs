@@ -1097,7 +1097,7 @@ namespace UcpTest
         {
             if (microseconds <= 0)
             {
-                return "1us";
+                return "0us";
             }
 
             if (microseconds < 1000L)

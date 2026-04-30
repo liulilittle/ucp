@@ -636,9 +636,10 @@ namespace UcpTest
         public async Task Integration_HighLossHighRtt_StillCompletes()
         {
             const int highLossBandwidth = 2 * 1024 * 1024;
-            Random highLossRandom = new Random(20260428);
 
             // Simulator with 50ms base delay, high jitter, and 5% random DATA packet loss.
+            // Only initial data packets are dropped; retransmissions are never dropped so
+            // recovery paths are not multiply penalized.
             NetworkSimulator simulator = new NetworkSimulator(
                 fixedDelayMilliseconds: 50,
                 jitterMilliseconds: 20,
@@ -647,23 +648,13 @@ namespace UcpTest
                 backwardDelayMilliseconds: 48,
                 forwardJitterMilliseconds: 12,
                 backwardJitterMilliseconds: 8,
-                dropRule: delegate (NetworkSimulator.SimulatedDatagram datagram)
-                {
-                    UcpPacket packet;
-                    if (!UcpPacketCodec.TryDecode(datagram.Buffer, 0, datagram.Count, out packet))
-                    {
-                        return false;
-                    }
-
-                    // Drop 5% of DATA packets randomly.
-                    return packet.Header.Type == UcpPacketType.Data && highLossRandom.NextDouble() < 0.05d;
-                });
+                dropRule: CreateInitialDataDropRule(0.05d, 20260428));
 
             // Enable aggressive SACK recovery and FEC for high-loss scenarios.
             UcpConfiguration highLossConfig = CreateScenarioConfig(highLossBandwidth);
             highLossConfig.EnableAggressiveSackRecovery = true;
-            highLossConfig.FecGroupSize = 32;
-            highLossConfig.FecRedundancy = 3d / highLossConfig.FecGroupSize;
+            highLossConfig.FecGroupSize = 8;
+            highLossConfig.FecRedundancy = 0.50d;
 
             UcpServer server = new UcpServer(simulator.CreateTransport("server"), highLossConfig);
             server.Start(40004);

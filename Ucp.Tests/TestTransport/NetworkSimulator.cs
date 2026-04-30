@@ -210,8 +210,12 @@ namespace UcpTest.TestTransport
 
         /// <summary>
         /// Computes the effective logical throughput in bytes per second.
-        /// For high-bandwidth no-loss scenarios, a virtual logical clock is used
-        /// to avoid OS scheduling artifacts inflating throughput measurements.
+        /// For high-bandwidth shaped links, uses a virtual logical clock to factor
+        /// out OS scheduling jitter while still accounting for bottleneck
+        /// serialization and one-way propagation. For lower-bandwidth and unshaped
+        /// links, falls back to wall-clock elapsed measurement.
+        /// Throughput is always capped at the configured bottleneck bandwidth so the
+        /// report never claims more payload bandwidth than physically possible.
         /// </summary>
         public double LogicalThroughputBytesPerSecond
         {
@@ -219,7 +223,6 @@ namespace UcpTest.TestTransport
             {
                 lock (_sync)
                 {
-                    // No data means zero throughput.
                     if (_logicalDataBytes <= 0)
                     {
                         return 0;
@@ -227,23 +230,18 @@ namespace UcpTest.TestTransport
 
                     double rawThroughput = 0;
 
-                    // Compute raw throughput based on wall-clock span between first and last scheduled delivery.
                     if (_firstDataSendMicros > 0 && _lastDataScheduledMicros > _firstDataSendMicros)
                     {
                         rawThroughput = _logicalDataBytes * 1000000d / (_lastDataScheduledMicros - _firstDataSendMicros);
                     }
 
-                    // Report bottleneck serialization throughput for every shaped
-                    // link. Propagation delay and OS scheduler jitter belong in the
-                    // latency/convergence columns, not in steady-state utilization.
-                    if (BandwidthBytesPerSecond > 0)
+                    if (BandwidthBytesPerSecond >= HighBandwidthLogicalClockThresholdBytesPerSecond)
                     {
                         long serializationMicros = (long)Math.Ceiling(_logicalDataBytes * 1000000d / BandwidthBytesPerSecond);
-                        long durationMicros = Math.Max(1, serializationMicros);
+                        long durationMicros = Math.Max(1, serializationMicros + AverageForwardDelayMicros);
                         return _logicalDataBytes * 1000000d / durationMicros;
                     }
 
-                    // Lossy scenarios use real scheduling but cap throughput at the configured bottleneck.
                     return BandwidthBytesPerSecond > 0 ? Math.Min(rawThroughput, BandwidthBytesPerSecond) : rawThroughput;
                 }
             }
@@ -823,10 +821,10 @@ namespace UcpTest.TestTransport
                     _nextReverseTransmitAvailableMicros = nextTransmitAvailableMicros;
                 }
 
-                // Virtual logical clock: used for every shaped benchmark path to
-                // compute steady-state bottleneck utilization independently of OS
-                // scheduling jitter while still accounting for serialization.
-                bool useVirtualLogicalClock = BandwidthBytesPerSecond > 0;
+                // Virtual logical clock: used for high-bandwidth scenarios to
+                // compute throughput independently of OS scheduling jitter while
+                // still accounting for bottleneck serialization.
+                bool useVirtualLogicalClock = BandwidthBytesPerSecond >= HighBandwidthLogicalClockThresholdBytesPerSecond;
                 long nextLogicalTransmitAvailableMicros = forwardDirection ? _nextForwardLogicalTransmitAvailableMicros : _nextReverseLogicalTransmitAvailableMicros;
 
                 if (!useVirtualLogicalClock)
