@@ -116,12 +116,6 @@ namespace Ucp
 
         // ---- Congestion/loss tracking ----
 
-        /// <summary>Number of loss events since the last ProbeRTT phase.</summary>
-        private int _lossEventsSinceLastProbeRtt;
-
-        /// <summary>Timestamp of the most recent packet loss, in microseconds.</summary>
-        private long _lastLossMicros;
-
         /// <summary>Multiplier applied to CWND due to congestion loss (1.0 = no reduction).</summary>
         private double _lossCwndGain = 1d;
 
@@ -502,61 +496,19 @@ namespace Ucp
             }
 
             double recentLossRate = GetRecentLossRatio(nowMicros);
-            lossRate = isCongestion ? Math.Max(lossRate, recentLossRate) : recentLossRate;
+            lossRate = Math.Max(lossRate, recentLossRate);
             _networkCondition = ClassifyNetworkCondition(nowMicros);
             UpdateEstimatedLossPercent(nowMicros, lossRate * 100d);
-            if (!ShouldTreatLossAsCongestion(nowMicros, isCongestion))
-            {
-                TraceLog("RandomLoss lossRate=" + lossRate.ToString("F4"));
-                _fastRecoveryEnteredMicros = nowMicros;
-                _consecutiveNonCongestionLosses++;
-                long outageGapMicros = Math.Max(MinRttMicros > 0 ? MinRttMicros * 3 : 0, 300000L);
-                if (_consecutiveNonCongestionLosses >= 3 && nowMicros - _lastAckMicros >= outageGapMicros)
-                {
-                    PacingGain = Math.Max(1.5d, PacingGain);
-                    _consecutiveNonCongestionLosses = 0;
-                }
-                else if (Mode == BbrMode.ProbeBw)
-                {
-                    PacingGain = Math.Max(PacingGain, CalculatePacingGain(nowMicros));
-                    RecalculateModel(nowMicros);
-                }
 
-                return;
-            }
-
-            // Loss-control: reduce pacing and CWND when over the loss budget.
-            if (_config.LossControlEnable && _networkCondition == NetworkCondition.Congested && EstimatedLossPercent > _maxBandwidthLossPercent)
-            {
-                PacingGain = Math.Max(UcpConstants.BBR_HIGH_LOSS_PACING_GAIN, PacingGain * UcpConstants.BBR_CONGESTION_LOSS_REDUCTION);
-                _lossCwndGain = Math.Max(UcpConstants.BBR_MIN_LOSS_CWND_GAIN, _lossCwndGain * UcpConstants.BBR_CONGESTION_LOSS_REDUCTION);
-                RecalculateModel(nowMicros);
-                return;
-            }
-
-            // Track loss events and trigger ProbeRTT if the threshold is exceeded.
-            long resetWindowMicros = Math.Max(MinRttMicros > 0 ? MinRttMicros * UcpConstants.RTO_MAX_BACKOFF_MIN_RTO_MULTIPLIER : 0, UcpConstants.MICROS_PER_SECOND);
-            if (_lastLossMicros == 0 || nowMicros - _lastLossMicros > resetWindowMicros)
-            {
-                _lossEventsSinceLastProbeRtt = 0; // Reset counter after a quiet period.
-            }
-
-            _lastLossMicros = nowMicros;
-            _lossEventsSinceLastProbeRtt++;
-            if (_lossEventsSinceLastProbeRtt >= UcpConstants.BBR_PROBE_RTT_CONGESTION_LOSS_THRESHOLD && Mode != BbrMode.ProbeRtt)
-            {
-                EnterProbeRtt(nowMicros);
-                _lossEventsSinceLastProbeRtt = 0;
-                RecalculateModel(nowMicros);
-                return;
-            }
-
+            // Aggressive mode: loss never reduces pacing or CWND.
+            // Only RTT inflation signals real congestion; packet loss
+            // on shared-media / VPN links is treated as random noise.
+            _fastRecoveryEnteredMicros = nowMicros;
             if (Mode == BbrMode.ProbeBw)
             {
                 PacingGain = Math.Max(PacingGain, CalculatePacingGain(nowMicros));
             }
 
-            TraceLog("LossSignal lossRate=" + lossRate.ToString("F4") + " pacingGain=" + PacingGain.ToString("F2"));
             RecalculateModel(nowMicros);
         }
 
@@ -759,23 +711,22 @@ namespace Ucp
                 BtlBwBytesPerSecond = _config.InitialBandwidthBytesPerSecond;
             }
 
-            if (_config.MaxPacingRateBytesPerSecond > 0 && BtlBwBytesPerSecond > _config.MaxPacingRateBytesPerSecond)
-            {
-                BtlBwBytesPerSecond = _config.MaxPacingRateBytesPerSecond;
-            }
+            // Aggressive: never cap BtlBw at the configured max — let the
+            // bandwidth estimator discover the true bottleneck.  The simulator
+            // serialization already enforces the physical limit.
+            // (original MaxPacingRate cap on BtlBw removed)
 
             if (Mode == BbrMode.ProbeRtt)
             {
                 PacingGain = UcpConstants.BBR_PROBE_RTT_PACING_GAIN;
             }
 
+            // Aggressive: skip loss-control pacing reduction.  Packet loss on
+            // shared links is random, not congestion.  RTT inflation is the
+            // only reliable congestion signal.
             if (_config.LossControlEnable)
             {
-                if (_networkCondition == NetworkCondition.Congested && EstimatedLossPercent > _maxBandwidthLossPercent && GetRecentLossRatio(nowMicros) > 0)
-                {
-                    PacingGain = Math.Max(UcpConstants.BBR_HIGH_LOSS_PACING_GAIN, PacingGain * UcpConstants.BBR_CONGESTION_LOSS_REDUCTION);
-                }
-                else if (EstimatedLossPercent <= _maxBandwidthLossPercent * UcpConstants.BBR_LOSS_BUDGET_RECOVERY_RATIO)
+                if (EstimatedLossPercent <= _maxBandwidthLossPercent * UcpConstants.BBR_LOSS_BUDGET_RECOVERY_RATIO)
                 {
                     PacingGain = Math.Min(_config.ProbeBwHighGain, PacingGain + UcpConstants.BBR_LOSS_CWND_RECOVERY_STEP);
                 }
@@ -787,7 +738,10 @@ namespace Ucp
                 PacingRateBytesPerSecond = _config.MaxPacingRateBytesPerSecond;
             }
 
-            CongestionWindowBytes = Mode == BbrMode.ProbeRtt ? Math.Max(_config.InitialCongestionWindowBytes, GetTargetCwndBytes() / 2) : GetTargetCwndBytes();
+            // Aggressive: ProbeRTT should NOT halve CWND.  Halving CWND on
+            // high-RTT paths causes massive throughput cliffs after every
+            // 30-second ProbeRTT cycle.
+            CongestionWindowBytes = GetTargetCwndBytes();
             _modeEnteredMicros = _modeEnteredMicros == 0 ? nowMicros : _modeEnteredMicros;
         }
 

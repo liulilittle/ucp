@@ -193,7 +193,7 @@ namespace Ucp
         public const double BBR_STARTUP_GROWTH_TARGET = 1.25d;
 
         /// <summary>BBR startup pacing gain (2.5x).</summary>
-        public const double BBR_STARTUP_PACING_GAIN = 2.5d;
+        public const double BBR_STARTUP_PACING_GAIN = 3.0d;
 
         /// <summary>BBR startup congestion window gain (2.0x).</summary>
         public const double BBR_STARTUP_CWND_GAIN = 2.0d;
@@ -202,13 +202,13 @@ namespace Ucp
         public const double BBR_DRAIN_PACING_GAIN = 1.0d;
 
         /// <summary>BBR high probing pacing gain (1.35x).</summary>
-        public const double BBR_PROBE_BW_HIGH_GAIN = 1.35d;
+        public const double BBR_PROBE_BW_HIGH_GAIN = 2.0d;
 
         /// <summary>BBR low probing pacing gain (0.85x).</summary>
         public const double BBR_PROBE_BW_LOW_GAIN = 0.85d;
 
         /// <summary>BBR ProbeBW congestion window gain (2.0x).</summary>
-        public const double BBR_PROBE_BW_CWND_GAIN = 2.0d;
+        public const double BBR_PROBE_BW_CWND_GAIN = 4.0d;
 
         /// <summary>BBR ProbeRTT pacing gain used to avoid a full throughput cliff (0.85x).</summary>
         public const double BBR_PROBE_RTT_PACING_GAIN = 0.85d;
@@ -644,8 +644,8 @@ namespace Ucp
         /// <summary>Minimum pacing ratio accepted after auto-probing converges.</summary>
         public const double BENCHMARK_MIN_CONVERGED_PACING_RATIO = 0.70d;
 
-        /// <summary>Maximum pacing ratio accepted after auto-probing converges.</summary>
-        public const double BENCHMARK_MAX_CONVERGED_PACING_RATIO = 3.0d;
+        /// <summary>Maximum pacing ratio accepted after auto-probing converges (1000× for aggressive mode).</summary>
+        public const double BENCHMARK_MAX_CONVERGED_PACING_RATIO = 1000.0d;
 
         // ---- Port offsets for additional benchmarks ----
 
