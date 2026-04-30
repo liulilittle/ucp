@@ -2101,7 +2101,7 @@ namespace UcpTest
             UcpConfiguration config = CreateScenarioConfig(bandwidthBytesPerSecond);
 
             // Enable aggressive SACK recovery for lossy gigabit+ scenarios.
-            config.EnableAggressiveSackRecovery = hasConfiguredLoss && bandwidthBytesPerSecond >= UcpConstants.BENCHMARK_1_GBPS_BYTES_PER_SECOND;
+            config.EnableAggressiveSackRecovery = hasConfiguredLoss;
 
             // Large benchmark objects must not become application-limited by the
             // default 32 MB send buffer or the advertised receive window. Keep the

@@ -1580,12 +1580,16 @@ namespace Ucp.Internal
             long rttMicros = _rtoEstimator.SmoothedRttMicros > 0 ? _rtoEstimator.SmoothedRttMicros : _lastRttMicros;
             if (rttMicros <= 0)
             {
-                return UcpConstants.SACK_FAST_RETRANSMIT_MIN_REORDER_GRACE_MICROS;
+                long fallbackRttMicros = _config.MinRtoMicros > 0 ? _config.MinRtoMicros : UcpConstants.DEFAULT_RTO_MICROS;
+                return Math.Max(UcpConstants.SACK_FAST_RETRANSMIT_MIN_REORDER_GRACE_MICROS, fallbackRttMicros * 2);
             }
 
-            // SACK fast retransmit follows a QUIC-style short packet-threshold
-            // path; receiver NAK still has the longer jitter guard.
-            return Math.Max(UcpConstants.SACK_FAST_RETRANSMIT_MIN_REORDER_GRACE_MICROS, rttMicros / 8);
+            // A reordered packet takes up to one RTT (forward) + jitter to
+            // arrive, then its confirming ACK takes another half-RTT (reverse)
+            // to reach the sender.  The full 2×RTT guard ensures the confirming
+            // ACK clears the hole before SACK retransmits, eliminating spurious
+            // fast retransmits on high-jitter weak-network paths.
+            return Math.Max(UcpConstants.SACK_FAST_RETRANSMIT_MIN_REORDER_GRACE_MICROS, rttMicros * 2);
         }
 
         // ---- Duplicate ACK handling ----
