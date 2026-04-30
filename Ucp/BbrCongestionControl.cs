@@ -383,6 +383,10 @@ namespace Ucp
                 {
                     EnterProbeRtt(nowMicros);
                 }
+                else
+                {
+                    TraceLog(string.Concat("SkipProbeRtt btlBw=", BtlBwBytesPerSecond, " fullBwRounds=", _fullBandwidthRounds, " preservedOnLossyFat"));
+                }
             }
 
             // Determine if a new BBR round has started (enough data delivered to
@@ -838,7 +842,7 @@ namespace Ucp
             PacingGain = UcpConstants.BBR_PROBE_RTT_PACING_GAIN;
             _probeRttEnteredMicros = nowMicros;
             _modeEnteredMicros = nowMicros;
-            TraceLog("EnterProbeRtt");
+            TraceLog(string.Concat("EnterProbeRtt cwnd=", CongestionWindowBytes, " btlBw=", BtlBwBytesPerSecond, " minRtt=", MinRttMicros, " fullBwRounds=", _fullBandwidthRounds, " lossPct=", (EstimatedLossPercent * 100d).ToString("F1"), " netClass=", CurrentNetworkClass));
         }
 
         /// <summary>
@@ -855,7 +859,7 @@ namespace Ucp
             }
 
             _minRttTimestampMicros = nowMicros;
-            TraceLog("ExitProbeRtt");
+            TraceLog(string.Concat("ExitProbeRtt cwnd=", CongestionWindowBytes, " btlBw=", BtlBwBytesPerSecond, " minRtt=", MinRttMicros, " sampleRtt=", sampleRttMicros, " elapsedUs=", (nowMicros - _probeRttEnteredMicros)));
             EnterProbeBw(nowMicros);
         }
 

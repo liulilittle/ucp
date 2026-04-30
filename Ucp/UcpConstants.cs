@@ -392,6 +392,16 @@ namespace Ucp
         /// <summary>Initial congestion-window gain relative to estimated BDP for lossy benchmarks.</summary>
         public const double BENCHMARK_LOSS_INITIAL_CWND_BDP_GAIN = 4.0d;
 
+        /// <summary>Initial congestion-window gain for weak/high-latency network benchmarks (8.0x BDP).</summary>
+        public const double BENCHMARK_WEAK_NETWORK_INITIAL_CWND_BDP_GAIN = 8.0d;
+
+        /// <summary>ProbeRTT interval for weak/high-latency network benchmarks (120s) to avoid premature CWND reduction.</summary>
+        public const long BENCHMARK_WEAK_NETWORK_PROBE_RTT_INTERVAL_MICROS = 120000000L;
+
+        /// <summary>Serial-time threshold (seconds) above which a benchmark is considered long-running
+        /// and the extended ProbeRTT interval is applied.</summary>
+        public const double BENCHMARK_LONG_RUNNING_SERIAL_SECONDS = 10d;
+
         /// <summary>Maximum initial congestion window used by random-loss benchmarks, in bytes.</summary>
         public const int BENCHMARK_MAX_LOSS_INITIAL_CWND_BYTES = 128 * 1024 * 1024;
 
@@ -597,6 +607,12 @@ namespace Ucp
 
         /// <summary>Heavy random data loss rate used by benchmark scenarios.</summary>
         public const double BENCHMARK_HEAVY_RANDOM_LOSS_RATE = 0.05d;
+
+        /// <summary>Very heavy random data loss rate (>=10%) used by benchmark scenarios.</summary>
+        public const double BENCHMARK_VERY_HEAVY_RANDOM_LOSS_RATE = 0.10d;
+
+        /// <summary>FEC redundancy ratio for very heavy loss (>=10%) benchmark scenarios.</summary>
+        public const double BENCHMARK_VERY_HEAVY_LOSS_FEC_REDUNDANCY = 0.50d;
 
         /// <summary>First data packet index included in the burst-loss benchmark.</summary>
         public const int BENCHMARK_BURST_LOSS_FIRST_PACKET = 16;

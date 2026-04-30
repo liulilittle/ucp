@@ -387,8 +387,8 @@ namespace UcpTest
                 await client.ConnectAsync(new IPEndPoint(IPAddress.Loopback, 40001));
                 UcpConnection serverConnection = await acceptTask;
 
-                // Prepare a 512 KB payload.
-                byte[] payload = Encoding.ASCII.GetBytes(new string('A', 512 * 1024));
+                // Prepare a 1 MB payload.
+                byte[] payload = Encoding.ASCII.GetBytes(new string('A', 1024 * 1024));
                 byte[] received = new byte[payload.Length];
 
                 // Transfer and measure throughput.
@@ -479,7 +479,7 @@ namespace UcpTest
                 await client.ConnectAsync(new IPEndPoint(IPAddress.Loopback, 40002));
                 UcpConnection serverConnection = await acceptTask;
 
-                byte[] payload = Encoding.ASCII.GetBytes(new string('B', 128 * 1024));
+                byte[] payload = Encoding.ASCII.GetBytes(new string('B', 512 * 1024));
                 byte[] received = new byte[payload.Length];
 
                 DateTime start = DateTime.UtcNow;
@@ -946,7 +946,7 @@ namespace UcpTest
                 await client.ConnectAsync(new IPEndPoint(IPAddress.Loopback, 40010));
                 UcpConnection serverConnection = await acceptTask;
 
-                byte[] payload = Encoding.ASCII.GetBytes(new string('P', 64 * 1024));
+                byte[] payload = Encoding.ASCII.GetBytes(new string('P', 256 * 1024));
                 byte[] received = new byte[payload.Length];
 
                 DateTime start = DateTime.UtcNow;
@@ -2117,7 +2117,9 @@ namespace UcpTest
                 // enough systematic FEC to cover expected losses within each small
                 // group so packet loss does not force a full RTT/RTO stall.
                 config.FecGroupSize = 8;
-                config.FecRedundancy = lossRate >= UcpConstants.BENCHMARK_HEAVY_RANDOM_LOSS_RATE ? 0.50d : 0.25d;
+                config.FecRedundancy = lossRate >= UcpConstants.BENCHMARK_VERY_HEAVY_RANDOM_LOSS_RATE
+                    ? UcpConstants.BENCHMARK_VERY_HEAVY_LOSS_FEC_REDUNDANCY
+                    : lossRate >= UcpConstants.BENCHMARK_HEAVY_RANDOM_LOSS_RATE ? 0.50d : 0.25d;
             }
 
             // Use larger MSS for high-bandwidth scenarios to reduce packet overhead.
@@ -2137,6 +2139,17 @@ namespace UcpTest
 
             // Calculate an appropriate initial CWND for this scenario.
             int initialCwndBytes = CalculateBenchmarkInitialCwndBytes(config, bandwidthBytesPerSecond, estimatedBdpBytes, hasConfiguredLoss);
+
+            // For long-running scenarios (high RTT, low bandwidth, large payloads),
+            // extend the ProbeRTT interval to prevent premature CWND halving during
+            // the benchmark. BBR is pacing-based so initial CWND does not need a
+            // separate boost — the controller discovers bandwidth through Startup.
+            double estimatedSerialSeconds = (double)payloadBytes / Math.Max(1, bandwidthBytesPerSecond);
+            if (estimatedSerialSeconds >= UcpConstants.BENCHMARK_LONG_RUNNING_SERIAL_SECONDS)
+            {
+                config.ProbeRttIntervalMicros = UcpConstants.BENCHMARK_WEAK_NETWORK_PROBE_RTT_INTERVAL_MICROS;
+            }
+
             config.InitialCwndBytes = (uint)initialCwndBytes;
 
             // Set minimum RTO for long-fat or lossy scenarios.
