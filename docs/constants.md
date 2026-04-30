@@ -91,6 +91,18 @@ Lossy payloads are intentionally larger than smoke-test payloads so the report m
 | `BENCHMARK_MAX_CONVERGED_PACING_RATIO` | 3.0 | Upper pacing convergence bound. |
 | `BENCHMARK_MAX_JITTER_DELAY_MULTIPLIER` | 4 | Maximum accepted jitter relative to configured delay. |
 
+## Report Convergence Parser
+
+The report table writes convergence with adaptive units (`ns`/`us`/`ms`/`s`, e.g. `193.0ms`, `1.76s`, `28.71s`). The parser (`ParseTimeDisplay`) correctly round-trips formatted values back to milliseconds regardless of unit suffix, so `ValidateReportFile()` sees accurate convergence data instead of 0ms fallbacks.
+
+## Forward Error Correction
+
+| Constant | Value | Meaning |
+|---|---:|---|
+| `FEC_GROUP_SIZE` | 8 (default) | Data packets per FEC group. Benchmark lossy paths use 8 with 25-50% redundancy. |
+| `FEC_MAX_GROUP_SIZE` | 64 | Maximum supported group size in UcpFecCodec. |
+| `FEC_REPAIR_PACKET_TYPE` | 0x08 | Wire type for FEC repair packets. |
+
 ## Route And Weak-Network Constants
 
 | Constant | Value | Meaning |

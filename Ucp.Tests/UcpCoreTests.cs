@@ -404,6 +404,7 @@ namespace UcpTest
 
                 // Generate and append a performance report.
                 UcpPerformanceReport noLossReport = UcpPerformanceReport.FromConnection("NoLoss", client, throughput, (long)(elapsedSeconds * UcpConstants.MICROS_PER_MILLI), noLossBandwidth, simulator.AverageForwardDelayMicros, simulator.AverageReverseDelayMicros, simulator.ObservedDataLossPercent);
+                noLossReport.ConvergenceMilliseconds = Math.Max(1L, (long)(elapsedSeconds * 1000d));
                 UcpPerformanceReport.Append(UcpTestHelpers.ReportPath, noLossReport);
 
                 _output.WriteLine("NoLoss delivered packets={0}, bytes={1}", simulator.DeliveredPackets, simulator.DeliveredBytes);
@@ -490,6 +491,7 @@ namespace UcpTest
                 double throughput = GetBenchmarkThroughputBytesPerSecond(simulator, payload.Length, elapsedSeconds);
 
                 UcpPerformanceReport lossyReport = UcpPerformanceReport.FromConnection("Lossy", client, throughput, (long)(elapsedSeconds * UcpConstants.MICROS_PER_MILLI), lossyBandwidth, simulator.AverageForwardDelayMicros, simulator.AverageReverseDelayMicros, simulator.ObservedDataLossPercent);
+                lossyReport.ConvergenceMilliseconds = Math.Max(1L, (long)(elapsedSeconds * 1000d));
                 UcpPerformanceReport.Append(UcpTestHelpers.ReportPath, lossyReport);
 
                 _output.WriteLine("Lossy dropped={0}, delivered={1}", simulator.DroppedPackets, simulator.DeliveredPackets);
@@ -685,6 +687,7 @@ namespace UcpTest
             _output.WriteLine("HighLoss RTT scenario throughput={0:F2} B/s, dropped={1}", throughput, simulator.DroppedPackets);
 
             UcpPerformanceReport highLossReport = UcpPerformanceReport.FromConnection("HighLossHighRtt", client, throughput, (long)(elapsedSeconds * UcpConstants.MICROS_PER_MILLI), highLossBandwidth, simulator.AverageForwardDelayMicros, simulator.AverageReverseDelayMicros, simulator.ObservedDataLossPercent);
+            highLossReport.ConvergenceMilliseconds = Math.Max(1L, (long)(elapsedSeconds * 1000d));
             UcpPerformanceReport.Append(UcpTestHelpers.ReportPath, highLossReport);
 
             // Must complete with correct data, reasonable throughput, and measurable retransmission.
@@ -738,6 +741,7 @@ namespace UcpTest
             _output.WriteLine("LongFatPipe throughput={0:F2} B/s, utilization={1:P2}", throughput, throughput / theoretical);
 
             UcpPerformanceReport longFatPipeReport = UcpPerformanceReport.FromConnection("LongFatPipe", client, throughput, (long)(elapsedSeconds * UcpConstants.MICROS_PER_MILLI), bandwidth, simulator.AverageForwardDelayMicros, simulator.AverageReverseDelayMicros, simulator.ObservedDataLossPercent);
+            longFatPipeReport.ConvergenceMilliseconds = Math.Max(1L, (long)(elapsedSeconds * 1000d));
             UcpPerformanceReport.Append(UcpTestHelpers.ReportPath, longFatPipeReport);
 
             Assert.True(writeOk);
@@ -970,6 +974,7 @@ namespace UcpTest
                 Assert.True(throughput <= bandwidth * 1.5d);
 
                 UcpPerformanceReport pacingReport = UcpPerformanceReport.FromConnection("Pacing", serverConnection, throughput, (long)(elapsedSeconds * UcpConstants.MICROS_PER_MILLI), bandwidth, simulator.AverageForwardDelayMicros, simulator.AverageReverseDelayMicros, simulator.ObservedDataLossPercent);
+                pacingReport.ConvergenceMilliseconds = Math.Max(1L, (long)(elapsedSeconds * 1000d));
                 UcpPerformanceReport.Append(UcpTestHelpers.ReportPath, pacingReport);
 
                 // Pacing rate should be within the expected convergence band.
@@ -1544,7 +1549,7 @@ namespace UcpTest
             // Encoder: group size 8 with 2 repair symbols.
             UcpFecCodec enc = new UcpFecCodec(8, 2);
             byte[][] payloads = new byte[8][];
-            List<byte[]> repairs = null;
+            List<byte[]> repairs = null!;
 
             // Encode all 8 packets with unique identifiers.
             for (int i = 0; i < payloads.Length; i++)
@@ -1587,7 +1592,7 @@ namespace UcpTest
             // Encoder: group size 32 with 3 repair symbols.
             UcpFecCodec enc = new UcpFecCodec(32, 3);
             byte[][] payloads = new byte[32][];
-            List<byte[]> repairs = null;
+            List<byte[]> repairs = null!;
 
             // Encode 32 unique payloads of varying sizes.
             for (int i = 0; i < payloads.Length; i++)

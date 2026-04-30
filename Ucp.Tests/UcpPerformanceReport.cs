@@ -713,7 +713,7 @@ namespace UcpTest
                     report.PacingRateBytesPerSecond = FromMbps(ParseDouble(columns[14]));
                     report.RemoteWindowBytes = (uint)Math.Round(ParseByteSize(columns[15]));
                     report.BandwidthWastePercent = ParseDouble(columns[16]);
-                    report.ConvergenceMilliseconds = ParseLong(columns[17]);
+                    report.ConvergenceMilliseconds = ParseTimeDisplay(columns[17]);
                 }
                 else
                 {
@@ -725,7 +725,7 @@ namespace UcpTest
                     report.PacingRateBytesPerSecond = FromMbps(ParseDouble(columns[12]));
                     report.RemoteWindowBytes = (uint)Math.Round(ParseByteSize(columns[13]));
                     report.BandwidthWastePercent = ParseDouble(columns[14]);
-                    report.ConvergenceMilliseconds = ParseLong(columns[15]);
+                    report.ConvergenceMilliseconds = ParseTimeDisplay(columns[15]);
                 }
 
                 // Rebuild the note annotation.
@@ -748,6 +748,65 @@ namespace UcpTest
             }
 
             return parsed;
+        }
+
+        /// <summary>
+        /// Parses a human-readable time display string (e.g. "193.0ms", "1.76s", "15.22s", "1us", "n/a")
+        /// back into milliseconds. Returns 0 for unrecognized formats.
+        /// </summary>
+        private static long ParseTimeDisplay(string value)
+        {
+            string trimmed = value.Trim();
+            if (string.IsNullOrEmpty(trimmed) || trimmed == "n/a")
+            {
+                return 0;
+            }
+
+            if (trimmed.EndsWith("ns", StringComparison.Ordinal))
+            {
+                double number;
+                if (double.TryParse(trimmed.Substring(0, trimmed.Length - 2), NumberStyles.Float, CultureInfo.InvariantCulture, out number))
+                {
+                    return (long)Math.Max(0d, Math.Round(number / 1000000d));
+                }
+
+                return 0;
+            }
+
+            if (trimmed.EndsWith("us", StringComparison.Ordinal))
+            {
+                double number;
+                if (double.TryParse(trimmed.Substring(0, trimmed.Length - 2), NumberStyles.Float, CultureInfo.InvariantCulture, out number))
+                {
+                    return (long)Math.Max(0d, Math.Round(number / 1000d));
+                }
+
+                return 0;
+            }
+
+            if (trimmed.EndsWith("ms", StringComparison.Ordinal))
+            {
+                double number;
+                if (double.TryParse(trimmed.Substring(0, trimmed.Length - 2), NumberStyles.Float, CultureInfo.InvariantCulture, out number))
+                {
+                    return (long)Math.Max(0d, Math.Round(number));
+                }
+
+                return 0;
+            }
+
+            if (trimmed.EndsWith("s", StringComparison.Ordinal))
+            {
+                double number;
+                if (double.TryParse(trimmed.Substring(0, trimmed.Length - 1), NumberStyles.Float, CultureInfo.InvariantCulture, out number))
+                {
+                    return (long)Math.Max(0d, Math.Round(number * 1000d));
+                }
+
+                return 0;
+            }
+
+            return 0;
         }
 
         /// <summary>

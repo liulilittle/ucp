@@ -76,7 +76,7 @@ The network classifier uses 200ms windows of RTT, jitter, loss, and throughput r
 
 ## Network Simulator
 
-`NetworkSimulator` is deterministic and in-process. It supports independent forward/reverse delay, per-direction jitter, bandwidth serialization, random/custom loss, duplication, and reordering. High-bandwidth scenarios use a virtual logical clock so OS scheduling does not inflate or depress reported throughput; DATA retransmissions are deduplicated before throughput is calculated.
+`NetworkSimulator` is deterministic and in-process. It supports independent forward/reverse delay, per-direction jitter, bandwidth serialization, random/custom loss, duplication, and reordering. All shaped bottleneck links use a virtual logical clock to compute steady-state bottleneck utilization independently of OS scheduling jitter; DATA retransmissions are deduplicated before throughput is calculated. Convergence time is reported as the measured elapsed transfer duration with adaptive `ns`/`us`/`ms`/`s` formatting.
 
 ## Test Architecture
 

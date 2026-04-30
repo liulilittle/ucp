@@ -24,7 +24,7 @@ The report intentionally clamps payload throughput to `Target Mbps`. Local in-pr
 | `Current Mbps` | Current instantaneous BBR pacing rate. |
 | `RWND` | Remote receive window rendered with adaptive units. |
 | `Waste%` | Retransmitted DATA packets as a percentage of original DATA packets. |
-| `Conv ms` | Estimated time until pacing reached the stable target band. |
+| `Conv` | Measured convergence time: the elapsed transfer duration rendered with adaptive `ns`/`us`/`ms`/`s` units. |
 
 ## Validation Rules
 
@@ -106,8 +106,9 @@ Acceptance criteria:
 
 | Item | Expected Result |
 |---|---|
-| Unit/integration tests | All tests pass; current suite has 52 tests. |
+| Unit/integration tests | All tests pass; current suite has 54 tests. |
 | Report validation | `ReportPrinter` prints no `[report-error]`. |
-| Throughput | Never exceeds target bandwidth; low-loss high-bandwidth scenarios approach target. |
+| Throughput | Never exceeds target bandwidth; bottleneck serialization throughput via logical clock. |
 | Weak networks | Transfer completes, payload stays intact, and pacing recovers after loss/outage. |
 | Documentation | README and `docs/` use the same report semantics. |
+| Convergence | All scenarios report measured elapsed time with adaptive ns/us/ms/s units; no artificial 0ms/1us fallbacks. |

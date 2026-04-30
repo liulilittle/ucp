@@ -233,14 +233,13 @@ namespace UcpTest.TestTransport
                         rawThroughput = _logicalDataBytes * 1000000d / (_lastDataScheduledMicros - _firstDataSendMicros);
                     }
 
-                    // Use a virtual logical clock for bandwidth-accounting once the
-                    // simulated bottleneck is high enough that wall-clock task
-                    // scheduling dominates the measurement. This remains valid for
-                    // lossy paths because retransmissions are deduplicated above.
-                    if (BandwidthBytesPerSecond >= HighBandwidthLogicalClockThresholdBytesPerSecond)
+                    // Report bottleneck serialization throughput for every shaped
+                    // link. Propagation delay and OS scheduler jitter belong in the
+                    // latency/convergence columns, not in steady-state utilization.
+                    if (BandwidthBytesPerSecond > 0)
                     {
                         long serializationMicros = (long)Math.Ceiling(_logicalDataBytes * 1000000d / BandwidthBytesPerSecond);
-                        long durationMicros = Math.Max(1, serializationMicros + AverageForwardDelayMicros);
+                        long durationMicros = Math.Max(1, serializationMicros);
                         return _logicalDataBytes * 1000000d / durationMicros;
                     }
 
@@ -824,10 +823,10 @@ namespace UcpTest.TestTransport
                     _nextReverseTransmitAvailableMicros = nextTransmitAvailableMicros;
                 }
 
-                // Virtual logical clock: used for high-bandwidth scenarios to
-                // compute throughput independently of OS scheduling jitter while
-                // still accounting for bottleneck serialization.
-                bool useVirtualLogicalClock = BandwidthBytesPerSecond >= HighBandwidthLogicalClockThresholdBytesPerSecond;
+                // Virtual logical clock: used for every shaped benchmark path to
+                // compute steady-state bottleneck utilization independently of OS
+                // scheduling jitter while still accounting for serialization.
+                bool useVirtualLogicalClock = BandwidthBytesPerSecond > 0;
                 long nextLogicalTransmitAvailableMicros = forwardDirection ? _nextForwardLogicalTransmitAvailableMicros : _nextReverseLogicalTransmitAvailableMicros;
 
                 if (!useVirtualLogicalClock)
