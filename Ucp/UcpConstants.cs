@@ -623,6 +623,9 @@ namespace Ucp
         /// <summary>RTT threshold above which heavy FEC (0.50) is always used for lossy benchmarks.</summary>
         public const long BENCHMARK_HIGH_RTT_FEC_THRESHOLD_MICROS = 80000L;
 
+        /// <summary>Jitter threshold (ms) above which FEC is enabled to suppress SACK storms on reordering paths.</summary>
+        public const int BENCHMARK_HIGH_JITTER_FEC_THRESHOLD_MS = 15;
+
         /// <summary>First data packet index included in the burst-loss benchmark.</summary>
         public const int BENCHMARK_BURST_LOSS_FIRST_PACKET = 16;
 
