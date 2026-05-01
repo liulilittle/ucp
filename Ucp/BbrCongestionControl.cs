@@ -369,7 +369,7 @@ namespace Ucp
             UpdateEstimatedLossPercent(nowMicros);
             UpdateInflightBounds();
 
-            if (minRttExpired && Mode != BbrMode.ProbeRtt)
+            if (minRttExpired && Mode != BbrMode.ProbeRtt && EstimatedLossPercent <= 0)
             {
                 bool bandwidthGrowthStalled = _fullBandwidthRounds >= UcpConstants.RTO_MAX_BACKOFF_MIN_RTO_MULTIPLIER;
                 bool isLossyFat = CurrentNetworkClass == NetworkClass.LossyLongFat;

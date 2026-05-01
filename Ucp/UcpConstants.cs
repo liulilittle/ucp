@@ -137,7 +137,7 @@ namespace Ucp
         public const long MAX_RTO_MICROS = 60000000L;
 
         /// <summary>Default RTO backoff multiplier.</summary>
-        public const double RTO_BACKOFF_FACTOR = 1.2d;
+        public const double RTO_BACKOFF_FACTOR = 1.05d;
 
         /// <summary>Maximum retransmission attempts per outbound segment.</summary>
         public const int MAX_RETRANSMISSIONS = 10;

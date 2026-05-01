@@ -2166,11 +2166,13 @@ namespace UcpTest
             else
             {
                 // Aggressive BBR: set BtlBw floor to 2× target and pacing cap
-                // to 3× target.  On high-jitter paths (>15ms) use 1.5× cap to
-                // prevent SACK storms from reordering false positives.
-                int pacingMultiplier = jitterMilliseconds >= UcpConstants.BENCHMARK_HIGH_JITTER_FEC_THRESHOLD_MS ? 1 : 3;
+                // to 3× target.  High-bandwidth high-jitter paths (>=10Mbps
+                // with >=20ms jitter) cap at 1× to prevent SACK storms.
+                bool isWideJitter = bandwidthBytesPerSecond >= UcpConstants.BENCHMARK_100_MBPS_BYTES_PER_SECOND / 10
+                    && jitterMilliseconds >= 20;
+                int pacingCap = isWideJitter ? 1 : 3;
                 config.InitialBandwidthBytesPerSecond = bandwidthBytesPerSecond * 2;
-                config.MaxPacingRateBytesPerSecond = bandwidthBytesPerSecond * pacingMultiplier;
+                config.MaxPacingRateBytesPerSecond = bandwidthBytesPerSecond * pacingCap;
             }
 
             // Set minimum RTO for long-fat or lossy scenarios.
