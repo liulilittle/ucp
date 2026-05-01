@@ -1077,7 +1077,15 @@ namespace Ucp
 
             if (_currentRttMicros > modelRttMicros)
             {
-                long cappedCurrentRttMicros = (long)Math.Min(_currentRttMicros, modelRttMicros * UcpConstants.BBR_RANDOM_LOSS_CWND_RTT_CUSHION);
+                // Adaptive cushion: shrink the RTT cushion when queue builds up.
+                // When RTT = 1.0× minRTT → cushion = 4.0 (max CWND)
+                // When RTT = 2.0× minRTT → cushion = 2.0
+                // When RTT = 4.0× minRTT → cushion = 1.0 (min queue)
+                // This prevents bufferbloat while allowing CWND headroom on
+                // lossy paths where the extra inflight compensates for retrans.
+                double rttRatio = (double)_currentRttMicros / modelRttMicros;
+                double adaptiveCushion = Math.Max(1.0d, UcpConstants.BBR_RANDOM_LOSS_CWND_RTT_CUSHION / rttRatio);
+                long cappedCurrentRttMicros = (long)Math.Min(_currentRttMicros, modelRttMicros * adaptiveCushion);
                 modelRttMicros = Math.Max(modelRttMicros, cappedCurrentRttMicros);
             }
 
