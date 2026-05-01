@@ -149,9 +149,6 @@ namespace Ucp
         /// <summary>Current network condition classification.</summary>
         private NetworkCondition _networkCondition;
 
-        /// <summary>Count of consecutive losses treated as non-congestion (random loss).</summary>
-        private int _consecutiveNonCongestionLosses;
-
         /// <summary>
         /// Fine-grained local network condition used for pacing gain decisions.
         /// </summary>
@@ -337,7 +334,6 @@ namespace Ucp
             if (deliveredBytes > 0)
             {
                 _totalDeliveredBytes += deliveredBytes;
-                _consecutiveNonCongestionLosses = 0;
                 double deliveryRate = deliveredBytes * UcpConstants.MICROS_PER_SECOND / (double)intervalMicros;
                 if (PacingRateBytesPerSecond > 0)
                 {
@@ -725,7 +721,9 @@ namespace Ucp
             }
 
             PacingRateBytesPerSecond = BtlBwBytesPerSecond * PacingGain;
-            if (_config.MaxPacingRateBytesPerSecond > 0 && PacingRateBytesPerSecond > _config.MaxPacingRateBytesPerSecond)
+            if (_config.MaxPacingRateBytesPerSecond > 0
+                && PacingRateBytesPerSecond > _config.MaxPacingRateBytesPerSecond
+                && EstimatedLossPercent < 1d)
             {
                 PacingRateBytesPerSecond = _config.MaxPacingRateBytesPerSecond;
             }

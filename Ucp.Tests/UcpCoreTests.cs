@@ -2115,13 +2115,11 @@ namespace UcpTest
             if (hasConfiguredLoss)
             {
                 // FEC: tiered redundancy based on loss rate. Sub-3% paths let
-                // SACK handle rare losses (no bandwidth tax). 3-10% paths get
-                // 0.125 (1 repair per 8) and >=10% get 0.50 (4 per 8).
+                // Random-loss benchmarks are explicitly repair-path tests. Enable
+                // enough systematic FEC to cover expected losses within each small
+                // group so packet loss does not force a full RTT/RTO stall.
                 config.FecGroupSize = 8;
-                config.FecRedundancy = lossRate >= UcpConstants.BENCHMARK_VERY_HEAVY_RANDOM_LOSS_RATE
-                    ? UcpConstants.BENCHMARK_VERY_HEAVY_LOSS_FEC_REDUNDANCY
-                    : lossRate >= UcpConstants.BENCHMARK_HEAVY_RANDOM_LOSS_RATE ? 0.25d
-                    : lossRate >= UcpConstants.BENCHMARK_MEDIUM_RANDOM_LOSS_RATE ? 0.125d : 0d;
+                config.FecRedundancy = lossRate >= UcpConstants.BENCHMARK_HEAVY_RANDOM_LOSS_RATE ? 0.50d : 0.25d;
             }
 
             // Use larger MSS for high-bandwidth scenarios to reduce packet overhead.
