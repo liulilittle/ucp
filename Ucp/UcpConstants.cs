@@ -807,6 +807,9 @@ namespace Ucp
         /// <summary>Encoded UCP FEC repair packet type value.</summary>
         public const byte UCP_FEC_REPAIR_TYPE_VALUE = 0x08;
 
+        /// <summary>Estimated loss percent threshold for adaptive FEC repair transmission.</summary>
+        public const double ADAPTIVE_FEC_LOSS_THRESHOLD_PERCENT = 2d;
+
         /// <summary>Encoded UCP RST packet type value.</summary>
         public const byte UCP_RST_TYPE_VALUE = 0x07;
 

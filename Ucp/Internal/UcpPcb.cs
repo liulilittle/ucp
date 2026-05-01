@@ -2662,18 +2662,26 @@ namespace Ucp.Internal
                             _fecGroupSendCount++;
                             if (repairs != null && repairs.Count > 0)
                             {
-                                for (int repairIndex = 0; repairIndex < repairs.Count; repairIndex++)
+                                // Adaptive FEC: only transmit repair packets when
+                                // estimated loss exceeds threshold.  The encoder
+                                // always runs — we just skip sending repairs on
+                                // low-loss paths where SACK is more efficient.
+                                if (_bbr.EstimatedLossPercent >= UcpConstants.ADAPTIVE_FEC_LOSS_THRESHOLD_PERCENT)
                                 {
-                                    UcpFecRepairPacket repairPacket = new UcpFecRepairPacket();
-                                    repairPacket.Header = CreateHeader(UcpPacketType.FecRepair, UcpPacketFlags.None, nowMicros);
-                                    repairPacket.GroupId = _fecGroupBaseSeq;
-                                    repairPacket.GroupIndex = (byte)repairIndex;
-                                    repairPacket.Payload = repairs[repairIndex];
-                                    byte[] encodedRepair = UcpPacketCodec.Encode(repairPacket);
-                                    _transport.Send(encodedRepair, _remoteEndPoint);
+                                    for (int repairIndex = 0; repairIndex < repairs.Count; repairIndex++)
+                                    {
+                                        UcpFecRepairPacket repairPacket = new UcpFecRepairPacket();
+                                        repairPacket.Header = CreateHeader(UcpPacketType.FecRepair, UcpPacketFlags.None, nowMicros);
+                                        repairPacket.GroupId = _fecGroupBaseSeq;
+                                        repairPacket.GroupIndex = (byte)repairIndex;
+                                        repairPacket.Payload = repairs[repairIndex];
+                                        byte[] encodedRepair = UcpPacketCodec.Encode(repairPacket);
+                                        _transport.Send(encodedRepair, _remoteEndPoint);
+                                    }
+
+                                    _fecRepairSentGroups.Add(_fecGroupBaseSeq);
                                 }
 
-                                _fecRepairSentGroups.Add(_fecGroupBaseSeq);
                                 _fecGroupSendCount = 0;
                             }
                         }

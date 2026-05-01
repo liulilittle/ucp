@@ -723,7 +723,7 @@ namespace Ucp
             PacingRateBytesPerSecond = BtlBwBytesPerSecond * PacingGain;
             if (_config.MaxPacingRateBytesPerSecond > 0
                 && PacingRateBytesPerSecond > _config.MaxPacingRateBytesPerSecond
-                && EstimatedLossPercent < 1d)
+                && EstimatedLossPercent < 3d)
             {
                 PacingRateBytesPerSecond = _config.MaxPacingRateBytesPerSecond;
             }
