@@ -1082,9 +1082,12 @@ namespace Ucp
                 // This prevents bufferbloat while allowing CWND headroom on
                 // lossy paths where the extra inflight compensates for retrans.
                 double rttRatio = (double)_currentRttMicros / modelRttMicros;
-                double adaptiveCushion = Math.Max(1.0d, UcpConstants.BBR_RANDOM_LOSS_CWND_RTT_CUSHION / rttRatio);
+                double adaptiveCushion = Math.Max(0.75d, UcpConstants.BBR_RANDOM_LOSS_CWND_RTT_CUSHION / rttRatio);
                 long cappedCurrentRttMicros = (long)Math.Min(_currentRttMicros, modelRttMicros * adaptiveCushion);
-                modelRttMicros = Math.Max(modelRttMicros, cappedCurrentRttMicros);
+                if (adaptiveCushion < 1.0d)
+                    modelRttMicros = MinRttMicros;
+                else
+                    modelRttMicros = Math.Max(modelRttMicros, cappedCurrentRttMicros);
             }
 
             return modelRttMicros;
