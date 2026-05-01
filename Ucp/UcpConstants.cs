@@ -90,7 +90,7 @@ namespace Ucp
         public const uint DEFAULT_RECV_WINDOW_BYTES = (uint)(DEFAULT_RECV_WINDOW_PACKETS * MSS);
 
         /// <summary>Initial congestion window packet count used by the optimized default configuration.</summary>
-        public const int INITIAL_CWND_PACKETS = 256;
+        public const int INITIAL_CWND_PACKETS = 20;
 
         /// <summary>Legacy initial congestion window in bytes retained for old tests and callers.</summary>
         public const int DEFAULT_INITIAL_CONGESTION_WINDOW = 4 * MSS;
@@ -137,7 +137,7 @@ namespace Ucp
         public const long MAX_RTO_MICROS = 60000000L;
 
         /// <summary>Default RTO backoff multiplier.</summary>
-        public const double RTO_BACKOFF_FACTOR = 1.05d;
+        public const double RTO_BACKOFF_FACTOR = 1.2d;
 
         /// <summary>Maximum retransmission attempts per outbound segment.</summary>
         public const int MAX_RETRANSMISSIONS = 10;
@@ -167,7 +167,7 @@ namespace Ucp
         public const int RTT_VAR_PREVIOUS_WEIGHT = RTT_VAR_DENOM - 1;
 
         /// <summary>RTT variance multiplier used when calculating RTO (SRTT + 2*RTTVAR for tighter recovery).</summary>
-        public const int RTO_GAIN_MULTIPLIER = 2;
+        public const int RTO_GAIN_MULTIPLIER = 4;
 
         /// <summary>Maximum accepted RTT sample multiplier relative to the current RTO during recovery.</summary>
         public const double RTT_RECOVERY_SAMPLE_MAX_RTO_MULTIPLIER = 4.0d;
@@ -193,7 +193,7 @@ namespace Ucp
         public const double BBR_STARTUP_GROWTH_TARGET = 1.25d;
 
         /// <summary>BBR startup pacing gain (2.5x).</summary>
-        public const double BBR_STARTUP_PACING_GAIN = 3.0d;
+        public const double BBR_STARTUP_PACING_GAIN = 2.5d;
 
         /// <summary>BBR startup congestion window gain (2.0x).</summary>
         public const double BBR_STARTUP_CWND_GAIN = 2.0d;
@@ -202,13 +202,13 @@ namespace Ucp
         public const double BBR_DRAIN_PACING_GAIN = 1.0d;
 
         /// <summary>BBR high probing pacing gain (1.35x).</summary>
-        public const double BBR_PROBE_BW_HIGH_GAIN = 2.0d;
+        public const double BBR_PROBE_BW_HIGH_GAIN = 1.35d;
 
         /// <summary>BBR low probing pacing gain (0.85x).</summary>
         public const double BBR_PROBE_BW_LOW_GAIN = 0.85d;
 
         /// <summary>BBR ProbeBW congestion window gain (2.0x).</summary>
-        public const double BBR_PROBE_BW_CWND_GAIN = 4.0d;
+        public const double BBR_PROBE_BW_CWND_GAIN = 2.0d;
 
         /// <summary>BBR ProbeRTT pacing gain used to avoid a full throughput cliff (0.85x).</summary>
         public const double BBR_PROBE_RTT_PACING_GAIN = 0.85d;
@@ -244,7 +244,7 @@ namespace Ucp
         public const double BBR_MEDIUM_LOSS_RATIO = 0.15d;
 
         /// <summary>BBR moderate probing gain used under low loss (1.45x for aggressive mobile probing).</summary>
-        public const double BBR_MODERATE_PROBE_GAIN = 1.45d;
+        public const double BBR_MODERATE_PROBE_GAIN = 1.25d;
 
         /// <summary>BBR target-maintaining gain under light loss (1.10x).</summary>
         public const double BBR_LIGHT_LOSS_PACING_GAIN = 1.10d;
@@ -268,7 +268,7 @@ namespace Ucp
         public const double BBR_MIN_LOSS_CWND_GAIN = 0.95d;
 
         /// <summary>Congestion window gain recovery step per ACK.</summary>
-        public const double BBR_LOSS_CWND_RECOVERY_STEP = 0.08d;
+        public const double BBR_LOSS_CWND_RECOVERY_STEP = 0.04d;
 
         /// <summary>Loss budget headroom below which probing may become more aggressive again.</summary>
         public const double BBR_LOSS_BUDGET_RECOVERY_RATIO = 0.80d;
@@ -316,7 +316,7 @@ namespace Ucp
         public const double BBR_STEADY_BANDWIDTH_GROWTH_PER_ROUND = 1.25d;
 
         /// <summary>RTT multiplier above which a loss signal is eligible for congestion classification (1.50x to tolerate jitter).</summary>
-        public const double BBR_CONGESTION_LOSS_RTT_MULTIPLIER = 1.50d;
+        public const double BBR_CONGESTION_LOSS_RTT_MULTIPLIER = 1.10d;
 
         /// <summary>Deduplicated loss events at or below this count are treated as random in one loss window.</summary>
         public const int BBR_RANDOM_LOSS_MAX_DEDUPED_EVENTS = 2;
@@ -337,13 +337,13 @@ namespace Ucp
         public const double BBR_INFLIGHT_HIGH_GAIN = 4.00d;
 
         /// <summary>RTT growth required before loss-driven delivery drops are classified as congestion.</summary>
-        public const double BBR_CONGESTION_RTT_INCREASE_RATIO = 0.80d;
+        public const double BBR_CONGESTION_RTT_INCREASE_RATIO = 0.50d;
 
         /// <summary>Recent loss ratio required before loss-driven delivery drops are classified as congestion.</summary>
         public const double BBR_CONGESTION_LOSS_RATIO = 0.10d;
 
         /// <summary>Maximum RTT cushion multiplier used by CWND on non-congested lossy paths (8.0x for weak-link throughput).</summary>
-        public const double BBR_RANDOM_LOSS_CWND_RTT_CUSHION = 8.0d;
+        public const double BBR_RANDOM_LOSS_CWND_RTT_CUSHION = 4.0d;
 
         /// <summary>Delivery-rate sample history length used by the lightweight classifier.</summary>
         public const int BBR_DELIVERY_RATE_HISTORY_COUNT = 5;
@@ -648,7 +648,7 @@ namespace Ucp
         public const double BENCHMARK_MIN_CONVERGED_PACING_RATIO = 0.70d;
 
         /// <summary>Maximum pacing ratio accepted after auto-probing converges (1000× for aggressive mode).</summary>
-        public const double BENCHMARK_MAX_CONVERGED_PACING_RATIO = 1000.0d;
+        public const double BENCHMARK_MAX_CONVERGED_PACING_RATIO = 3.0d;
 
         // ---- Port offsets for additional benchmarks ----
 

@@ -369,7 +369,7 @@ namespace Ucp
             UpdateEstimatedLossPercent(nowMicros);
             UpdateInflightBounds();
 
-            if (minRttExpired && Mode != BbrMode.ProbeRtt && EstimatedLossPercent <= 0)
+            if (minRttExpired && Mode != BbrMode.ProbeRtt)
             {
                 bool bandwidthGrowthStalled = _fullBandwidthRounds >= UcpConstants.RTO_MAX_BACKOFF_MIN_RTO_MULTIPLIER;
                 bool isLossyFat = CurrentNetworkClass == NetworkClass.LossyLongFat;
@@ -711,19 +711,11 @@ namespace Ucp
                 BtlBwBytesPerSecond = _config.InitialBandwidthBytesPerSecond;
             }
 
-            // Aggressive: never cap BtlBw at the configured max — let the
-            // bandwidth estimator discover the true bottleneck.  The simulator
-            // serialization already enforces the physical limit.
-            // (original MaxPacingRate cap on BtlBw removed)
-
             if (Mode == BbrMode.ProbeRtt)
             {
                 PacingGain = UcpConstants.BBR_PROBE_RTT_PACING_GAIN;
             }
 
-            // Aggressive: skip loss-control pacing reduction.  Packet loss on
-            // shared links is random, not congestion.  RTT inflation is the
-            // only reliable congestion signal.
             if (_config.LossControlEnable)
             {
                 if (EstimatedLossPercent <= _maxBandwidthLossPercent * UcpConstants.BBR_LOSS_BUDGET_RECOVERY_RATIO)
@@ -738,10 +730,7 @@ namespace Ucp
                 PacingRateBytesPerSecond = _config.MaxPacingRateBytesPerSecond;
             }
 
-            // Aggressive: ProbeRTT should NOT halve CWND.  Halving CWND on
-            // high-RTT paths causes massive throughput cliffs after every
-            // 30-second ProbeRTT cycle.
-            CongestionWindowBytes = GetTargetCwndBytes();
+            CongestionWindowBytes = Mode == BbrMode.ProbeRtt ? Math.Max(_config.InitialCongestionWindowBytes, GetTargetCwndBytes() / 2) : GetTargetCwndBytes();
             _modeEnteredMicros = _modeEnteredMicros == 0 ? nowMicros : _modeEnteredMicros;
         }
 

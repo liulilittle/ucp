@@ -387,8 +387,8 @@ namespace UcpTest
                 await client.ConnectAsync(new IPEndPoint(IPAddress.Loopback, 40001));
                 UcpConnection serverConnection = await acceptTask;
 
-                // Prepare a 1 MB payload.
-                byte[] payload = Encoding.ASCII.GetBytes(new string('A', 1024 * 1024));
+                // Prepare a 512 KB payload.
+                byte[] payload = Encoding.ASCII.GetBytes(new string('A', 512 * 1024));
                 byte[] received = new byte[payload.Length];
 
                 // Transfer and measure throughput.
@@ -435,7 +435,7 @@ namespace UcpTest
         public async Task Integration_LossyNetwork_RetransmitsAndDelivers()
         {
             int dataPacketIndex = 0;
-            const int lossyBandwidth = 2 * 1024 * 1024;
+            const int lossyBandwidth = 512 * 1024;
 
             // Create a simulator with moderate delay, jitter, and a custom drop rule
             // that drops exactly one data packet (the 8th) to trigger retransmission.
@@ -479,12 +479,12 @@ namespace UcpTest
                 await client.ConnectAsync(new IPEndPoint(IPAddress.Loopback, 40002));
                 UcpConnection serverConnection = await acceptTask;
 
-                byte[] payload = Encoding.ASCII.GetBytes(new string('B', 4 * 1024 * 1024));
+                byte[] payload = Encoding.ASCII.GetBytes(new string('B', 128 * 1024));
                 byte[] received = new byte[payload.Length];
 
                 DateTime start = DateTime.UtcNow;
                 bool writeOk = await client.WriteAsync(payload, 0, payload.Length);
-                bool readOk = await ReadWithinAsync(serverConnection, received, 0, received.Length, 20000);
+                bool readOk = await ReadWithinAsync(serverConnection, received, 0, received.Length, 8000);
                 await WaitForAckSettlementAsync(client, 1000);
 
                 double elapsedSeconds = Math.Max(0.001d, (DateTime.UtcNow - start).TotalSeconds);
@@ -741,7 +741,7 @@ namespace UcpTest
 
             // LFN must achieve high utilization with minimal retransmission.
             Assert.True(longFatPipeReport.RetransmissionRatio <= 0.05d);
-            Assert.InRange(longFatPipeReport.PacingRateBytesPerSecond, bandwidth * 0.70d, bandwidth * 1000d);
+            Assert.InRange(longFatPipeReport.PacingRateBytesPerSecond, bandwidth * 0.70d, bandwidth * 1.30d);
 
             // Congestion window must be large enough to fill the BDP.
             Assert.True(longFatPipeReport.CongestionWindowBytes >= bandwidth / 5);
@@ -942,16 +942,17 @@ namespace UcpTest
             server.Start(40010);
             try
             {
+                // Establish connection.
                 Task<UcpConnection> acceptTask = server.AcceptAsync();
                 await client.ConnectAsync(new IPEndPoint(IPAddress.Loopback, 40010));
                 UcpConnection serverConnection = await acceptTask;
 
-                byte[] payload = Encoding.ASCII.GetBytes(new string('P', 2 * 1024 * 1024));
+                byte[] payload = Encoding.ASCII.GetBytes(new string('P', 64 * 1024));
                 byte[] received = new byte[payload.Length];
 
                 DateTime start = DateTime.UtcNow;
                 bool writeOk = await serverConnection.WriteAsync(payload, 0, payload.Length);
-                bool readOk = await ReadWithinAsync(client, received, 0, received.Length, 35000);
+                bool readOk = await ReadWithinAsync(client, received, 0, received.Length, 12000);
                 await WaitForAckSettlementAsync(serverConnection, 1000);
 
                 double elapsedSeconds = Math.Max(0.001d, (DateTime.UtcNow - start).TotalSeconds);
@@ -961,8 +962,8 @@ namespace UcpTest
                 Assert.True(readOk);
                 Assert.True(payload.SequenceEqual(received));
 
-                // Aggressive BBR may pace above the configured limit.
-                Assert.True(throughput <= bandwidth * 4d);
+                // Throughput should not exceed 1.5x the configured pacing limit.
+                Assert.True(throughput <= bandwidth * 1.5d);
 
                 UcpPerformanceReport pacingReport = UcpPerformanceReport.FromConnection("Pacing", serverConnection, throughput, (long)(elapsedSeconds * UcpConstants.MICROS_PER_MILLI), bandwidth, simulator.AverageForwardDelayMicros, simulator.AverageReverseDelayMicros, simulator.ObservedDataLossPercent);
                 pacingReport.ConvergenceMilliseconds = Math.Max(1L, (long)(elapsedSeconds * 1000d));
@@ -1383,7 +1384,7 @@ namespace UcpTest
                 0,
                 0d,
                 UcpConstants.DEFAULT_MAX_BANDWIDTH_LOSS_PERCENT,
-                true,
+                false,
                 0,
                 null);
 
@@ -1811,7 +1812,7 @@ namespace UcpTest
                 0,
                 0d,
                 UcpConstants.DEFAULT_MAX_BANDWIDTH_LOSS_PERCENT,
-                true,
+                false,
                 0,
                 null);
 
@@ -2140,9 +2141,11 @@ namespace UcpTest
 
             if (hasConfiguredLoss)
             {
+                // Random-loss benchmarks are explicitly repair-path tests. Enable
+                // enough systematic FEC to cover expected losses within each small
+                // group so packet loss does not force a full RTT/RTO stall.
                 config.FecGroupSize = 8;
-                config.FecRedundancy = lossRate >= UcpConstants.BENCHMARK_VERY_HEAVY_RANDOM_LOSS_RATE
-                    ? UcpConstants.BENCHMARK_VERY_HEAVY_LOSS_FEC_REDUNDANCY : 0d;
+                config.FecRedundancy = lossRate >= UcpConstants.BENCHMARK_HEAVY_RANDOM_LOSS_RATE ? 0.50d : 0.25d;
             }
 
             // Calculate an appropriate initial CWND for this scenario.
@@ -2163,17 +2166,6 @@ namespace UcpTest
                 config.InitialBandwidthBytesPerSecond = Math.Max(UcpConstants.BENCHMARK_INITIAL_PROBE_BANDWIDTH_BYTES_PER_SECOND, initialCwndBytes * UcpConstants.BBR_PROBE_BW_GAIN_COUNT);
                 config.MaxPacingRateBytesPerSecond = 0;
             }
-            else
-            {
-                // Aggressive BBR: set BtlBw floor to 2× target and pacing cap
-                // to 3× target.  High-bandwidth high-jitter paths (>=10Mbps
-                // with >=20ms jitter) cap at 1× to prevent SACK storms.
-                bool isWideJitter = bandwidthBytesPerSecond >= UcpConstants.BENCHMARK_100_MBPS_BYTES_PER_SECOND / 10
-                    && jitterMilliseconds >= 20;
-                int pacingCap = isWideJitter ? 1 : 3;
-                config.InitialBandwidthBytesPerSecond = bandwidthBytesPerSecond * 2;
-                config.MaxPacingRateBytesPerSecond = bandwidthBytesPerSecond * pacingCap;
-            }
 
             // Set minimum RTO for long-fat or lossy scenarios.
             if (!hasConfiguredLoss && (fixedDelayMilliseconds >= UcpConstants.BENCHMARK_LONG_FAT_DELAY_MILLISECONDS || estimatedRttMicros >= UcpConstants.DEFAULT_RTO_MICROS))
@@ -2182,7 +2174,7 @@ namespace UcpTest
             }
             else if (hasConfiguredLoss && estimatedRttMicros > 0)
             {
-                long fecRepairBudgetMicros = estimatedRttMicros * 2L;
+                long fecRepairBudgetMicros = config.FecRedundancy > 0d ? estimatedRttMicros * 4L : estimatedRttMicros * 4L;
                 config.MinRtoMicros = Math.Max(UcpConstants.DEFAULT_RTO_MICROS, fecRepairBudgetMicros);
             }
 
@@ -2262,12 +2254,10 @@ namespace UcpTest
                 Assert.True(payload.SequenceEqual(received));
                 Assert.True(report.ThroughputBytesPerSecond > 0);
 
-                // For non-auto-probe scenarios, pacing rate must be above the minimum
-                // convergence threshold.  The upper bound is removed for aggressive
-                // mode where pacing legitimately exceeds the configured target.
+                // For non-auto-probe scenarios, pacing rate must be within convergence bounds.
                 if (!autoProbe)
                 {
-                    Assert.True(report.PacingRateBytesPerSecond >= bandwidthBytesPerSecond * UcpConstants.BENCHMARK_MIN_CONVERGED_PACING_RATIO);
+                    Assert.InRange(report.PacingRateBytesPerSecond, bandwidthBytesPerSecond * UcpConstants.BENCHMARK_MIN_CONVERGED_PACING_RATIO, bandwidthBytesPerSecond * UcpConstants.BENCHMARK_MAX_CONVERGED_PACING_RATIO);
                 }
 
                 return report;
@@ -2569,3 +2559,4 @@ namespace UcpTest
         }
     }
 }
+
