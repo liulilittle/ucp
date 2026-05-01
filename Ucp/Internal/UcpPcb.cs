@@ -2979,6 +2979,35 @@ namespace Ucp.Internal
                     }
                 }
 
+                // Silence probe: detect path blackout by prolonged ACK silence.
+                // When inflight > TLP_MAX but no ACK for 2×SRTT, retransmit the
+                // most-recently-sent segment as a path probe — faster than waiting
+                // for full RTO on high-RTT paths.
+                if (!timedOut && !_tailLossProbePending && inflightSegments > UcpConstants.TLP_MAX_INFLIGHT_SEGMENTS
+                    && _lastAckReceivedMicros > 0 && _rtoEstimator.SmoothedRttMicros > 0
+                    && nowMicros - _lastAckReceivedMicros >= _rtoEstimator.SmoothedRttMicros * 3)
+                {
+                    // Find the highest-sequence in-flight segment (most recently sent).
+                    uint highestSeq = 0;
+                    OutboundSegment newest = null;
+                    foreach (KeyValuePair<uint, OutboundSegment> pair in _sendBuffer)
+                    {
+                        if (pair.Value.Acked || !pair.Value.InFlight || pair.Value.NeedsRetransmit) continue;
+                        if (newest == null || UcpSequenceComparer.IsAfter(pair.Key, highestSeq))
+                        {
+                            highestSeq = pair.Key;
+                            newest = pair.Value;
+                        }
+                    }
+                    if (newest != null)
+                    {
+                        newest.NeedsRetransmit = true;
+                        newest.UrgentRetransmit = true;
+                        _tailLossProbePending = true;
+                        tailLossProbe = true;
+                    }
+                }
+
                 if (timedOut)
                 {
                     _bbr.OnPacketLoss(nowMicros, GetRetransmissionRatioUnsafe(), timedOutForCongestion);

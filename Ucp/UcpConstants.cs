@@ -244,7 +244,7 @@ namespace Ucp
         public const double BBR_MEDIUM_LOSS_RATIO = 0.15d;
 
         /// <summary>BBR moderate probing gain used under low loss (1.45x for aggressive mobile probing).</summary>
-        public const double BBR_MODERATE_PROBE_GAIN = 1.25d;
+        public const double BBR_MODERATE_PROBE_GAIN = 1.50d;
 
         /// <summary>BBR target-maintaining gain under light loss (1.10x).</summary>
         public const double BBR_LIGHT_LOSS_PACING_GAIN = 1.10d;
