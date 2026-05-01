@@ -1239,6 +1239,9 @@ namespace Ucp
         /// </summary>
         private double GetEffectiveCwndGain()
         {
+            // For simplicity, not implementing the waste budget cap in this version.
+            // return CwndGain; 
+
             double maxWasteGain = 1d + Math.Max(0d, _config.MaxBandwidthWastePercent);
             double limit = maxWasteGain * _config.ProbeBwCwndGain;
             if (PacingGain <= 0 || PacingGain * CwndGain <= limit)
