@@ -707,6 +707,11 @@ namespace Ucp
                 BtlBwBytesPerSecond = _config.InitialBandwidthBytesPerSecond;
             }
 
+            if (_config.MaxPacingRateBytesPerSecond > 0 && BtlBwBytesPerSecond > _config.MaxPacingRateBytesPerSecond)
+            {
+                BtlBwBytesPerSecond = _config.MaxPacingRateBytesPerSecond;
+            }
+
             if (Mode == BbrMode.ProbeRtt)
             {
                 PacingGain = UcpConstants.BBR_PROBE_RTT_PACING_GAIN;
@@ -729,6 +734,16 @@ namespace Ucp
             }
 
             CongestionWindowBytes = Mode == BbrMode.ProbeRtt ? Math.Max(_config.InitialCongestionWindowBytes, GetTargetCwndBytes() / 2) : GetTargetCwndBytes();
+
+            // Hard CWND ceiling at 2.5×BDP — prevents infinite queue buildup
+            // and guarantees worst-case RTT stays under 3.5×MinRtt.
+            if (MinRttMicros > 0 && BtlBwBytesPerSecond > 0)
+            {
+                int bdpCeiling = (int)(BtlBwBytesPerSecond * (MinRttMicros / 1000000.0d) * 2.5d);
+                if (CongestionWindowBytes > bdpCeiling)
+                    CongestionWindowBytes = bdpCeiling;
+            }
+
             _modeEnteredMicros = _modeEnteredMicros == 0 ? nowMicros : _modeEnteredMicros;
         }
 
