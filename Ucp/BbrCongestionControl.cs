@@ -1095,7 +1095,10 @@ namespace Ucp
         /// <returns>Model RTT in microseconds.</returns>
         private long GetCwndModelRttMicros()
         {
-            long modelRttMicros = MinRttMicros;
+            // Use p10 RTT instead of absolute MinRtt — far more robust
+            // on jittery paths where single fast samples collapse CWND.
+            long p10Rtt = GetP10RttMicros();
+            long modelRttMicros = p10Rtt > 0 ? Math.Max(MinRttMicros, p10Rtt) : MinRttMicros;
             if (modelRttMicros <= 0)
             {
                 return 0;
@@ -1146,6 +1149,28 @@ namespace Ucp
 
             double averageRtt = total / (double)_rttHistoryCount;
             return Math.Max(0d, (averageRtt - MinRttMicros) / MinRttMicros);
+        }
+
+        /// <summary>
+        /// Returns the 10th-percentile RTT from the history buffer.
+        /// This is far more robust than absolute MinRtt — a single lucky
+        /// fast sample cannot collapse the CWND model on jittery paths.
+        /// </summary>
+        private long GetP10RttMicros()
+        {
+            if (_rttHistoryCount < 4)
+            {
+                return MinRttMicros; // Not enough samples yet.
+            }
+
+            // Copy valid entries to a temporary array for sorting.
+            long[] sorted = new long[_rttHistoryCount];
+            Array.Copy(_rttHistoryMicros, sorted, _rttHistoryCount);
+            Array.Sort(sorted);
+
+            // Return approximately the 10th percentile.
+            int index = Math.Max(0, _rttHistoryCount / 10);
+            return sorted[index];
         }
 
         /// <summary>

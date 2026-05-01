@@ -2535,6 +2535,84 @@ namespace UcpTest
         }
 
         /// <summary>
+        /// Airplane WiFi scenario: satellite link with periodic brief disconnections
+        /// during satellite handovers.  10 Mbps, 100ms RTT, 5ms jitter, 1% random loss,
+        /// 150ms blackouts every 15 seconds simulating satellite switch-over.
+        /// </summary>
+        [Fact]
+        public async Task Integration_AirplaneWifi_HandlesSatelliteHandover()
+        {
+            double periodMs = 15000d; double outageMs = 150d;
+            UcpPerformanceReport report = await RunLineRateBenchmarkAsync(
+                "AirplaneWifi", UcpConstants.BENCHMARK_BASE_PORT + 25,
+                10 * 1000 * 1000 / 8, UcpConstants.BENCHMARK_MOBILE_4G_PAYLOAD_BYTES,
+                50, 5, 0.01d, UcpConstants.DEFAULT_MAX_BANDWIDTH_LOSS_PERCENT,
+                false, 20260507, CreateHandoverDropRule(0.01d, 20260507, periodMs, outageMs));
+            Assert.True(report.UtilizationPercent > 30d);
+        }
+
+        /// <summary>
+        /// High-speed train scenario: cellular tower handovers cause brief
+        /// disconnections and rapid RTT variation.  20 Mbps, 40ms RTT,
+        /// 20ms jitter, 0.5% random loss, 50ms blackouts every 30 seconds.
+        /// </summary>
+        [Fact]
+        public async Task Integration_HighSpeedTrain_HandlesTunnelAndHandover()
+        {
+            double periodMs = 30000d; double outageMs = 50d;
+            UcpPerformanceReport report = await RunLineRateBenchmarkAsync(
+                "HighSpeedTrain", UcpConstants.BENCHMARK_BASE_PORT + 26,
+                20 * 1000 * 1000 / 8, UcpConstants.BENCHMARK_MOBILE_4G_PAYLOAD_BYTES,
+                20, 20, 0.005d, UcpConstants.DEFAULT_MAX_BANDWIDTH_LOSS_PERCENT,
+                false, 20260508, CreateHandoverDropRule(0.005d, 20260508, periodMs, outageMs));
+            Assert.True(report.UtilizationPercent > 20d);
+        }
+
+        /// <summary>
+        /// Driving (vehicle) scenario: moderate bandwidth, gradual RTT changes
+        /// with periodic cell-tower switch drops.  5 Mbps, 30ms RTT, 10ms jitter,
+        /// 0.5% random loss, 30ms blackouts every 60 seconds.
+        /// </summary>
+        [Fact]
+        public async Task Integration_DrivingVehicle_HandlesCellSwitch()
+        {
+            double periodMs = 60000d; double outageMs = 30d;
+            UcpPerformanceReport report = await RunLineRateBenchmarkAsync(
+                "DrivingVehicle", UcpConstants.BENCHMARK_BASE_PORT + 27,
+                5 * 1000 * 1000 / 8, UcpConstants.BENCHMARK_WEAK_4G_PAYLOAD_BYTES,
+                15, 10, 0.005d, UcpConstants.DEFAULT_MAX_BANDWIDTH_LOSS_PERCENT,
+                false, 20260509, CreateHandoverDropRule(0.005d, 20260509, periodMs, outageMs));
+            Assert.True(report.UtilizationPercent > 30d);
+        }
+
+        private static Func<NetworkSimulator.SimulatedDatagram, bool> CreateHandoverDropRule(
+            double lossRate, int seed, double periodMs, double outageMs)
+        {
+            Random r = new Random(seed);
+            long firstUs = 0;
+            return d =>
+            {
+                UcpPacket p;
+                if (!UcpPacketCodec.TryDecode(d.Buffer, 0, d.Count, out p)
+                    || p.Header.Type != UcpPacketType.Data)
+                {
+                    return false;
+                }
+
+                if (firstUs == 0)
+                {
+                    firstUs = d.SendMicros;
+                }
+
+                long elapsed = d.SendMicros - firstUs;
+                long phase = elapsed % ((long)(periodMs * UcpConstants.MICROS_PER_MILLI));
+                bool inOutage = phase < (long)(outageMs * UcpConstants.MICROS_PER_MILLI);
+                bool isInit = (p.Header.Flags & UcpPacketFlags.Retransmit) != UcpPacketFlags.Retransmit;
+                return inOutage || (isInit && r.NextDouble() < lossRate);
+            };
+        }
+
+        /// <summary>
         /// Creates a UCP configuration optimized for a specific bandwidth scenario.
         /// Initializes bandwidth, max pacing rate, and server bandwidth to the same value.
         /// </summary>
