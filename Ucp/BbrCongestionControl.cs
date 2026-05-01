@@ -312,7 +312,17 @@ namespace Ucp
                 _currentRttMicros = sampleRttMicros;
                 if (MinRttMicros == 0 || sampleRttMicros < MinRttMicros)
                 {
-                    MinRttMicros = sampleRttMicros;
+                    // Sticky min-RTT: only drop at most 25% per sample to prevent
+                    // a single lucky fast measurement from collapsing CWND.
+                    if (MinRttMicros > 0)
+                    {
+                        MinRttMicros = Math.Max(sampleRttMicros, (long)(MinRttMicros * 0.75d));
+                    }
+                    else
+                    {
+                        MinRttMicros = sampleRttMicros;
+                    }
+                    
                     _minRttTimestampMicros = nowMicros;
                     minRttExpired = false; // Resets the expiry clock.
                 }
@@ -751,7 +761,7 @@ namespace Ucp
             {
                 CongestionWindowBytes = _config.Mss * 4;
             }
-            
+
             _modeEnteredMicros = _modeEnteredMicros == 0 ? nowMicros : _modeEnteredMicros;
         }
 
