@@ -2151,25 +2151,7 @@ namespace UcpTest
             // Calculate an appropriate initial CWND for this scenario.
             int initialCwndBytes = CalculateBenchmarkInitialCwndBytes(config, bandwidthBytesPerSecond, estimatedBdpBytes, hasConfiguredLoss);
 
-            // For long-running scenarios extend the ProbeRTT interval.
-            double estimatedSerialSeconds = (double)payloadBytes / Math.Max(1, bandwidthBytesPerSecond);
-            if (estimatedSerialSeconds >= UcpConstants.BENCHMARK_LONG_RUNNING_SERIAL_SECONDS)
-            {
-                config.ProbeRttIntervalMicros = UcpConstants.BENCHMARK_WEAK_NETWORK_PROBE_RTT_INTERVAL_MICROS;
-            }
-
             config.InitialCwndBytes = (uint)initialCwndBytes;
-
-            // On lossy paths BtlBw is suppressed by retransmission overhead
-            // even when the controller never explicitly reduces pacing.
-            // Give BBR a 1.5× headroom so it can compensate for packet loss
-            // through the bottleneck's natural queuing — the sender paces at
-            // up to 1.5× bandwidth and the simulator serializes at 1×.
-            if (hasConfiguredLoss && !autoProbe)
-            {
-                config.InitialBandwidthBytesPerSecond = bandwidthBytesPerSecond * 3 / 2;
-                config.MaxPacingRateBytesPerSecond = bandwidthBytesPerSecond * 3 / 2;
-            }
 
             // Auto-probe mode: remove rate cap and set a high initial bandwidth for BBR to probe.
             if (autoProbe)
@@ -2185,7 +2167,7 @@ namespace UcpTest
             }
             else if (hasConfiguredLoss && estimatedRttMicros > 0)
             {
-                long fecRepairBudgetMicros = config.FecRedundancy > 0d ? estimatedRttMicros * 3L : estimatedRttMicros * 2L;
+                long fecRepairBudgetMicros = config.FecRedundancy > 0d ? estimatedRttMicros * 4L : estimatedRttMicros * 4L;
                 config.MinRtoMicros = Math.Max(UcpConstants.DEFAULT_RTO_MICROS, fecRepairBudgetMicros);
             }
 

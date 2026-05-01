@@ -620,6 +620,9 @@ namespace Ucp
         /// <summary>FEC redundancy ratio for medium loss (3-10%) benchmark scenarios.</summary>
         public const double BENCHMARK_MEDIUM_LOSS_FEC_REDUNDANCY = 0.50d;
 
+        /// <summary>Minimum estimated loss percent to enable adaptive FEC encoding (1%).</summary>
+        public const double FEC_ADAPTIVE_MIN_LOSS_PERCENT = 2d;
+
         /// <summary>RTT threshold above which heavy FEC (0.50) is always used for lossy benchmarks.</summary>
         public const long BENCHMARK_HIGH_RTT_FEC_THRESHOLD_MICROS = 80000L;
 
