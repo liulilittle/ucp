@@ -662,7 +662,7 @@ namespace Ucp
             double bdp = BtlBwBytesPerSecond * (modelRttMicros / (double)UcpConstants.MICROS_PER_SECOND);
             double effectiveCwndGain = GetEffectiveCwndGain();
             int cwnd = (int)Math.Ceiling(bdp * effectiveCwndGain);
-            if (cwnd < _config.InitialCongestionWindowBytes)
+            if (cwnd < _config.InitialCongestionWindowBytes && Mode == BbrMode.Startup)
             {
                 cwnd = _config.InitialCongestionWindowBytes;
             }
