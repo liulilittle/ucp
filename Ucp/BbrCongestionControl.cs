@@ -735,11 +735,12 @@ namespace Ucp
 
             CongestionWindowBytes = Mode == BbrMode.ProbeRtt ? Math.Max(_config.InitialCongestionWindowBytes, GetTargetCwndBytes() / 2) : GetTargetCwndBytes();
 
-            // Hard CWND ceiling at 2.5×BDP — prevents infinite queue buildup
-            // and guarantees worst-case RTT stays under 3.5×MinRtt.
+            // Hard CWND ceiling at 2.0×BDP — 1×BDP keeps pipe full,
+            // extra 1× for loss-recovery headroom.
+            // Yields max queue = 1×BDP, max RTT = 3×MinRtt.
             if (MinRttMicros > 0 && BtlBwBytesPerSecond > 0)
             {
-                int bdpCeiling = (int)(BtlBwBytesPerSecond * (MinRttMicros / 1000000.0d) * 2.5d);
+                int bdpCeiling = (int)(BtlBwBytesPerSecond * (MinRttMicros / 1000000.0d) * 2.0d);
                 if (CongestionWindowBytes > bdpCeiling)
                     CongestionWindowBytes = bdpCeiling;
             }
