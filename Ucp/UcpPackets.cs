@@ -63,6 +63,8 @@ namespace Ucp
     /// <summary>
     /// Represents a data packet carrying a fragmented or whole application payload.
     /// Supports multi-fragment delivery through FragmentTotal and FragmentIndex.
+    /// Carries piggybacked cumulative ACK, optional SACK blocks, flow-control window,
+    /// and echo timestamp so a separate ACK packet is unnecessary during active data transfer.
     /// </summary>
     internal sealed class UcpDataPacket : UcpPacket
     {
@@ -77,6 +79,18 @@ namespace Ucp
 
         /// <summary>The application payload bytes carried by this packet.</summary>
         public byte[] Payload;
+
+        /// <summary>Cumulative acknowledgment number piggybacked on this data packet.</summary>
+        public uint AckNumber;
+
+        /// <summary>Selective acknowledgment blocks piggybacked on this data packet.</summary>
+        public List<SackBlock> SackBlocks = new List<SackBlock>();
+
+        /// <summary>Advertised receive window size in bytes, piggybacked for flow control.</summary>
+        public uint WindowSize;
+
+        /// <summary>Echoed timestamp from the last-received peer packet, for RTT measurement.</summary>
+        public long EchoTimestamp;
     }
 
     /// <summary>

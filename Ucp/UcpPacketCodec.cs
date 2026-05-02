@@ -154,12 +154,18 @@ namespace Ucp
         }
 
         /// <summary>
-        /// Encodes a data packet: common header, sequence number, fragment info, payload.
+        /// Encodes a data packet: common header, sequence number, fragment info,
+        /// optional piggybacked ACK (AckNumber, SACK blocks, window, echo timestamp),
+        /// and payload.
         /// </summary>
         private static byte[] EncodeData(UcpDataPacket packet)
         {
             int payloadLength = packet.Payload == null ? 0 : packet.Payload.Length;
-            byte[] bytes = new byte[UcpConstants.DataHeaderSize + payloadLength];
+            bool hasAck = (packet.Header.Flags & UcpPacketFlags.HasAckNumber) == UcpPacketFlags.HasAckNumber;
+            int blockCount = hasAck && packet.SackBlocks != null ? Math.Min(packet.SackBlocks.Count, UcpConstants.MaxAckSackBlocks) : 0;
+
+            int baseHeaderSize = hasAck ? UcpConstants.DATA_HEADER_SIZE_WITH_ACK : UcpConstants.DataHeaderSize;
+            byte[] bytes = new byte[baseHeaderSize + (blockCount * UcpConstants.SACK_BLOCK_SIZE) + payloadLength];
             int index = 0;
             WriteCommonHeader(packet.Header, bytes, index);
             index += UcpConstants.CommonHeaderSize;
@@ -169,6 +175,27 @@ namespace Ucp
             index += sizeof(ushort);
             WriteUInt16(packet.FragmentIndex, bytes, index);
             index += sizeof(ushort);
+
+            if (hasAck)
+            {
+                WriteUInt32(packet.AckNumber, bytes, index);
+                index += UcpConstants.ACK_NUMBER_SIZE;
+                WriteUInt16((ushort)blockCount, bytes, index);
+                index += sizeof(ushort);
+                for (int i = 0; i < blockCount; i++)
+                {
+                    SackBlock block = packet.SackBlocks[i];
+                    WriteUInt32(block.Start, bytes, index);
+                    index += UcpConstants.SEQUENCE_NUMBER_SIZE;
+                    WriteUInt32(block.End, bytes, index);
+                    index += UcpConstants.SEQUENCE_NUMBER_SIZE;
+                }
+
+                WriteUInt32(packet.WindowSize, bytes, index);
+                index += sizeof(uint);
+                WriteUInt48(packet.EchoTimestamp, bytes, index);
+                index += UcpConstants.ACK_TIMESTAMP_FIELD_SIZE;
+            }
 
             if (payloadLength > 0)
             {
@@ -240,12 +267,15 @@ namespace Ucp
         }
 
         /// <summary>
-        /// Decodes a buffer into a UcpDataPacket with its payload.
+        /// Decodes a buffer into a UcpDataPacket. Supports optional piggybacked ACK
+        /// when the HasAckNumber flag is set in the common header.
         /// </summary>
         private static bool TryDecodeData(byte[] buffer, int offset, int count, UcpCommonHeader header, out UcpPacket packet)
         {
             packet = null;
-            if (count < UcpConstants.DataHeaderSize)
+            bool hasAck = (header.Flags & UcpPacketFlags.HasAckNumber) == UcpPacketFlags.HasAckNumber;
+            int minHeaderSize = hasAck ? UcpConstants.DATA_HEADER_SIZE_WITH_ACK : UcpConstants.DataHeaderSize;
+            if (count < minHeaderSize)
             {
                 return false;
             }
@@ -260,7 +290,41 @@ namespace Ucp
             data.FragmentIndex = ReadUInt16(buffer, index);
             index += sizeof(ushort);
 
-            int payloadLength = count - UcpConstants.DataHeaderSize;
+            if (hasAck)
+            {
+                data.AckNumber = ReadUInt32(buffer, index);
+                index += UcpConstants.ACK_NUMBER_SIZE;
+                ushort blockCount = ReadUInt16(buffer, index);
+                index += sizeof(ushort);
+
+                int expectedSize = minHeaderSize + (blockCount * UcpConstants.SACK_BLOCK_SIZE);
+                if (count < expectedSize)
+                {
+                    return false;
+                }
+
+                for (int i = 0; i < blockCount; i++)
+                {
+                    SackBlock block = new SackBlock();
+                    block.Start = ReadUInt32(buffer, index);
+                    index += UcpConstants.SEQUENCE_NUMBER_SIZE;
+                    block.End = ReadUInt32(buffer, index);
+                    index += UcpConstants.SEQUENCE_NUMBER_SIZE;
+                    data.SackBlocks.Add(block);
+                }
+
+                data.WindowSize = ReadUInt32(buffer, index);
+                index += sizeof(uint);
+                data.EchoTimestamp = ReadUInt48(buffer, index);
+                index += UcpConstants.ACK_TIMESTAMP_FIELD_SIZE;
+            }
+
+            int payloadLength = count - (index - offset);
+            if (payloadLength < 0)
+            {
+                return false;
+            }
+
             data.Payload = new byte[payloadLength];
             if (payloadLength > 0)
             {

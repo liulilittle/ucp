@@ -171,6 +171,12 @@ namespace Ucp.Internal
         /// <summary>Sequences for which SACK-based fast retransmit has already been triggered.</summary>
         private readonly HashSet<uint> _sackFastRetransmitNotified = new HashSet<uint>();
 
+        /// <summary>QUIC-style SACK send count tracking per block range. Each range-key gets sent at most 2 times.</summary>
+        private readonly Dictionary<ulong, int> _sackBlockSendCounts = new Dictionary<ulong, int>();
+
+        /// <summary>Maximum number of times each SACK block range can be sent (QUIC standard: 2).</summary>
+        private const int MAX_SACK_SEND_COUNT = 2;
+
         /// <summary>FEC groups for which repair packets have been sent.</summary>
         private readonly HashSet<uint> _fecRepairSentGroups = new HashSet<uint>();
 
@@ -1331,7 +1337,7 @@ namespace Ucp.Internal
                             }
                         }
 
-                        _bytesReceived += 0;
+                        _bytesSent += segment.Payload.Length;
                         removeKeys.Add(pair.Key);
                         continue;
                     }
@@ -1711,12 +1717,11 @@ namespace Ucp.Internal
                 return Math.Max(UcpConstants.SACK_FAST_RETRANSMIT_MIN_REORDER_GRACE_MICROS, fallbackRttMicros * 2);
             }
 
-            // A reordered packet takes up to one RTT (forward) + jitter to
-            // arrive, then its confirming ACK takes another half-RTT (reverse)
-            // to reach the sender.  The full 2×RTT guard ensures the confirming
-            // ACK clears the hole before SACK retransmits, eliminating spurious
-            // fast retransmits on high-jitter weak-network paths.
-            return Math.Max(UcpConstants.SACK_FAST_RETRANSMIT_MIN_REORDER_GRACE_MICROS, rttMicros * 2);
+            // A reordered packet takes up to one RTT (forward) to arrive.
+            // One full RTT guard lets the confirming ACK clear the hole
+            // before SACK retransmits, avoiding spurious fast retransmits
+            // while keeping latency low.
+            return Math.Max(UcpConstants.SACK_FAST_RETRANSMIT_MIN_REORDER_GRACE_MICROS, rttMicros);
         }
 
         // ---- Duplicate ACK handling ----
@@ -2074,6 +2079,22 @@ namespace Ucp.Internal
             bool shouldEstablish = false;
             bool shouldStore = false;
             bool sendImmediateAck = false;
+            bool hasPiggybackedAck = (dataPacket.Header.Flags & UcpPacketFlags.HasAckNumber) == UcpPacketFlags.HasAckNumber;
+
+            // Process piggybacked ACK from data packet before handling the data payload.
+            // This keeps the sender's flight bytes accurate and avoids standalone ACK storms.
+            if (hasPiggybackedAck && dataPacket.AckNumber > 0)
+            {
+                ProcessPiggybackedAck(dataPacket.AckNumber, dataPacket.Header.Timestamp, NowMicros());
+
+                if (dataPacket.WindowSize > 0)
+                {
+                    lock (_sync)
+                    {
+                        _remoteWindowBytes = dataPacket.WindowSize;
+                    }
+                }
+            }
 
             lock (_sync)
             {
@@ -2203,6 +2224,8 @@ namespace Ucp.Internal
                 SendNak(missing);
             }
 
+            // Always schedule/piggyback ACK. Piggybacked ACKs on data packets cancel
+            // the delayed ACK timer, so standalone ACKs only fire when no data flows.
             if (sendImmediateAck)
             {
                 SendAckPacket(UcpPacketFlags.None, 0);
@@ -2610,7 +2633,24 @@ namespace Ucp.Internal
                 packet = new UcpAckPacket();
                 packet.Header = CreateHeader(UcpPacketType.Ack, flags, NowMicros());
                 packet.AckNumber = unchecked(_nextExpectedSequence - 1U);
-                packet.SackBlocks = _sackGenerator.Generate(_nextExpectedSequence, _recvBuffer.Keys, _config.MaxAckSackBlocks);
+
+                List<SackBlock> rawBlocks = _sackGenerator.Generate(_nextExpectedSequence, _recvBuffer.Keys, _config.MaxAckSackBlocks);
+                // QUIC-style: each SACK block range is sent at most MAX_SACK_SEND_COUNT (2) times.
+                List<SackBlock> filteredBlocks = new List<SackBlock>(rawBlocks.Count);
+                for (int i = 0; i < rawBlocks.Count; i++)
+                {
+                    ulong key = PackSackBlockKey(rawBlocks[i].Start, rawBlocks[i].End);
+                    int sendCount;
+                    _sackBlockSendCounts.TryGetValue(key, out sendCount);
+                    if (sendCount < MAX_SACK_SEND_COUNT)
+                    {
+                        filteredBlocks.Add(rawBlocks[i]);
+                        _sackBlockSendCounts[key] = sendCount + 1;
+                    }
+                }
+
+                packet.SackBlocks = filteredBlocks;
+
                 uint usedBytes = GetReceiveWindowUsedBytesUnsafe();
                 packet.WindowSize = usedBytes >= _localReceiveWindowBytes ? 0U : _localReceiveWindowBytes - usedBytes;
                 packet.EchoTimestamp = overrideEchoTimestamp < 0 ? 0 : (overrideEchoTimestamp > 0 ? overrideEchoTimestamp : _lastEchoTimestamp);
@@ -2701,10 +2741,15 @@ namespace Ucp.Internal
                     List<OutboundSegment> segmentsToSend = new List<OutboundSegment>();
                     long nowMicros = NowMicros();
                     long waitMicros = 0;
+                    uint piggyCumAck = 0;
+                    List<SackBlock> piggySackBlocks = null;
+                    uint piggyWindow = 0;
+                    long piggyEcho = 0;
 
                     lock (_sync)
                     {
                         int windowBytes = GetSendWindowBytesUnsafe();
+                        int piggybackedAckOverhead = UcpConstants.DATA_HEADER_SIZE_WITH_ACK - UcpConstants.DataHeaderSize;
                         foreach (KeyValuePair<uint, OutboundSegment> pair in _sendBuffer)
                         {
                             OutboundSegment segment = pair.Value;
@@ -2720,27 +2765,25 @@ namespace Ucp.Internal
 
                             if (!segment.NeedsRetransmit && !segment.InFlight && _flightBytes + segment.Payload.Length > windowBytes)
                             {
-                                break; // Send window is full.
+                                break;
                             }
 
-                            int packetSize = UcpConstants.DataHeaderSize + segment.Payload.Length;
+                            int packetSize = UcpConstants.DataHeaderSize + piggybackedAckOverhead + segment.Payload.Length;
                             bool urgentRecovery = segment.NeedsRetransmit && segment.SendCount > 0 && segment.UrgentRetransmit && CanUseUrgentRecoveryUnsafe(nowMicros);
                             if (_useFairQueue && _fairQueueCreditBytes < packetSize && !urgentRecovery)
                             {
-                                break; // Not enough fair-queue credit.
+                                break;
                             }
 
             if (urgentRecovery)
             {
-                // Urgent recovery bypasses the smooth pacing gate without
-                // creating post-recovery token debt that would stall data.
                 _pacing.ForceConsume(packetSize, nowMicros);
                 _urgentRecoveryPacketsInWindow++;
             }
                             else if (!_pacing.TryConsume(packetSize, nowMicros))
                             {
                                 waitMicros = _pacing.GetWaitTimeMicros(packetSize, nowMicros);
-                                break; // Pacing gate; cannot send now.
+                                break;
                             }
 
                             if (_useFairQueue)
@@ -2759,10 +2802,6 @@ namespace Ucp.Internal
                             {
                                 _flightBytes += segment.Payload.Length;
                             }
-                            else
-                            {
-                                segment.InFlight = true;
-                            }
 
                             segment.SendCount++;
                             _bbr.OnPacketSent(nowMicros, segment.SendCount > 1);
@@ -2770,6 +2809,17 @@ namespace Ucp.Internal
                             _lastActivityMicros = nowMicros;
                             segmentsToSend.Add(segment);
                         }
+
+                        // Snapshot piggybacked ACK info inside the lock.
+                        piggyCumAck = _nextExpectedSequence > 0 ? unchecked(_nextExpectedSequence - 1U) : 0;
+                        piggySackBlocks = piggyCumAck > 0 ? _sackGenerator.Generate(_nextExpectedSequence, _recvBuffer.Keys, _config.MaxAckSackBlocks) : null;
+                        piggyWindow = piggyCumAck > 0
+                            ? (_localReceiveWindowBytes > GetReceiveWindowUsedBytesUnsafe()
+                                ? _localReceiveWindowBytes - GetReceiveWindowUsedBytesUnsafe()
+                                : 0U)
+                            : _localReceiveWindowBytes;
+                        piggyEcho = _lastEchoTimestamp;
+                        _lastAckSentMicros = nowMicros; // Piggyback counts as an ACK send.
                     }
 
                     if (segmentsToSend.Count == 0)
@@ -2782,19 +2832,30 @@ namespace Ucp.Internal
                         break;
                     }
 
-                    // Encode and send all collected segments outside the lock.
+                    // Encode and send all collected segments with piggybacked ACK.
                     for (int i = 0; i < segmentsToSend.Count; i++)
                     {
                         OutboundSegment segment = segmentsToSend[i];
                         UcpDataPacket packet = new UcpDataPacket();
 
-                        packet.Header = CreateHeader(UcpPacketType.Data,
-                            segment.SendCount > 1 ? UcpPacketFlags.NeedAck | UcpPacketFlags.Retransmit : UcpPacketFlags.NeedAck,
-                            nowMicros);
+                        UcpPacketFlags pktFlags = segment.SendCount > 1
+                            ? UcpPacketFlags.NeedAck | UcpPacketFlags.Retransmit | UcpPacketFlags.HasAckNumber
+                            : UcpPacketFlags.NeedAck | UcpPacketFlags.HasAckNumber;
+
+                        packet.Header = CreateHeader(UcpPacketType.Data, pktFlags, nowMicros);
                         packet.SequenceNumber = segment.SequenceNumber;
                         packet.FragmentTotal = segment.FragmentTotal;
                         packet.FragmentIndex = segment.FragmentIndex;
                         packet.Payload = segment.Payload;
+
+                        packet.AckNumber = piggyCumAck;
+                        if (piggySackBlocks != null && piggySackBlocks.Count > 0)
+                        {
+                            packet.SackBlocks = piggySackBlocks;
+                        }
+
+                        packet.WindowSize = piggyWindow;
+                        packet.EchoTimestamp = piggyEcho;
 
                         byte[] encoded = UcpPacketCodec.Encode(packet);
                         if (segment.SendCount > 1)
@@ -3472,6 +3533,26 @@ namespace Ucp.Internal
             if (_rttSamplesMicros.Count > UcpConstants.MaxRttSamples)
             {
                 _rttSamplesMicros.RemoveAt(0); // Drop oldest sample when at capacity.
+            }
+        }
+
+        /// <summary>
+        /// Packs a SACK block (Start, End) into a single ulong key for send-count tracking.
+        /// </summary>
+        private static ulong PackSackBlockKey(uint start, uint end)
+        {
+            return ((ulong)start << 32) | end;
+        }
+
+        /// <summary>
+        /// Purges SACK send-count entries for sequence ranges that are no longer in
+        /// the receive buffer, preventing unbounded dictionary growth.
+        /// </summary>
+        private void PurgeSackSendCountsUnsafe()
+        {
+            if (_sackBlockSendCounts.Count > 1024)
+            {
+                _sackBlockSendCounts.Clear();
             }
         }
 

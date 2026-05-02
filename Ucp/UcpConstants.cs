@@ -31,8 +31,11 @@ namespace Ucp
         /// <summary>Common packet header size in bytes (Type + Flags + ConnectionId + Timestamp).</summary>
         public const int COMMON_HEADER_SIZE = 12;
 
-        /// <summary>Data packet-specific header size in bytes.</summary>
+        /// <summary>Minimum Data packet-specific header size in bytes (without piggybacked ACK).</summary>
         public const int DATA_HEADER_SIZE = COMMON_HEADER_SIZE + sizeof(uint) + sizeof(ushort) + sizeof(ushort);
+
+        /// <summary>Data packet header size when piggybacked ACK (HasAckNumber flag) is present, in bytes (excludes variable SACK blocks).</summary>
+        public const int DATA_HEADER_SIZE_WITH_ACK = DATA_HEADER_SIZE + ACK_NUMBER_SIZE + sizeof(ushort) + sizeof(uint) + ACK_TIMESTAMP_FIELD_SIZE;
 
         /// <summary>Fixed ACK packet size in bytes before variable SACK blocks.</summary>
         public const int ACK_FIXED_SIZE = COMMON_HEADER_SIZE + sizeof(uint) + sizeof(ushort) + sizeof(uint) + ACK_TIMESTAMP_FIELD_SIZE;
@@ -336,15 +339,15 @@ namespace Ucp
         /// <summary>Fallback bandwidth-growth interval before a valid RTT sample is available.</summary>
         public const long BBR_BANDWIDTH_GROWTH_FALLBACK_INTERVAL_MICROS = 10000L;
 
-        /// <summary>Maximum ratio used for the lower inflight guardrail relative to BDP.</summary>
-        public const double BBR_INFLIGHT_LOW_GAIN = 2.00d;
+        /// <summary>Maximum ratio used for the lower inflight guardrail relative to BDP (tight to prevent bufferbloat).</summary>
+        public const double BBR_INFLIGHT_LOW_GAIN = 1.25d;
 
-        /// <summary>Maximum ratio used for the upper inflight guardrail relative to BDP.</summary>
-        public const double BBR_INFLIGHT_HIGH_GAIN = 5.00d;
+        /// <summary>Maximum ratio used for the upper inflight guardrail relative to BDP (capped at 2.0x to keep queuing delay under one RTT).</summary>
+        public const double BBR_INFLIGHT_HIGH_GAIN = 2.00d;
 
         /// <summary>Upper inflight guardrail for mobile/jittery non-congested paths
         /// where extra headroom compensates for retransmission and jitter overhead.</summary>
-        public const double BBR_INFLIGHT_MOBILE_HIGH_GAIN = 6.00d;
+        public const double BBR_INFLIGHT_MOBILE_HIGH_GAIN = 2.00d;
 
         /// <summary>RTT growth required before loss-driven delivery drops are classified as congestion.</summary>
         public const double BBR_CONGESTION_RTT_INCREASE_RATIO = 0.50d;
@@ -353,9 +356,8 @@ namespace Ucp
         public const double BBR_CONGESTION_LOSS_RATIO = 0.10d;
 
         /// <summary>Maximum RTT cushion multiplier used by CWND on non-congested lossy paths.
-        /// Higher cushion compensates for retransmission overhead and jitter without
-        /// inflating the bottleneck queue.</summary>
-        public const double BBR_RANDOM_LOSS_CWND_RTT_CUSHION = 6.0d;
+        /// Kept at 2.0x to prevent bufferbloat while allowing retransmit headroom.</summary>
+        public const double BBR_RANDOM_LOSS_CWND_RTT_CUSHION = 2.0d;
 
         /// <summary>Delivery-rate sample history length used by the lightweight classifier.</summary>
         public const int BBR_DELIVERY_RATE_HISTORY_COUNT = 16;
@@ -713,29 +715,31 @@ namespace Ucp
         /// <summary>Minimum SACK distance past a missing sequence before treating the hole as real loss.</summary>
         public const int SACK_FAST_RETRANSMIT_DISTANCE_THRESHOLD = 48;
 
-        /// <summary>Lower bound for SACK-based reorder grace before fast retransmit, in microseconds.</summary>
-        public const long SACK_FAST_RETRANSMIT_MIN_REORDER_GRACE_MICROS = 100000L;
+        /// <summary>Lower bound for SACK-based reorder grace before fast retransmit, in microseconds.
+        /// Reduced to 20ms for faster hole recovery on low-latency paths.</summary>
+        public const long SACK_FAST_RETRANSMIT_MIN_REORDER_GRACE_MICROS = 20000L;
 
         /// <summary>Missing observation count needed before the receiver sends a NAK.</summary>
         public const int NAK_MISSING_THRESHOLD = 2;
 
-        /// <summary>Minimum packet-age delay before receiver NAKs a missing sequence, in microseconds.</summary>
-        public const long NAK_REORDER_GRACE_MICROS = 20000L;
+        /// <summary>Minimum packet-age delay before receiver NAKs a missing sequence, in microseconds.
+        /// Reduced to 5ms for faster loss detection on low-latency paths.</summary>
+        public const long NAK_REORDER_GRACE_MICROS = 5000L;
 
         /// <summary>Missing observation count that makes a gap high-confidence despite reorder grace.</summary>
-        public const int NAK_HIGH_CONFIDENCE_MISSING_THRESHOLD = 256;
+        public const int NAK_HIGH_CONFIDENCE_MISSING_THRESHOLD = 128;
 
         /// <summary>Minimum packet-age delay for high-confidence missing gaps, in microseconds.</summary>
-        public const long NAK_HIGH_CONFIDENCE_REORDER_GRACE_MICROS = 2000L;
+        public const long NAK_HIGH_CONFIDENCE_REORDER_GRACE_MICROS = 1000L;
 
         /// <summary>Missing observation count that makes a gap more likely to be real loss than jitter.</summary>
-        public const int NAK_MEDIUM_CONFIDENCE_MISSING_THRESHOLD = 64;
+        public const int NAK_MEDIUM_CONFIDENCE_MISSING_THRESHOLD = 32;
 
         /// <summary>Minimum packet-age delay for medium-confidence missing gaps, in microseconds.</summary>
-        public const long NAK_MEDIUM_CONFIDENCE_REORDER_GRACE_MICROS = 2000L;
+        public const long NAK_MEDIUM_CONFIDENCE_REORDER_GRACE_MICROS = 1000L;
 
         /// <summary>Minimum interval before the receiver may re-emit a NAK for the same missing sequence.</summary>
-        public const long NAK_REPEAT_INTERVAL_MICROS = 20000L;
+        public const long NAK_REPEAT_INTERVAL_MICROS = 5000L;
 
         /// <summary>Maximum number of sequence slots scanned while building NAK state.</summary>
         public const int MAX_NAK_MISSING_SCAN = 16384;

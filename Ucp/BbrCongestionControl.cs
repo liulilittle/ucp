@@ -893,35 +893,21 @@ namespace Ucp
 
             // Hard CWND ceiling using P10 RTT (more robust than raw MinRtt
             // against single lucky fast samples on jittery paths).
-            // Fixed multipliers prevent the feedback loop where inflated
-            // RTT leads to higher CWND which leads to more queuing.
-            // Default: 2.5× BDP, Mobile/Lossy: 3.5× BDP.
+            // Capped at 2.5x BDP for all paths to keep queuing delay minimal.
             if (MinRttMicros > 0 && BtlBwBytesPerSecond > 0)
             {
                 double ceilingMultiplier;
                 long ceilingRtt;
                 if (CurrentNetworkClass == NetworkClass.SymmetricVPN)
                 {
-                    ceilingRtt = (long)(MinRttMicros * 4.0d);
+                    ceilingRtt = (long)(MinRttMicros * 2.0d);
                     ceilingMultiplier = 1.0d;
-                }
-                else if (_networkCondition != NetworkCondition.Congested
-                    && (CurrentNetworkClass == NetworkClass.MobileUnstable
-                        || CurrentNetworkClass == NetworkClass.LossyLongFat))
-                {
-                    ceilingRtt = Math.Max(MinRttMicros, GetP10RttMicros());
-                    if (ceilingRtt <= 0) ceilingRtt = MinRttMicros;
-                    ceilingMultiplier = 6.0d;
                 }
                 else
                 {
                     ceilingRtt = Math.Max(MinRttMicros, GetP10RttMicros());
-                    if (ceilingRtt <= 0) 
-                    {
-                        ceilingRtt = MinRttMicros;
-                    }
-                    
-                    ceilingMultiplier = 4.0d;
+                    if (ceilingRtt <= 0) ceilingRtt = MinRttMicros;
+                    ceilingMultiplier = 2.0d;
                 }
 
                 if (ceilingRtt > 5_000_000L)
@@ -1002,19 +988,9 @@ namespace Ucp
             Mode = BbrMode.ProbeBw;
             _probeBwCycleIndex = 0;
 
-            // On mobile or lossy non-congested paths, use a higher CWND
-            // gain to compensate for the headroom consumed by retransmission
-            // and jitter overhead.  Fixed multipliers avoid the latency
-            // feedback loop that adaptive cushions create.
-            if (CurrentNetworkClass == NetworkClass.MobileUnstable
-                || CurrentNetworkClass == NetworkClass.LossyLongFat)
-            {
-                CwndGain = _config.ProbeBwCwndGain * 3.0d; // 6.0× BDP.
-            }
-            else
-            {
-                CwndGain = _config.ProbeBwCwndGain * 1.75d; // 3.5× BDP.
-            }
+            // CWND gain at 2.0x BDP for all paths provides sufficient headroom
+            // for retransmissions without causing bufferbloat.
+            CwndGain = _config.ProbeBwCwndGain; // 2.0x BDP.
 
             PacingGain = CalculatePacingGain(nowMicros);
             _modeEnteredMicros = nowMicros;
@@ -1128,7 +1104,17 @@ namespace Ucp
 
             if (CurrentNetworkClass == NetworkClass.MobileUnstable)
             {
-                return UcpConstants.BBR_MODERATE_PROBE_GAIN;
+                if (rttIncrease < UcpConstants.BBR_LOW_RTT_INCREASE_RATIO)
+                {
+                    return _config.ProbeBwHighGain; // 1.35x when RTT is stable.
+                }
+
+                if (rttIncrease < UcpConstants.BBR_MODERATE_RTT_INCREASE_RATIO)
+                {
+                    return UcpConstants.BBR_LIGHT_LOSS_PACING_GAIN; // 1.10x with moderate RTT rise.
+                }
+
+                return 1d; // 1.00x when RTT is heavily inflated.
             }
 
             if (CurrentNetworkClass == NetworkClass.LossyLongFat)
