@@ -702,22 +702,22 @@ namespace Ucp
         public const int BBR_PROBE_RTT_CONGESTION_LOSS_THRESHOLD = 5;
 
         /// <summary>Duplicate ACK count needed to trigger fast retransmit.</summary>
-        public const int DUPLICATE_ACK_THRESHOLD = 2;
+        public const int DUPLICATE_ACK_THRESHOLD = 3;
 
         /// <summary>SACK observations needed before a missing hole is retransmitted without waiting for RTO.</summary>
-        public const int SACK_FAST_RETRANSMIT_THRESHOLD = 2;
+        public const int SACK_FAST_RETRANSMIT_THRESHOLD = 3;
 
         /// <summary>Minimum SACK distance past a missing sequence before treating the hole as real loss.</summary>
-        public const int SACK_FAST_RETRANSMIT_DISTANCE_THRESHOLD = 32;
+        public const int SACK_FAST_RETRANSMIT_DISTANCE_THRESHOLD = 48;
 
         /// <summary>Lower bound for SACK-based reorder grace before fast retransmit, in microseconds.</summary>
-        public const long SACK_FAST_RETRANSMIT_MIN_REORDER_GRACE_MICROS = 3000L;
+        public const long SACK_FAST_RETRANSMIT_MIN_REORDER_GRACE_MICROS = 100000L;
 
         /// <summary>Missing observation count needed before the receiver sends a NAK.</summary>
         public const int NAK_MISSING_THRESHOLD = 2;
 
         /// <summary>Minimum packet-age delay before receiver NAKs a missing sequence, in microseconds.</summary>
-        public const long NAK_REORDER_GRACE_MICROS = 5000L;
+        public const long NAK_REORDER_GRACE_MICROS = 20000L;
 
         /// <summary>Missing observation count that makes a gap high-confidence despite reorder grace.</summary>
         public const int NAK_HIGH_CONFIDENCE_MISSING_THRESHOLD = 256;

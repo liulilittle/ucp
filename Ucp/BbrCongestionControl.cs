@@ -898,13 +898,30 @@ namespace Ucp
             // Default: 2.5× BDP, Mobile/Lossy: 3.5× BDP.
             if (MinRttMicros > 0 && BtlBwBytesPerSecond > 0)
             {
-                long ceilingRtt = Math.Max(MinRttMicros, GetP10RttMicros());
-                double ceilingMultiplier = 2.5d;
-                if (_networkCondition != NetworkCondition.Congested
+                double ceilingMultiplier;
+                long ceilingRtt;
+                if (CurrentNetworkClass == NetworkClass.SymmetricVPN)
+                {
+                    ceilingRtt = (long)(MinRttMicros * 4.0d);
+                    ceilingMultiplier = 1.0d;
+                }
+                else if (_networkCondition != NetworkCondition.Congested
                     && (CurrentNetworkClass == NetworkClass.MobileUnstable
                         || CurrentNetworkClass == NetworkClass.LossyLongFat))
                 {
-                    ceilingMultiplier = 3.5d;
+                    ceilingRtt = Math.Max(MinRttMicros, GetP10RttMicros());
+                    if (ceilingRtt <= 0) ceilingRtt = MinRttMicros;
+                    ceilingMultiplier = 6.0d;
+                }
+                else
+                {
+                    ceilingRtt = Math.Max(MinRttMicros, GetP10RttMicros());
+                    if (ceilingRtt <= 0) 
+                    {
+                        ceilingRtt = MinRttMicros;
+                    }
+                    
+                    ceilingMultiplier = 4.0d;
                 }
 
                 if (ceilingRtt > 5_000_000L)
@@ -919,9 +936,7 @@ namespace Ucp
                 }
 
                 int bdpCeiling = (int)bdpCeilingLong;
-
-                if (_config.MaxCongestionWindowBytes > 0
-                    && bdpCeiling > _config.MaxCongestionWindowBytes)
+                if (_config.MaxCongestionWindowBytes > 0 && bdpCeiling > _config.MaxCongestionWindowBytes)
                 {
                     bdpCeiling = _config.MaxCongestionWindowBytes;
                 }
@@ -930,11 +945,29 @@ namespace Ucp
                 {
                     CongestionWindowBytes = bdpCeiling;
                 }
+
+                if (bdpCeiling < 100_000L && _config.EffectiveMinRtoMicros > 0)
+                {
+                    long maxRtt = (long)(MinRttMicros + _config.EffectiveMinRtoMicros * 0.90d);
+                    int rtoCeiling = (int)(BtlBwBytesPerSecond * (maxRtt / 1000000.0d));
+                    if (rtoCeiling > 0 && CongestionWindowBytes > rtoCeiling)
+                    {
+                        CongestionWindowBytes = rtoCeiling;
+                    }
+                }
             }
             else if (BtlBwBytesPerSecond > 0)
             {
-                if (_config.MaxCongestionWindowBytes > 0
-                    && CongestionWindowBytes > _config.MaxCongestionWindowBytes)
+                if (_config.EffectiveMinRtoMicros > 0)
+                {
+                    int rtoCeiling = (int)(BtlBwBytesPerSecond * (_config.EffectiveMinRtoMicros / 1000000.0d));
+                    if (rtoCeiling > 0 && CongestionWindowBytes > rtoCeiling)
+                    {
+                        CongestionWindowBytes = rtoCeiling;
+                    }
+                }
+
+                if (_config.MaxCongestionWindowBytes > 0 && CongestionWindowBytes > _config.MaxCongestionWindowBytes)
                 {
                     CongestionWindowBytes = _config.MaxCongestionWindowBytes;
                 }
@@ -976,11 +1009,11 @@ namespace Ucp
             if (CurrentNetworkClass == NetworkClass.MobileUnstable
                 || CurrentNetworkClass == NetworkClass.LossyLongFat)
             {
-                CwndGain = _config.ProbeBwCwndGain * 1.75d; // 3.5× BDP.
+                CwndGain = _config.ProbeBwCwndGain * 3.0d; // 6.0× BDP.
             }
             else
             {
-                CwndGain = _config.ProbeBwCwndGain * 1.25d; // 2.5× BDP.
+                CwndGain = _config.ProbeBwCwndGain * 1.75d; // 3.5× BDP.
             }
 
             PacingGain = CalculatePacingGain(nowMicros);
@@ -1505,6 +1538,11 @@ namespace Ucp
                 return CwndGain;
             }
 
+            if (Mode == BbrMode.Startup)
+            {
+                return CwndGain;
+            }
+
             double wasteBudget = Math.Max(0.50d, _config.MaxBandwidthWastePercent);
             double maxWasteGain = 1d + wasteBudget;
             double limit = maxWasteGain * _config.ProbeBwCwndGain;
@@ -1640,7 +1678,7 @@ namespace Ucp
                 return NetworkClass.CongestedBottleneck;
             }
 
-            if (avgRttMs > 30d)
+            if (avgRttMs > 60d)
             {
                 return NetworkClass.SymmetricVPN;
             }
