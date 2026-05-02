@@ -95,10 +95,12 @@ namespace Ucp
         public bool EnableDebugLog = false;
 
         /// <summary>
-        /// Enables short-grace SACK repair for controlled lossy paths. This is
-        /// internal because it is still a policy toggle rather than public API.
+        /// Enables short-grace SACK repair for fast loss recovery.
+        /// When enabled, SACK-based fast retransmit triggers after fewer
+        /// observations, reducing tail latency on lossy and reordering paths.
+        /// Matching QUIC's approach, this is true by default.
         /// </summary>
-        internal bool EnableAggressiveSackRecovery = false;
+        internal bool EnableAggressiveSackRecovery = true;
 
         /// <summary>FEC redundancy ratio (0.0 = disabled, e.g. 0.125 = 1 repair per 8 data).</summary>
         public double FecRedundancy = 0.0d;
@@ -361,13 +363,17 @@ namespace Ucp
             config.AckSackBlockLimit = UcpConstants.DEFAULT_ACK_SACK_BLOCK_LIMIT;
             config.MaxBandwidthLossPercent = UcpConstants.DEFAULT_MAX_BANDWIDTH_LOSS_PERCENT;
             config.LossControlEnable = true;
+            config.EnableAggressiveSackRecovery = true;
             return config;
         }
 
         /// <summary>
         /// Copies all configuration fields from this instance to the target.
+        /// Used by Clone() to create an independent deep copy and by connection
+        /// setup to inherit server-level defaults into a per-connection config.
         /// </summary>
-        /// <param name="target">The configuration instance to populate.</param>
+        /// <param name="target">The destination configuration instance.  Must not be null;
+        /// an <see cref="ArgumentNullException"/> is thrown otherwise.</param>
         internal void CopyTo(UcpConfiguration target)
         {
             if (target == null)

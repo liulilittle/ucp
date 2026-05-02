@@ -1,8 +1,10 @@
-# PPP PRIVATE NETWORK™ X - 通用通信协议 (UCP) — API 参考
+# PPP PRIVATE NETWORK™ X — 通用通信协议 (UCP) — API 参考
 
 [English](api.md) | [文档索引](index_CN.md)
 
 **协议标识: `ppp+ucp`** — 本文档描述 UCP 库的公开 API 接口，包括配置、服务端与连接生命周期、网络驱动集成、事件模型和诊断报告。
+
+---
 
 ## API 概览
 
@@ -17,7 +19,16 @@ flowchart TD
     ServerConn --> Net
     Net -->|DoEvents| Loop[Timer/FQ/Pacing 循环]
     Loop --> Socket[ITransport UDP Socket]
+
+    subgraph Configuration[配置]
+        Config[UcpConfiguration.GetOptimizedConfig]
+    end
+
+    Config --> Server
+    Config --> Client
 ```
+
+---
 
 ## UcpConfiguration
 
@@ -30,7 +41,7 @@ flowchart TD
 | `Mss` | 1220 | 最大分段大小（字节）。高带宽基准使用 9000。控制分片阈值和 SACK 块容量。 |
 | `MaxRetransmissions` | 10 | 单个发送分段最大重传次数，超限后连接判定死亡。 |
 | `SendBufferSize` | 32 MB | 最大发送缓冲量；满时 `WriteAsync` 阻塞以提供背压。 |
-| `ReceiveBufferSize` | ~20 MB | 派生自 `RecvWindowPackets × Mss`，防止快速发送端导致内存耗尽。 |
+| `ReceiveBufferSize` | ~20 MB | 派生自 `RecvWindowPackets x Mss`，防止快速发送端导致内存耗尽。 |
 | `InitialCwndPackets` | 20 | 初始拥塞窗口包数。BBRv2 Startup 会迅速增长超过此值。 |
 | `InitialCwndBytes` | 派生 | 便捷设置器，用当前 MSS 将字节换算为包数。 |
 | `MaxCongestionWindowBytes` | 64 MB | BBRv2 拥塞窗口硬上限，防止内存失控增长。 |
@@ -42,14 +53,14 @@ flowchart TD
 | 参数 | 默认值 | 作用 |
 |---|---|---:|
 | `MinRtoMicros` | 200,000 (200ms) | 最小重传超时。防止低延迟路径上过早 RTO。 |
-| `MaxRtoMicros` | 15,000,000 (15s) | 最大重传超时。1.2× 退避下的上限。 |
+| `MaxRtoMicros` | 15,000,000 (15s) | 最大重传超时。1.2x 退避下的上限。 |
 | `RetransmitBackoffFactor` | 1.2 | 每次连续超时 RTO 退避乘数。比 TCP 的 2.0 更温和，更快检测死路径。 |
 | `ProbeRttIntervalMicros` | 30,000,000 (30s) | BBRv2 ProbeRTT 周期。尝试刷新 MinRTT 的间隔。 |
 | `ProbeRttDurationMicros` | 100,000 (100ms) | 最短 ProbeRTT 持续时间。 |
 | `KeepAliveIntervalMicros` | 1,000,000 (1s) | 空闲保活间隔。防止空闲连接被 NAT/防火墙超时清除。 |
 | `DisconnectTimeoutMicros` | 4,000,000 (4s) | 空闲断连超时。此期间内无数据交换则关闭连接。 |
 | `TimerIntervalMilliseconds` | 20 | 驱动 `DoEvents()` 轮次的内部定时器刻度。 |
-| `DelayedAckTimeoutMicros` | 2,000 (2ms) | 延迟 ACK 聚合超时。设为 `0` 禁用延迟 ACK，立即发送。 |
+| `DelayedAckTimeoutMicros` | 2,000 (2ms) | 延迟 ACK 聚合超时。设为 `0` 禁用延迟 ACK。 |
 
 ### Pacing 与 BBRv2
 
@@ -63,7 +74,7 @@ flowchart TD
 | `ProbeBwHighGain` | 1.25 | ProbeBW 上探增益，探测更多带宽。 |
 | `ProbeBwLowGain` | 0.85 | ProbeBW 下探增益，排空累积队列。 |
 | `ProbeBwCwndGain` | 2.0 | ProbeBW CWND 增益。 |
-| `BbrWindowRtRounds` | 10 | 投递率滤波窗口 RTT 轮数。BBRv2 用于估计 `BtlBw`。 |
+| `BbrWindowRtRounds` | 10 | 投递率滤波窗口 RTT 轮数。 |
 
 ### 带宽与丢包控制
 
@@ -71,25 +82,26 @@ flowchart TD
 |---|---|---:|
 | `InitialBandwidthBytesPerSecond` | 12.5 MB/s | 有投递率样本前的初始瓶颈带宽估计。 |
 | `MaxPacingRateBytesPerSecond` | 12.5 MB/s | pacing 速率上限。设为 `0` 完全关闭上限。 |
-| `ServerBandwidthBytesPerSecond` | 12.5 MB/s | 公平队列调度器使用的服务端出口带宽，用于分配每连接 credit。 |
-| `LossControlEnable` | `true` | BBRv2 拥塞分类确认真正拥塞后启用丢包感知 pacing/CWND 适应。 |
-| `MaxBandwidthLossPercent` | 25% | 拥塞证据成立后的丢包预算百分比，内部限制到 15%-35% 范围。 |
-| `MaxBandwidthWastePercent` | 25% | 控制器启发式使用的带宽浪费预算，用于 pacing debt 管理。 |
+| `ServerBandwidthBytesPerSecond` | 12.5 MB/s | 公平队列调度器使用的服务端出口带宽。 |
+| `LossControlEnable` | `true` | BBRv2 拥塞分类确认后启用丢包感知 pacing/CWND 适应。 |
+| `MaxBandwidthLossPercent` | 25% | 拥塞证据成立后的丢包预算百分比，内部限制 15%-35%。 |
 
 ### FEC（前向纠错）
 
 | 参数 | 默认值 | 作用 |
 |---|---|---:|
-| `FecRedundancy` | 0.0 | 基础冗余比例。`0.125` = 每 8 个数据包 1 个 RS-GF(256) 修复包。自适应模式下有效冗余随观测丢包率调整。 |
-| `FecGroupSize` | 8 | 每 FEC 组 DATA 包数量。更小组延迟更低但开销更高。最大支持组大小 64。 |
-| `FecAdaptiveEnable` | `true` | 启用自适应 FEC 冗余。启用时冗余随观测丢包率分级调整（参见架构文档）。 |
+| `FecRedundancy` | 0.0 | 基础冗余比例。`0.125` = 每 8 个数据包 1 个修复包。自适应模式下有效冗余随观测丢包率调整。 |
+| `FecGroupSize` | 8 | 每 FEC 组 DATA 包数。更小组延迟低但开销高。最大支持 64。 |
+| `FecAdaptiveEnable` | `true` | 启用自适应 FEC 冗余，随观测丢包率分级调整。 |
 
 ### 连接与会话
 
 | 参数 | 默认值 | 作用 |
 |---|---|---:|
-| `UseConnectionIdTracking` | `true` | 启用时连接由随机 32 位 ConnId 追踪，而非 IP:port 元组。支持 NAT 重绑定韧性和 IP 移动性。 |
+| `UseConnectionIdTracking` | `true` | 启用时连接由随机 32 位 ConnId 追踪。支持 NAT 重绑定韧性和 IP 移动性。 |
 | `DynamicIpBindingEnable` | `true` | 服务端绑定 `IPAddress.Any`，接受任意获取地址上的连接。 |
+
+---
 
 ## UcpServer
 
@@ -104,7 +116,7 @@ public class UcpServer : IUcpObject, IDisposable
 | `Start(int port)` | 开始在指定 UDP 端口监听。DynamicIpBinding 启用时绑定 `IPAddress.Any`。 |
 | `Start(IPEndPoint endpoint)` | 在特定 IP 端点上监听，用于静态地址环境。 |
 | `AcceptAsync()` | 等待新客户端连接，返回已完全建立的 `UcpConnection`。任务完成时连接握手已完成。 |
-| `Stop()` | 停止监听并优雅关闭所有托管连接。在途数据在 2×RTO 内排空。 |
+| `Stop()` | 停止监听并优雅关闭所有托管连接。在途数据在 2xRTO 内排空。 |
 
 ### 服务端生命周期
 
@@ -120,11 +132,13 @@ sequenceDiagram
     Svr->>Net: 注册服务端 PCB
     Cli->>Net: SYN (ConnId=X, 随机 ISN)
     Net->>Svr: 分发 SYN 到服务端串行环境
-    Svr->>Cli: SYNACK (ConnId=X)
+    Svr->>Cli: SYNACK (ConnId=X, 服务端 ISN)
     Cli->>Svr: ACK（握手完成）
     Svr->>App: AcceptAsync() 返回 UcpConnection
     App->>Svr: 在被接受连接上 Read/Write
 ```
+
+---
 
 ## UcpConnection
 
@@ -133,6 +147,34 @@ public class UcpConnection : IUcpObject, IDisposable
 ```
 
 `UcpConnection` 代表一个 UCP 会话。所有操作在专用的 `SerialQueue` 串行执行环境中执行，无需锁即可线程安全访问。
+
+```mermaid
+flowchart TD
+    Conn[UcpConnection] --> Mgmt[连接管理]
+    Conn --> Send[发送数据]
+    Conn --> Recv[接收数据]
+    Conn --> Events[事件]
+    Conn --> Diag[诊断]
+
+    Mgmt --> ConnectAsync[ConnectAsync]
+    Mgmt --> Close[Close / CloseAsync]
+    Mgmt --> Dispose[Dispose]
+
+    Send --> SendMethods[Send / SendAsync]
+    Send --> WriteMethods[Write / WriteAsync]
+
+    Recv --> ReceiveMethods[Receive / ReceiveAsync]
+    Recv --> ReadMethods[Read / ReadAsync]
+
+    Events --> OnData[OnData / OnDataReceived]
+    Events --> OnConnected[OnConnected]
+    Events --> OnDisconnected[OnDisconnected]
+
+    Diag --> GetReport[GetReport]
+    Diag --> GetRtt[GetRttMicros]
+    Diag --> GetCwnd[GetCwndBytes]
+    Diag --> BufferSize[BytesInSendBuffer]
+```
 
 ### 连接管理
 
@@ -150,24 +192,24 @@ public class UcpConnection : IUcpObject, IDisposable
 | `Send` | `Send(byte[] buffer, int offset, int count)` | 同步写入发送缓冲，不等待远端确认。 |
 | `SendAsync` | `SendAsync(byte[] buffer, int offset, int count)` | 异步写入发送缓冲。 |
 | `Write` | `Write(byte[] buffer, int offset, int count)` | 同步可靠写入发送缓冲。 |
-| `WriteAsync` | `WriteAsync(byte[] buffer, int offset, int count)` | 异步可靠写入。全部字节进入发送缓冲后返回 `true`。缓冲满时可能等待（阻塞）。 |
+| `WriteAsync` | `WriteAsync(byte[] buffer, int offset, int count)` | 异步可靠写入。缓冲满时可能等待（阻塞）。 |
 
-`Write` 和 `WriteAsync` 保证进入发送缓冲，不保证远端已消费。若应用需知远端已消费数据，请实现应用层 ACK 或使用远端 `Receive`/`Read` 信号完成。
+`Write` 和 `WriteAsync` 保证进入发送缓冲，不保证远端已消费。若需确认，请实现应用层 ACK。
 
 ### 接收数据
 
 | 方法 | 签名 | 作用 |
 |---|---|---|
-| `Receive` | `Receive(byte[] buffer, int offset, int count)` | 从有序交付队列同步读取。返回实际读取字节数（可能小于 `count`）。 |
-| `ReceiveAsync` | `ReceiveAsync(byte[] buffer, int offset, int count)` | 异步读取。至少 1 字节可用时完成。返回读取字节数。 |
+| `Receive` | `Receive(byte[] buffer, int offset, int count)` | 从有序交付队列同步读取，返回实际读取字节数。 |
+| `ReceiveAsync` | `ReceiveAsync(byte[] buffer, int offset, int count)` | 异步读取，至少 1 字节可用时完成。 |
 | `Read` | `Read(byte[] buffer, int offset, int count)` | 循环直到读取指定字节数到缓冲。 |
-| `ReadAsync` | `ReadAsync(byte[] buffer, int offset, int count)` | 异步定长读取。所有请求字节可用后完成。 |
+| `ReadAsync` | `ReadAsync(byte[] buffer, int offset, int count)` | 异步定长读取，所有请求字节可用后完成。 |
 
 ### 事件
 
 | 事件 | 签名 | 触发时机 |
 |---|---|---|
-| `OnData` / `OnDataReceived` | `Action<byte[], int, int>` | 有序 payload 字节到达应用层。在连接的 SerialQueue 串行环境上调用。 |
+| `OnData` / `OnDataReceived` | `Action<byte[], int, int>` | 有序 payload 字节到达应用层。在 SerialQueue 串行环境上调用。 |
 | `OnConnected` | `Action` | 三次握手成功完成。 |
 | `OnDisconnected` | `Action` | 连接关闭（FIN 交换完成或超时）。 |
 
@@ -175,10 +217,10 @@ public class UcpConnection : IUcpObject, IDisposable
 
 | 方法 | 返回值 | 作用 |
 |---|---|---|
-| `GetReport()` | `UcpTransferReport` | 当前传输统计快照：吞吐、重传率、RTT 统计、CWND、pacing 速率、收敛时间。 |
+| `GetReport()` | `UcpTransferReport` | 当前传输统计快照：吞吐、重传率、RTT、CWND、pacing 速率、收敛时间。 |
 | `GetRttMicros()` | `long` | 当前平滑 RTT 估计值（微秒）。 |
 | `GetCwndBytes()` | `long` | 当前拥塞窗口（字节）。 |
-| `BytesInSendBuffer` | `long`（属性） | 当前等待首次传输（非重传）的缓冲字节数。 |
+| `BytesInSendBuffer` | `long`（属性） | 当前等待首次传输的缓冲字节数。 |
 
 ### 连接状态
 
@@ -188,6 +230,8 @@ public class UcpConnection : IUcpObject, IDisposable
 | `IsDisconnected` | `bool` | 连接已关闭或超时时为 true。 |
 | `ConnectionId` | `uint` | 本会话的随机 32 位连接标识。 |
 | `RemoteEndPoint` | `IPEndPoint` | 远端对端的当前 IP 端点。NAT 重绑定时可能变化。 |
+
+---
 
 ## UcpNetwork
 
@@ -201,7 +245,7 @@ flowchart LR
     Input[输入数据报] --> Network
     Network --> Conn
 
-    subgraph Network Internals[网络内部]
+    subgraph "网络内部"
         direction TB
         Demux[ConnId 多路分解] --> Strand[SerialQueue 串行]
         Strand --> Pcb[UcpPcb]
@@ -222,8 +266,6 @@ public void DoEvents()
 - 刷新由 pacing 和公平队列逻辑排队的出站数据报。
 - 更新 BBRv2 投递率样本。
 
-直接使用 `UcpNetwork` 的应用必须通过循环定时器调用 `DoEvents()` 或将其集成到事件循环中。
-
 ### 自定义传输
 
 ```csharp
@@ -235,7 +277,9 @@ public interface ITransport
 }
 ```
 
-实现 `ITransport` 将 UCP 与非 UDP 传输集成。内置的 `UdpTransport` 封装标准 .NET `UdpClient`，处理 socket 绑定、发送和接收。
+实现 `ITransport` 将 UCP 与非 UDP 传输集成。内置 `UdpTransport` 封装标准 .NET `UdpClient`。
+
+---
 
 ## 完整示例
 
@@ -260,7 +304,7 @@ await client.ConnectAsync(new IPEndPoint(IPAddress.Loopback, 9000));
 UcpConnection serverConnection = await acceptTask;
 
 // --- 数据交换 ---
-byte[] request = Encoding.UTF8.GetBytes("Hello from PPP PRIVATE NETWORK™ X — UCP (ppp+ucp)");
+byte[] request = Encoding.UTF8.GetBytes("你好来自 PPP PRIVATE NETWORK™ X — UCP (ppp+ucp)");
 await client.WriteAsync(request, 0, request.Length);
 Console.WriteLine($"客户端发送 {request.Length} 字节");
 
@@ -273,12 +317,15 @@ var report = client.GetReport();
 Console.WriteLine($"吞吐: {report.ThroughputMbps} Mbps");
 Console.WriteLine($"RTT: {report.AverageRttMs} ms");
 Console.WriteLine($"重传率: {report.RetransmissionRatio:P1}");
+Console.WriteLine($"CWND: {report.CwndBytes} 字节");
 
 // --- 清理 ---
 await client.CloseAsync();
 await serverConnection.CloseAsync();
 server.Stop();
 ```
+
+---
 
 ## 错误处理
 

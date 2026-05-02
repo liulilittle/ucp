@@ -290,12 +290,11 @@ namespace Ucp
 
         /// <summary>Default delayed ACK timeout in microseconds.</summary>
         /// <remarks>
-        /// 500 μs.  QUIC and TCP use ~25 ms, but UCP targets sub-millisecond
-        /// latency on LAN and datacenter paths.  500 μs batches ACKs for
-        /// packets arriving in the same interrupt coalescing window without
-        /// adding perceptible RTT inflation.
+        /// 100 μs.  UCP piggybacks ACKs on data packets, eliminating standalone
+        /// ACK overhead.  Delayed ACKs only fire when no outbound data is available.
+        /// 100 μs is sufficient for sub-RTT batching without inflating RTT.
         /// </remarks>
-        public const long DEFAULT_DELAYED_ACK_TIMEOUT_MICROS = 500L;
+        public const long DEFAULT_DELAYED_ACK_TIMEOUT_MICROS = 100L;
 
         /// <summary>Default maximum tolerated bandwidth waste ratio, where 0.25 means 25%.</summary>
         /// <remarks>
@@ -335,11 +334,10 @@ namespace Ucp
 
         /// <summary>Default pacing token bucket duration in microseconds.</summary>
         /// <remarks>
-        /// 10,000 μs = 10 ms.  The pacer uses a token-bucket model where
-        /// tokens refill over a 10 ms window.  This is long enough to
-        /// smooth bursts at typical WAN rates but short enough that the
-        /// bucket doesn't allow seconds-long bursts that overwhelm
-        /// shallow router buffers.
+        /// 10,000 μs = 10 ms.  The token bucket refills over a 10 ms window.
+        /// This is long enough to smooth bursts at typical WAN rates but short
+        /// enough that the bucket doesn't allow seconds-long bursts that
+        /// overwhelm shallow router buffers.
         /// </remarks>
         public const long DEFAULT_PACING_BUCKET_DURATION_MICROS = 10000L;
 
@@ -1827,12 +1825,12 @@ namespace Ucp
 
         /// <summary>SACK observations needed before a missing hole is retransmitted without waiting for RTO.</summary>
         /// <remarks>
-        /// 3 SACK blocks.  A missing sequence range must appear in 3
-        /// separate SACK blocks before the sender retransmits.  This
-        /// filters out transient holes caused by reordering (which
-        /// typically resolve within 1–2 subsequent ACKs).
+        /// 2 SACK blocks.  Matching QUIC's default SACK threshold.
+        /// A missing sequence range must appear in 2 separate SACK blocks
+        /// before the sender retransmits.  This filters transient holes
+        /// caused by reordering while minimizing recovery latency.
         /// </remarks>
-        public const int SACK_FAST_RETRANSMIT_THRESHOLD = 3;
+        public const int SACK_FAST_RETRANSMIT_THRESHOLD = 2;
 
         /// <summary>Minimum SACK distance past a missing sequence before treating the hole as real loss.</summary>
         /// <remarks>
@@ -1845,14 +1843,13 @@ namespace Ucp
         public const int SACK_FAST_RETRANSMIT_DISTANCE_THRESHOLD = 48;
 
         /// <summary>Lower bound for SACK-based reorder grace before fast retransmit, in microseconds.
-        /// Reduced to 20ms for faster hole recovery on low-latency paths.</summary>
+        /// Reduced to 5ms for faster hole recovery on low-latency paths.</summary>
         /// <remarks>
-        /// 20 ms.  Even if the SACK distance threshold is met, the gap
-        /// must have persisted for at least 20 ms before retransmission.
-        /// Reduced from TCP's typical 200+ ms because UCP targets low-
-        /// latency recovery.
+        /// 5 ms.  The gap must have persisted for at least 5 ms before
+        /// retransmission.  With 2-block SACK threshold and 5ms grace,
+        /// UCP achieves QUIC-comparable recovery latency.
         /// </remarks>
-        public const long SACK_FAST_RETRANSMIT_MIN_REORDER_GRACE_MICROS = 20000L;
+        public const long SACK_FAST_RETRANSMIT_MIN_REORDER_GRACE_MICROS = 5000L;
 
         /// <summary>Missing observation count needed before the receiver sends a NAK.</summary>
         /// <remarks>
@@ -1863,14 +1860,13 @@ namespace Ucp
         public const int NAK_MISSING_THRESHOLD = 2;
 
         /// <summary>Minimum packet-age delay before receiver NAKs a missing sequence, in microseconds.
-        /// Reduced to 5ms for faster loss detection on low-latency paths.</summary>
+        /// Reduced to 2ms for faster loss detection on low-latency paths.</summary>
         /// <remarks>
-        /// 5 ms.  A packet must have been missing for at least 5 ms
-        /// before the receiver will NAK it.  This provides a small
-        /// window for late-arriving reordered packets to fill the gap
-        /// without triggering a false NAK.
+        /// 2 ms.  A packet must have been missing for at least 2 ms
+        /// before the receiver will NAK it.  On modern networks, 2 ms
+        /// is sufficient to distinguish reordering from true loss.
         /// </remarks>
-        public const long NAK_REORDER_GRACE_MICROS = 5000L;
+        public const long NAK_REORDER_GRACE_MICROS = 2000L;
 
         /// <summary>Missing observation count that makes a gap high-confidence despite reorder grace.</summary>
         /// <remarks>

@@ -176,8 +176,8 @@ namespace UcpTest
             // Set rate to 1000 bytes per microsecond (burst), 1000 bytes per second (sustained).
             controller.SetRate(1000, 1000000);
 
-            // Consume 1220 tokens at time 1000000: succeeds (we have 1000 initial + growth).
-            Assert.True(controller.TryConsume(1220, 1000000));
+            // Consume exactly the minimum packet capacity (1236) at time 1000000.
+            Assert.True(controller.TryConsume(1236, 1000000));
 
             // After that burst, 500 more tokens are not available.
             Assert.False(controller.TryConsume(500, 1000000));
@@ -199,8 +199,8 @@ namespace UcpTest
             PacingController controller = new PacingController(config, 1000);
             controller.SetRate(1000, 1000000);
 
-            // Drain the bucket with a large consume.
-            Assert.True(controller.TryConsume(1220, 1000000));
+            // Drain the bucket with a consume equal to the minimum packet capacity (1236).
+            Assert.True(controller.TryConsume(1236, 1000000));
 
             // At this point, the bucket is empty; even 1 token cannot be consumed.
             Assert.False(controller.TryConsume(1, 1000000));

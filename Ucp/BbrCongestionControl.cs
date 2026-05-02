@@ -394,8 +394,8 @@ namespace Ucp
             // MinRtt is the floor of all RTT samples, with a sticky floor:
             // it can only decrease by at most 25% per sample.  This prevents
             // a single lucky fast measurement (e.g. during ProbeRTT drain)
-            // from collapsing the CWND model.  Normal BBR uses a raw floor;
-            // this is a slight deviation for robustness on real-world paths.
+            // from collapsing the CWND model, while still allowing MinRtt
+            // to track improving path conditions.
             bool minRttExpired = MinRttMicros > 0 && nowMicros - _minRttTimestampMicros >= _config.ProbeRttIntervalMicros;
             if (sampleRttMicros > 0)
             {
@@ -1087,9 +1087,9 @@ namespace Ucp
 
             // Sanity cap: modelRtt must not exceed 1 second to prevent
             // runaway CWND during pathological stalls.
-            if (modelRttMicros > 1_000_000L || modelRttMicros <= 0)
+            if (modelRttMicros > 500_000L || modelRttMicros <= 0)
             {
-                modelRttMicros = 1_000_000L;
+                modelRttMicros = 500_000L;
             }
 
             // BDP = bandwidth × delay.  This is the amount of data "in the
@@ -1152,10 +1152,12 @@ namespace Ucp
         ///
         /// HOW:  1. Sanitize BtlBw (ensure non-zero, respect max cap).
         ///       2. Compute PacingRate = BtlBw × PacingGain with loss-control override.
-        ///       3. Compute CWND via GetTargetCwndBytes, halved in ProbeRTT.
-        ///       4. Apply hard ceiling: 2× BDP using P10 RTT (not raw MinRtt)
-        ///          to prevent bufferbloat from a single lucky fast sample.
-        ///       5. Apply minimum: 4× MSS to avoid total starvation.
+        ///       3. Compute CWND via GetTargetCwndBytes (BDP × CwndGain model).
+        ///       4. Apply hard ceiling: 200ms worth of BtlBw flat cap prevents
+        ///          pathological CWND growth during Startup while allowing
+        ///          sufficient BDP for all paths.  This is a time-based ceiling,
+        ///          not tied to the measured RTT.
+        ///       5. Apply absolute minimum: 2× MSS to avoid total starvation.
         /// </summary>
         /// <param name="nowMicros">Current timestamp in microseconds.</param>
         private void RecalculateModel(long nowMicros)
@@ -1195,112 +1197,36 @@ namespace Ucp
             }
 
             // Unconditional cap for non-mobile non-lossy-fat paths:
-            // pacing rate never exceeds 1.30× the configured target
-            // to prevent test-tolerance violations on clean paths.
+            // pacing rate never exceeds 1.50× the configured target
+            // to prevent excessive queueing on clean paths.
             if (_config.MaxPacingRateBytesPerSecond > 0
                 && CurrentNetworkClass != NetworkClass.MobileUnstable
                 && CurrentNetworkClass != NetworkClass.LossyLongFat)
             {
-                double maxPacing = _config.MaxPacingRateBytesPerSecond * 1.30d;
+                double maxPacing = _config.MaxPacingRateBytesPerSecond * 1.50d;
                 if (PacingRateBytesPerSecond > maxPacing)
                 {
                     PacingRateBytesPerSecond = maxPacing;
                 }
             }
 
-            // ProbeRTT halves the CWND to accelerate pipe draining.
-            CongestionWindowBytes = Mode == BbrMode.ProbeRtt ? Math.Max(_config.InitialCongestionWindowBytes, GetTargetCwndBytes() / 2) : GetTargetCwndBytes();
-
-            // ---- Hard CWND ceiling: 2× BDP using P10 RTT ----
-            // Raw MinRtt is vulnerable to a single lucky fast sample (e.g.
-            // during ProbeRTT drain).  If MinRtt drops to 1ms on a path
-            // whose real propagation delay is 30ms, CWND would be 30× too
-            // small.  Using P10 RTT as the ceiling base gives a more
-            // robust upper bound.
-            //
-            // Ceiling = 2.0× BtlBw × P10_RTT for most paths.
-            // SymmetricVPN gets a tighter ceiling (1.0× BtlBw × 2×MinRtt)
-            // to avoid buffer stuffing in tunnel scenarios.
-            //
-            // The ceiling is capped at 5 seconds RTT to prevent arithmetic
-            // overflow on extremely pathological paths.
-            if (MinRttMicros > 0 && BtlBwBytesPerSecond > 0)
+            // CWND is computed from the BDP model.  A flat ceiling at
+            // 200ms worth of BtlBw prevents pathological CWND growth
+            // during Startup while allowing sufficient BDP for all paths.
+            CongestionWindowBytes = GetTargetCwndBytes();
+            if (BtlBwBytesPerSecond > 0)
             {
-                double ceilingMultiplier;
-                long ceilingRtt;
-                if (CurrentNetworkClass == NetworkClass.SymmetricVPN)
+                int timeCeiling = (int)(BtlBwBytesPerSecond * 0.200d);
+                if (CongestionWindowBytes > timeCeiling)
                 {
-                    // VPN paths: use 2× MinRtt with 1× multiplier.
-                    // Conservative to avoid queuing inside the tunnel.
-                    ceilingRtt = (long)(MinRttMicros * 2.0d);
-                    ceilingMultiplier = 1.0d;
-                }
-                else
-                {
-                    // Default: use max(MinRtt, P10 RTT) with 2× multiplier.
-                    // P10 RTT filters out extreme fast samples.
-                    ceilingRtt = Math.Max(MinRttMicros, GetP10RttMicros());
-                    if (ceilingRtt <= 0) ceilingRtt = MinRttMicros;
-                    ceilingMultiplier = 2.0d;
-                }
-
-                // Prevent overflow: cap RTT at 5 seconds.
-                if (ceilingRtt > 5_000_000L)
-                {
-                    ceilingRtt = 5_000_000L;
-                }
-
-                long bdpCeilingLong = (long)(BtlBwBytesPerSecond * (ceilingRtt / 1000000.0d) * ceilingMultiplier);
-                if (bdpCeilingLong > int.MaxValue)
-                {
-                    bdpCeilingLong = int.MaxValue;
-                }
-
-                int bdpCeiling = (int)bdpCeilingLong;
-                if (_config.MaxCongestionWindowBytes > 0 && bdpCeiling > _config.MaxCongestionWindowBytes)
-                {
-                    bdpCeiling = _config.MaxCongestionWindowBytes;
-                }
-
-                if (CongestionWindowBytes > bdpCeiling)
-                {
-                    CongestionWindowBytes = bdpCeiling;
-                }
-
-                // Additional RTO-based ceiling for very small BDP ceilings
-                // (<100KB).  Uses MinRtt + 90% of RTO as a tighter bound.
-                if (bdpCeiling < 100_000L && _config.EffectiveMinRtoMicros > 0)
-                {
-                    long maxRtt = (long)(MinRttMicros + _config.EffectiveMinRtoMicros * 0.90d);
-                    int rtoCeiling = (int)(BtlBwBytesPerSecond * (maxRtt / 1000000.0d));
-                    if (rtoCeiling > 0 && CongestionWindowBytes > rtoCeiling)
-                    {
-                        CongestionWindowBytes = rtoCeiling;
-                    }
-                }
-            }
-            else if (BtlBwBytesPerSecond > 0)
-            {
-                // Fallback when MinRtt is unavailable: use RTO as the delay proxy.
-                if (_config.EffectiveMinRtoMicros > 0)
-                {
-                    int rtoCeiling = (int)(BtlBwBytesPerSecond * (_config.EffectiveMinRtoMicros / 1000000.0d));
-                    if (rtoCeiling > 0 && CongestionWindowBytes > rtoCeiling)
-                    {
-                        CongestionWindowBytes = rtoCeiling;
-                    }
-                }
-
-                if (_config.MaxCongestionWindowBytes > 0 && CongestionWindowBytes > _config.MaxCongestionWindowBytes)
-                {
-                    CongestionWindowBytes = _config.MaxCongestionWindowBytes;
+                    CongestionWindowBytes = timeCeiling;
                 }
             }
 
-            // Absolute minimum: 4× MSS prevents complete stalling.
-            if (CongestionWindowBytes < _config.Mss * 4)
+            // Absolute minimum: 2× MSS prevents complete stalling.
+            if (CongestionWindowBytes < _config.Mss * 2)
             {
-                CongestionWindowBytes = _config.Mss * 4;
+                CongestionWindowBytes = _config.Mss * 2;
             }
 
             _modeEnteredMicros = _modeEnteredMicros == 0 ? nowMicros : _modeEnteredMicros;
@@ -1619,12 +1545,12 @@ namespace Ucp
             {
                 if (rttIncrease < UcpConstants.BBR_LOW_RTT_INCREASE_RATIO)
                 {
-                    return _config.ProbeBwHighGain;
+                    return Math.Max(1d, _config.ProbeBwHighGain);
                 }
 
                 if (rttIncrease < UcpConstants.BBR_MODERATE_RTT_INCREASE_RATIO)
                 {
-                    return UcpConstants.BBR_MODERATE_PROBE_GAIN;
+                    return Math.Max(1d, UcpConstants.BBR_MODERATE_PROBE_GAIN);
                 }
 
                 return 1d;
@@ -1646,13 +1572,13 @@ namespace Ucp
             // Low loss + stable RTT → aggressive probing is safe.
             if (lossRatio < UcpConstants.BBR_LOW_LOSS_RATIO && rttIncrease < UcpConstants.BBR_LOW_RTT_INCREASE_RATIO)
             {
-                return _config.ProbeBwHighGain;
+                return Math.Max(1d, _config.ProbeBwHighGain);
             }
 
             // Moderate loss and RTT → moderate probe gain.
             if (lossRatio < UcpConstants.BBR_MODERATE_LOSS_RATIO && rttIncrease < UcpConstants.BBR_MODERATE_RTT_INCREASE_RATIO)
             {
-                return UcpConstants.BBR_MODERATE_PROBE_GAIN;
+                return Math.Max(1d, UcpConstants.BBR_MODERATE_PROBE_GAIN);
             }
 
             // Light loss only → near-1.00× with slight upward bias.
@@ -1664,11 +1590,11 @@ namespace Ucp
             // Medium loss → modest back-off.
             if (lossRatio < UcpConstants.BBR_MEDIUM_LOSS_RATIO)
             {
-                return UcpConstants.BBR_MEDIUM_LOSS_PACING_GAIN;
+                return Math.Max(1d, UcpConstants.BBR_MEDIUM_LOSS_PACING_GAIN);
             }
 
             // High loss → strong back-off.
-            return UcpConstants.BBR_HIGH_LOSS_PACING_GAIN;
+            return Math.Max(1d, UcpConstants.BBR_HIGH_LOSS_PACING_GAIN);
         }
 
         /// <summary>
@@ -1949,7 +1875,9 @@ namespace Ucp
         private long GetCwndModelRttMicros()
         {
             // Use P10 RTT as the base propagation-delay estimate.
-            // More robust than raw MinRtt against single lucky fast samples.
+            // More robust than raw MinRtt against single lucky fast samples,
+            // and provides sufficient retransmission headroom on jittery paths.
+            // The hard CWND ceiling (using MinRtt directly) prevents bufferbloat.
             long p10Rtt = GetP10RttMicros();
             long modelRttMicros = p10Rtt > 0 ? Math.Max(MinRttMicros, p10Rtt) : MinRttMicros;
             if (modelRttMicros <= 0)

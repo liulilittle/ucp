@@ -64,7 +64,7 @@ namespace Ucp
         {
             config = config ?? new UcpConfiguration();
             _sendQuantumBytes = config.SendQuantumBytes > 0 ? config.SendQuantumBytes : config.Mss;
-            _minimumPacketCapacityBytes = UcpConstants.DataHeaderSize + Math.Max(1, config.MaxPayloadSize);
+            _minimumPacketCapacityBytes = UcpConstants.DATA_HEADER_SIZE_WITH_ACK + Math.Max(1, config.MaxPayloadSize);
             _maxPacingRateBytesPerSecond = config.MaxPacingRateBytesPerSecond;
             _minPacingIntervalMicros = config.MinPacingIntervalMicros;
             _bucketDurationMicros = config.PacingBucketDurationMicros <= 0 ? UcpConstants.DEFAULT_PACING_BUCKET_DURATION_MICROS : config.PacingBucketDurationMicros;
