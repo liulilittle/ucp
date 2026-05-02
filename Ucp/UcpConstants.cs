@@ -122,13 +122,13 @@ namespace Ucp
         // ---- RTO related constants ----
 
         /// <summary>Minimum RTO accepted by configuration validation, in microseconds.</summary>
-        public const long MIN_RTO_MICROS = 100000L;
+        public const long MIN_RTO_MICROS = 20000L;
 
         /// <summary>Default optimized minimum RTO, in microseconds.</summary>
-        public const long DEFAULT_RTO_MICROS = 200000L;
+        public const long DEFAULT_RTO_MICROS = 50000L;
 
         /// <summary>Initial RTO used before a measured RTT is available, in microseconds.</summary>
-        public const long INITIAL_RTO_MICROS = 250000L;
+        public const long INITIAL_RTO_MICROS = 100000L;
 
         /// <summary>Maximum RTO accepted by the optimized default configuration, in microseconds.</summary>
         public const long DEFAULT_MAX_RTO_MICROS = 15000000L;
@@ -267,8 +267,11 @@ namespace Ucp
         /// <summary>Minimum congestion window gain retained after congestion loss.</summary>
         public const double BBR_MIN_LOSS_CWND_GAIN = 0.95d;
 
-        /// <summary>Congestion window gain recovery step per ACK.</summary>
-        public const double BBR_LOSS_CWND_RECOVERY_STEP = 0.04d;
+        /// <summary>Congestion window gain recovery step per ACK (standard).</summary>
+        public const double BBR_LOSS_CWND_RECOVERY_STEP = 0.08d;
+
+        /// <summary>Congestion window gain recovery step per ACK (accelerated for mobile/outage).</summary>
+        public const double BBR_LOSS_CWND_RECOVERY_STEP_FAST = 0.15d;
 
         /// <summary>Loss budget headroom below which probing may become more aggressive again.</summary>
         public const double BBR_LOSS_BUDGET_RECOVERY_RATIO = 0.80d;
@@ -334,7 +337,11 @@ namespace Ucp
         public const double BBR_INFLIGHT_LOW_GAIN = 2.00d;
 
         /// <summary>Maximum ratio used for the upper inflight guardrail relative to BDP.</summary>
-        public const double BBR_INFLIGHT_HIGH_GAIN = 4.00d;
+        public const double BBR_INFLIGHT_HIGH_GAIN = 5.00d;
+
+        /// <summary>Upper inflight guardrail for mobile/jittery non-congested paths
+        /// where extra headroom compensates for retransmission and jitter overhead.</summary>
+        public const double BBR_INFLIGHT_MOBILE_HIGH_GAIN = 6.00d;
 
         /// <summary>RTT growth required before loss-driven delivery drops are classified as congestion.</summary>
         public const double BBR_CONGESTION_RTT_INCREASE_RATIO = 0.50d;
@@ -342,14 +349,18 @@ namespace Ucp
         /// <summary>Recent loss ratio required before loss-driven delivery drops are classified as congestion.</summary>
         public const double BBR_CONGESTION_LOSS_RATIO = 0.10d;
 
-        /// <summary>Maximum RTT cushion multiplier used by CWND on non-congested lossy paths (8.0x for weak-link throughput).</summary>
-        public const double BBR_RANDOM_LOSS_CWND_RTT_CUSHION = 4.0d;
+        /// <summary>Maximum RTT cushion multiplier used by CWND on non-congested lossy paths.
+        /// Higher cushion compensates for retransmission overhead and jitter without
+        /// inflating the bottleneck queue.</summary>
+        public const double BBR_RANDOM_LOSS_CWND_RTT_CUSHION = 6.0d;
 
         /// <summary>Delivery-rate sample history length used by the lightweight classifier.</summary>
-        public const int BBR_DELIVERY_RATE_HISTORY_COUNT = 5;
+        public const int BBR_DELIVERY_RATE_HISTORY_COUNT = 16;
 
-        /// <summary>Number of recent RTT samples used to classify jitter.</summary>
-        public const int BBR_RTT_HISTORY_COUNT = 5;
+        /// <summary>Number of recent RTT samples used to classify jitter
+        /// and compute robust percentiles (P10, P25, P30, P50).
+        /// 32 samples balances statistical stability against convergence speed.</summary>
+        public const int BBR_RTT_HISTORY_COUNT = 32;
 
         /// <summary>Recent loss accounting bucket duration in microseconds.</summary>
         public const long BBR_LOSS_BUCKET_MICROS = 100000L;
