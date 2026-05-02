@@ -37,8 +37,8 @@ namespace Ucp
         /// <summary>Fixed ACK packet size in bytes before variable SACK blocks.</summary>
         public const int ACK_FIXED_SIZE = COMMON_HEADER_SIZE + sizeof(uint) + sizeof(ushort) + sizeof(uint) + ACK_TIMESTAMP_FIELD_SIZE;
 
-        /// <summary>Fixed NAK packet size in bytes before variable missing sequence entries.</summary>
-        public const int NAK_FIXED_SIZE = COMMON_HEADER_SIZE + sizeof(ushort);
+        /// <summary>Fixed NAK packet size in bytes before variable missing sequence entries (includes AckNumber).</summary>
+        public const int NAK_FIXED_SIZE = COMMON_HEADER_SIZE + ACK_NUMBER_SIZE + sizeof(ushort);
 
         /// <summary>Maximum data payload size in one packet, in bytes.</summary>
         public const int MAX_PAYLOAD_SIZE = MSS - DATA_HEADER_SIZE;
@@ -48,6 +48,9 @@ namespace Ucp
 
         /// <summary>Encoded sequence number size in bytes (uint32).</summary>
         public const int SEQUENCE_NUMBER_SIZE = sizeof(uint);
+
+        /// <summary>Encoded ACK number field size in bytes (uint32).</summary>
+        public const int ACK_NUMBER_SIZE = sizeof(uint);
 
         /// <summary>Encoded connection identifier size in bytes (uint32).</summary>
         public const int CONNECTION_ID_SIZE = sizeof(uint);
@@ -740,8 +743,8 @@ namespace Ucp
         /// <summary>Maximum missing sequences included in one NAK packet.</summary>
         public const int MAX_NAK_SEQUENCES_PER_PACKET = 256;
 
-        /// <summary>Maximum SACK blocks emitted by default.</summary>
-        public const int DEFAULT_ACK_SACK_BLOCK_LIMIT = 149;
+        /// <summary>Maximum SACK blocks emitted by default (QUIC uses 2).</summary>
+        public const int DEFAULT_ACK_SACK_BLOCK_LIMIT = 2;
 
         /// <summary>Receive-buffer occupancy that forces an immediate ACK, measured in packets.</summary>
         public const int IMMEDIATE_ACK_REORDERED_PACKET_THRESHOLD = 4;
@@ -835,6 +838,9 @@ namespace Ucp
 
         /// <summary>Encoded FinAck packet flag value.</summary>
         public const byte UCP_FLAG_FIN_ACK_VALUE = 0x04;
+
+        /// <summary>Encoded HasAckNumber packet flag value.</summary>
+        public const byte UCP_FLAG_HAS_ACK_VALUE = 0x08;
 
         // ---- Computed constants ----
 

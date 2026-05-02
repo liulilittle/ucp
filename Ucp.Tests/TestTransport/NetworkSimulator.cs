@@ -904,11 +904,12 @@ namespace UcpTest.TestTransport
         /// <summary>
         /// Attempts to extract the logical identity of a DATA packet for deduplication.
         /// Returns the connection ID and sequence number as a composite key, and the payload size.
+        /// Reads AckNumber at offset 12, SequenceNumber at offset 16 (24-byte header).
         /// </summary>
         /// <param name="buffer">The packet buffer.</param>
         /// <param name="count">Number of valid bytes in the buffer.</param>
         /// <param name="key">Output: "connectionId:sequenceNumber" string.</param>
-        /// <param name="payloadBytes">Output: payload size in bytes (total - 20 header bytes).</param>
+        /// <param name="payloadBytes">Output: payload size in bytes (total - 24 header bytes).</param>
         /// <returns>True if the buffer is a well-formed DATA packet with extractable identity.</returns>
         private static bool TryGetDataPacketIdentity(byte[] buffer, int count, out string key, out int payloadBytes)
         {

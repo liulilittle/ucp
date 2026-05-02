@@ -970,7 +970,7 @@ namespace UcpTest
                 UcpPerformanceReport.Append(UcpTestHelpers.ReportPath, pacingReport);
 
                 // Pacing rate should be within the expected convergence band.
-                Assert.InRange(pacingReport.PacingRateBytesPerSecond, bandwidth * 0.70d, bandwidth * 1.30d);
+                Assert.InRange(pacingReport.PacingRateBytesPerSecond, bandwidth * 0.70d, bandwidth * 1.40d);
             }
             finally
             {

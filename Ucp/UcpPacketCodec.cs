@@ -89,13 +89,23 @@ namespace Ucp
                 case UcpPacketType.SynAck:
                 case UcpPacketType.Fin:
                 case UcpPacketType.Rst:
-                    // Control packets are fixed-size after the common header.
+                    // Control packets: decode AckNumber if HasAckNumber flag is set,
+                    // then optional SequenceNumber.
                     UcpControlPacket control = new UcpControlPacket();
                     control.Header = header;
-                    if (count >= UcpConstants.CommonHeaderSize + UcpConstants.SEQUENCE_NUMBER_SIZE)
+                    
+                    int controlIndex = offset + UcpConstants.CommonHeaderSize;
+                    bool hasAck = (header.Flags & UcpPacketFlags.HasAckNumber) == UcpPacketFlags.HasAckNumber;
+                    if (hasAck && count >= controlIndex + UcpConstants.ACK_NUMBER_SIZE)
+                    {
+                        control.AckNumber = ReadUInt32(buffer, controlIndex);
+                        controlIndex += UcpConstants.ACK_NUMBER_SIZE;
+                    }
+
+                    if (count >= controlIndex + UcpConstants.SEQUENCE_NUMBER_SIZE)
                     {
                         control.HasSequenceNumber = true;
-                        control.SequenceNumber = ReadUInt32(buffer, offset + UcpConstants.CommonHeaderSize);
+                        control.SequenceNumber = ReadUInt32(buffer, controlIndex);
                     }
 
                     packet = control;
@@ -107,16 +117,37 @@ namespace Ucp
 
         /// <summary>
         /// Encodes a control packet (Syn, SynAck, Fin, Rst).
-        /// Optionally includes a sequence number for handshake packets.
+        /// Includes AckNumber when HasAckNumber flag is set, and optional sequence number
+        /// for handshake packets.
         /// </summary>
         private static byte[] EncodeControl(UcpControlPacket packet)
         {
-            int size = packet.HasSequenceNumber ? UcpConstants.CommonHeaderSize + UcpConstants.SEQUENCE_NUMBER_SIZE : UcpConstants.CommonHeaderSize;
+            bool hasAck = (packet.Header.Flags & UcpPacketFlags.HasAckNumber) == UcpPacketFlags.HasAckNumber;
+            int size = UcpConstants.CommonHeaderSize;
+            if (hasAck) 
+            {
+                size += UcpConstants.ACK_NUMBER_SIZE;
+            }
+
+            if (packet.HasSequenceNumber) 
+            {
+                size += UcpConstants.SEQUENCE_NUMBER_SIZE;
+            }
+
             byte[] bytes = new byte[size];
-            WriteCommonHeader(packet.Header, bytes, 0);
+            int index = 0;
+            WriteCommonHeader(packet.Header, bytes, index);
+
+            index += UcpConstants.CommonHeaderSize;
+            if (hasAck)
+            {
+                WriteUInt32(packet.AckNumber, bytes, index);
+                index += UcpConstants.ACK_NUMBER_SIZE;
+            }
+
             if (packet.HasSequenceNumber)
             {
-                WriteUInt32(packet.SequenceNumber, bytes, UcpConstants.CommonHeaderSize);
+                WriteUInt32(packet.SequenceNumber, bytes, index);
             }
 
             return bytes;
@@ -183,7 +214,7 @@ namespace Ucp
         }
 
         /// <summary>
-        /// Encodes a NAK packet: common header, count of missing sequences, and the sequence numbers.
+        /// Encodes a NAK packet: common header, ack number, count of missing sequences, and the sequence numbers.
         /// </summary>
         private static byte[] EncodeNak(UcpNakPacket packet)
         {
@@ -192,6 +223,10 @@ namespace Ucp
             int index = 0;
             WriteCommonHeader(packet.Header, bytes, index);
             index += UcpConstants.CommonHeaderSize;
+
+            WriteUInt32(packet.AckNumber, bytes, index);
+            index += UcpConstants.ACK_NUMBER_SIZE;
+
             WriteUInt16((ushort)count, bytes, index);
             index += sizeof(ushort);
 
@@ -279,7 +314,7 @@ namespace Ucp
         }
 
         /// <summary>
-        /// Decodes a buffer into a UcpNakPacket with its missing sequence list.
+        /// Decodes a buffer into a UcpNakPacket with its ack number and missing sequence list.
         /// </summary>
         private static bool TryDecodeNak(byte[] buffer, int offset, int count, UcpCommonHeader header, out UcpPacket packet)
         {
@@ -290,16 +325,20 @@ namespace Ucp
             }
 
             int index = offset + UcpConstants.CommonHeaderSize;
+            UcpNakPacket nak = new UcpNakPacket();
+            nak.Header = header;
+            nak.AckNumber = ReadUInt32(buffer, index);
+            index += UcpConstants.ACK_NUMBER_SIZE;
+
             ushort missingCount = ReadUInt16(buffer, index);
             index += sizeof(ushort);
+            
             int expectedSize = UcpConstants.NakFixedSize + (missingCount * UcpConstants.SEQUENCE_NUMBER_SIZE);
             if (count < expectedSize)
             {
                 return false;
             }
 
-            UcpNakPacket nak = new UcpNakPacket();
-            nak.Header = header;
             for (int i = 0; i < missingCount; i++)
             {
                 nak.MissingSequences.Add(ReadUInt32(buffer, index));

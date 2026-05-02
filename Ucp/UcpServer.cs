@@ -51,8 +51,8 @@ namespace Ucp
         /// <summary>Reference to the network engine if multiplexed.</summary>
         private UcpNetwork _network;
 
-        /// <summary>Active connections keyed by "IP:port#connectionId".</summary>
-        private readonly Dictionary<string, ConnectionEntry> _connections = new Dictionary<string, ConnectionEntry>();
+        /// <summary>Active connections keyed by ConnectionId only (IP-agnostic).</summary>
+        private readonly Dictionary<uint, ConnectionEntry> _connections = new Dictionary<uint, ConnectionEntry>();
 
         /// <summary>Queue of connections waiting to be accepted by the application.</summary>
         private readonly Queue<UcpConnection> _acceptQueue = new Queue<UcpConnection>();
@@ -265,7 +265,7 @@ namespace Ucp
                 }
 
                 // Snapshot and clear connections for safe disposal outside lock.
-                foreach (KeyValuePair<string, ConnectionEntry> pair in _connections)
+                foreach (KeyValuePair<uint, ConnectionEntry> pair in _connections)
                 {
                     entries.Add(pair.Value);
                 }
@@ -326,21 +326,24 @@ namespace Ucp
 
         /// <summary>
         /// Looks up or creates a connection entry for the given remote endpoint
-        /// and packet. Only SYN packets create new entries; other packets on
-        /// unknown connections return null.
+        /// and packet. Keyed by ConnectionId only (IP-agnostic). Only SYN packets
+        /// create new entries; other packets on unknown connections return null.
+        /// Updates the remote endpoint on existing connections to support IP/port changes.
         /// </summary>
         /// <param name="remoteEndPoint">The source endpoint of the packet.</param>
         /// <param name="packet">The decoded UCP packet.</param>
         /// <returns>The matching or newly created connection entry, or null.</returns>
         private ConnectionEntry GetOrCreateConnection(IPEndPoint remoteEndPoint, UcpPacket packet)
         {
-            string key = CreateKey(remoteEndPoint, packet.Header.ConnectionId);
+            uint key = CreateKey(packet.Header.ConnectionId);
             ConnectionEntry entry;
             lock (_sync)
             {
                 if (_connections.TryGetValue(key, out entry))
                 {
-                    return entry; // Existing connection found.
+                    // Update the remote endpoint to support IP/port changes.
+                    entry.Pcb.SetRemoteEndPoint(remoteEndPoint);
+                    return entry;
                 }
 
                 if (packet.Header.Type != UcpPacketType.Syn)
@@ -388,12 +391,12 @@ namespace Ucp
         /// <param name="pcb">The PCB that closed.</param>
         private void OnPcbClosed(UcpPcb pcb)
         {
-            if (pcb == null || pcb.RemoteEndPoint == null)
+            if (pcb == null)
             {
                 return;
             }
 
-            string key = CreateKey(pcb.RemoteEndPoint, pcb.ConnectionId);
+            uint key = CreateKey(pcb.ConnectionId);
             lock (_sync)
             {
                 _connections.Remove(key);
@@ -425,7 +428,7 @@ namespace Ucp
             List<UcpConnection> active = new List<UcpConnection>();
             lock (_sync)
             {
-                foreach (KeyValuePair<string, ConnectionEntry> pair in _connections)
+                foreach (KeyValuePair<uint, ConnectionEntry> pair in _connections)
                 {
                     if ((pair.Value.Connection.State == UcpConnectionState.Established || pair.Value.Connection.State == UcpConnectionState.ClosingFinSent || pair.Value.Connection.State == UcpConnectionState.ClosingFinReceived)
                         && pair.Value.Connection.HasPendingSendData)
@@ -534,11 +537,11 @@ namespace Ucp
         }
 
         /// <summary>
-        /// Creates a connection lookup key from the remote endpoint and connection ID.
+        /// Returns the connection ID as the lookup key (IP-agnostic).
         /// </summary>
-        private static string CreateKey(IPEndPoint remoteEndPoint, uint connectionId)
+        private static uint CreateKey(uint connectionId)
         {
-            return remoteEndPoint + "#" + connectionId;
+            return connectionId;
         }
 
         /// <summary>

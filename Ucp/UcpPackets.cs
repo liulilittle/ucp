@@ -46,6 +46,7 @@ namespace Ucp
     /// <summary>
     /// Represents a control packet: Syn, SynAck, Fin, or Rst.
     /// May optionally carry a sequence number for handshake packets.
+    /// Carries cumulative acknowledgment when HasAckNumber flag is set.
     /// </summary>
     internal sealed class UcpControlPacket : UcpPacket
     {
@@ -54,6 +55,9 @@ namespace Ucp
 
         /// <summary>Optional sequence number carried in Syn/SynAck packets.</summary>
         public uint SequenceNumber;
+
+        /// <summary>Cumulative acknowledgment number carried on non-initial-SYN packets.</summary>
+        public uint AckNumber;
     }
 
     /// <summary>
@@ -97,9 +101,13 @@ namespace Ucp
     /// <summary>
     /// Represents a negative acknowledgment packet listing missing sequence
     /// numbers that the receiver has detected as lost.
+    /// Also carries the cumulative acknowledgment number so a separate ACK is not needed.
     /// </summary>
     internal sealed class UcpNakPacket : UcpPacket
     {
+        /// <summary>Cumulative acknowledgment number.</summary>
+        public uint AckNumber;
+
         /// <summary>List of sequence numbers reported as missing by the receiver.</summary>
         public List<uint> MissingSequences = new List<uint>();
     }

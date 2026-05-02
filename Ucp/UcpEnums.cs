@@ -48,7 +48,10 @@ namespace Ucp
         Retransmit = UcpConstants.UCP_FLAG_RETRANSMIT_VALUE,
 
         /// <summary>Acknowledgment of a FIN packet.</summary>
-        FinAck = UcpConstants.UCP_FLAG_FIN_ACK_VALUE
+        FinAck = UcpConstants.UCP_FLAG_FIN_ACK_VALUE,
+
+        /// <summary>Packet carries a cumulative acknowledgment number.</summary>
+        HasAckNumber = UcpConstants.UCP_FLAG_HAS_ACK_VALUE
     }
 
     /// <summary>

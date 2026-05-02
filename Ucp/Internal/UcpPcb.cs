@@ -120,6 +120,9 @@ namespace Ucp.Internal
         /// <summary>Cryptographically secure RNG for connection ID generation.</summary>
         private static readonly RandomNumberGenerator ConnectionIdGenerator = RandomNumberGenerator.Create();
 
+        /// <summary>Cryptographically secure RNG for initial sequence number generation.</summary>
+        private static readonly RandomNumberGenerator SequenceRng = RandomNumberGenerator.Create();
+
         // ---- Core dependencies ----
 
         /// <summary>Lock protecting all protocol state mutation.</summary>
@@ -441,6 +444,7 @@ namespace Ucp.Internal
             }
 
             _state = UcpConnectionState.Init;
+            _nextSendSequence = NextSequence();
             _lastActivityMicros = NowMicros();
             _lastAckSentMicros = _lastActivityMicros;
             _remoteWindowBytes = _config.ReceiveWindowBytes;
@@ -585,6 +589,7 @@ namespace Ucp.Internal
         /// <summary>
         /// Validates that the given remote endpoint matches the current one.
         /// If the current endpoint is null, accepts the new one (first packet).
+        /// For IP-agnostic connections, accepts and updates to new endpoints.
         /// </summary>
         /// <returns>True if the endpoint is valid for this connection.</returns>
         public bool ValidateRemoteEndPoint(IPEndPoint remoteEndPoint)
@@ -602,7 +607,14 @@ namespace Ucp.Internal
                     return true;
                 }
 
-                return _remoteEndPoint.Equals(remoteEndPoint);
+                if (_remoteEndPoint.Equals(remoteEndPoint))
+                {
+                    return true;
+                }
+
+                // Accept new endpoint (IP-agnostic: client changed port/IP).
+                _remoteEndPoint = remoteEndPoint;
+                return true;
             }
         }
 
@@ -1033,12 +1045,113 @@ namespace Ucp.Internal
         // ---- Packet handler: SYN ----
 
         /// <summary>
+        /// Processes a cumulative ACK piggybacked on a non-ACK packet (DATA, NAK, SYNACK, FIN, RST).
+        /// Validates plausibility, removes ACKed segments, and updates flight bytes.
+        /// Returns the list of removed keys for the caller to handle cleanup.
+        /// Does NOT trigger a flush - callers should do that themselves.
+        /// </summary>
+        /// <returns>Number of bytes delivered (ACKed) by this piggybacked ACK.</returns>
+        private int ProcessPiggybackedAck(uint ackNumber, long echoTimestamp, long nowMicros)
+        {
+            List<uint> removeKeys = new List<uint>();
+            int deliveredBytes = 0;
+            lock (_sync)
+            {
+                if (ackNumber == 0)
+                {
+                    return 0;
+                }
+
+                if (_hasLargestCumulativeAckNumber && UcpSequenceComparer.IsBefore(ackNumber, _largestCumulativeAckNumber))
+                {
+                    return 0;
+                }
+
+                if (!_hasLargestCumulativeAckNumber || UcpSequenceComparer.IsAfter(ackNumber, _largestCumulativeAckNumber))
+                {
+                    _largestCumulativeAckNumber = ackNumber;
+                    _hasLargestCumulativeAckNumber = true;
+                }
+
+                _lastAckReceivedMicros = nowMicros;
+                _tailLossProbePending = false;
+
+                foreach (KeyValuePair<uint, OutboundSegment> pair in _sendBuffer)
+                {
+                    OutboundSegment segment = pair.Value;
+                    if (segment.Acked) continue;
+
+                    if (UcpSequenceComparer.IsBeforeOrEqual(segment.SequenceNumber, ackNumber))
+                    {
+                        segment.Acked = true;
+                        if (segment.InFlight)
+                        {
+                            _flightBytes -= segment.Payload.Length;
+                            if (_flightBytes < 0) _flightBytes = 0;
+                        }
+
+                        deliveredBytes += segment.Payload.Length;
+                        if (segment.SendCount == 1 && segment.LastSendMicros > 0)
+                        {
+                            long segmentRtt = nowMicros - segment.LastSendMicros;
+                            if (segmentRtt > 0)
+                            {
+                                _lastRttMicros = segmentRtt;
+                                AddRttSampleUnsafe(segmentRtt);
+                                _rtoEstimator.Update(segmentRtt);
+                            }
+                        }
+
+                        removeKeys.Add(pair.Key);
+                    }
+                    else if (UcpSequenceComparer.IsAfter(segment.SequenceNumber, ackNumber))
+                    {
+                        break;
+                    }
+                }
+
+                for (int i = 0; i < removeKeys.Count; i++)
+                {
+                    _sackFastRetransmitNotified.Remove(removeKeys[i]);
+                    _sendBuffer.Remove(removeKeys[i]);
+                }
+
+                if (removeKeys.Count > 0)
+                {
+                    try { 
+                        _sendSpaceSignal.Release(removeKeys.Count); 
+                    } 
+                    catch (SemaphoreFullException)
+                    {
+                        
+                    }
+                }
+
+                if (_sendBuffer.Count == 0)
+                {
+                    _fairQueueCreditBytes = 0;
+                }
+
+                if (deliveredBytes > 0)
+                {
+                    _bbr.OnAck(nowMicros, deliveredBytes, _lastRttMicros, _flightBytes);
+                    _pacing.SetRate(_bbr.PacingRateBytesPerSecond, nowMicros);
+                }
+            }
+
+            // Note: Callers handle flushing when needed.
+            return deliveredBytes;
+        }
+
+        /// <summary>
         /// Handles an incoming SYN packet. Accepts the connection ID, sets the
         /// initial expected sequence, and replies with SYN-ACK.
+        /// If the SYN carries a piggybacked ACK (re-SYN), processes it.
         /// </summary>
         private void HandleSyn(UcpControlPacket packet)
         {
             bool shouldReply = false;
+            bool hasAck = (packet.Header.Flags & UcpPacketFlags.HasAckNumber) == UcpPacketFlags.HasAckNumber;
             lock (_sync)
             {
                 _connectionId = packet.Header.ConnectionId;
@@ -1064,6 +1177,11 @@ namespace Ucp.Internal
                 }
             }
 
+            if (hasAck && packet.AckNumber > 0)
+            {
+                ProcessPiggybackedAck(packet.AckNumber, packet.Header.Timestamp, NowMicros());
+            }
+
             if (shouldReply)
             {
                 SendControl(UcpPacketType.SynAck, UcpPacketFlags.None);
@@ -1073,13 +1191,13 @@ namespace Ucp.Internal
         // ---- Packet handler: SYN-ACK ----
 
         /// <summary>
-        /// Handles an incoming SYN-ACK: sets the expected sequence, acknowledges
-        /// it, and transitions to Established if in the correct state.
+        /// Handles an incoming SYN-ACK: sets the expected sequence, processes the
+        /// piggybacked ACK, acknowledges it, and transitions to Established.
         /// </summary>
         private void HandleSynAck(UcpControlPacket packet)
         {
-            bool shouldAck = false;
             bool shouldEstablish = false;
+            bool hasAck = (packet.Header.Flags & UcpPacketFlags.HasAckNumber) == UcpPacketFlags.HasAckNumber;
             lock (_sync)
             {
                 if (packet.HasSequenceNumber)
@@ -1089,18 +1207,20 @@ namespace Ucp.Internal
 
                 if (_synSent && _state != UcpConnectionState.Closed)
                 {
-                    shouldAck = true;
                     shouldEstablish = _state == UcpConnectionState.HandshakeSynSent;
                 }
             }
 
-            if (shouldAck)
+            if (hasAck && packet.AckNumber > 0)
             {
-                SendAckPacket(UcpPacketFlags.None, 0);
-                if (shouldEstablish)
-                {
-                    TransitionToEstablished();
-                }
+                ProcessPiggybackedAck(packet.AckNumber, packet.Header.Timestamp, NowMicros());
+            }
+
+            SendAckPacket(UcpPacketFlags.None, 0);
+
+            if (shouldEstablish)
+            {
+                TransitionToEstablished();
             }
         }
 
@@ -1310,15 +1430,22 @@ namespace Ucp.Internal
         // ---- Packet handler: NAK ----
 
         /// <summary>
-        /// Handles an incoming NAK packet: marks the reported sequences for
-        /// retransmission if the segment hasn't already been retransmitted
-        /// too recently.
+        /// Handles an incoming NAK packet: processes the piggybacked cumulative ACK,
+        /// marks the reported sequences for retransmission if the segment hasn't
+        /// already been retransmitted too recently.
         /// </summary>
         /// <param name="nakPacket">The decoded NAK packet.</param>
         private async Task HandleNakAsync(UcpNakPacket nakPacket)
         {
             bool notifiedLoss = false;
             long nowMicros = NowMicros();
+
+            // Process piggybacked cumulative ACK from NAK.
+            if (nakPacket.AckNumber > 0)
+            {
+                ProcessPiggybackedAck(nakPacket.AckNumber, nakPacket.Header.Timestamp, nowMicros);
+            }
+
             lock (_sync)
             {
                 for (int i = 0; i < nakPacket.MissingSequences.Count; i++)
@@ -1934,9 +2061,10 @@ namespace Ucp.Internal
         // ---- Packet handler: DATA ----
 
         /// <summary>
-        /// Handles an incoming DATA packet: stores it in the receive buffer if
-        /// within the window, drains consecutive in-order segments to the receive
-        /// queue, generates NAK for detected gaps, and attempts FEC recovery.
+        /// Handles an incoming DATA packet: processes any piggybacked ACK, stores
+        /// it in the receive buffer if within the window, drains consecutive
+        /// in-order segments to the receive queue, generates NAK for detected gaps,
+        /// and attempts FEC recovery.
         /// </summary>
         /// <param name="dataPacket">The decoded data packet.</param>
         private void HandleData(UcpDataPacket dataPacket)
@@ -2336,12 +2464,14 @@ namespace Ucp.Internal
         // ---- Packet handler: FIN ----
 
         /// <summary>
-        /// Handles an incoming FIN: acknowledges it, sends our own FIN if not
-        /// yet sent, and checks if both FINs are acknowledged for final close.
+        /// Handles an incoming FIN: processes piggybacked ACK, acknowledges it,
+        /// sends our own FIN if not yet sent, and checks if both FINs are
+        /// acknowledged for final close.
         /// </summary>
         private void HandleFin(UcpControlPacket packet)
         {
             bool needSendOwnFin = false;
+            bool hasAck = (packet.Header.Flags & UcpPacketFlags.HasAckNumber) == UcpPacketFlags.HasAckNumber;
             lock (_sync)
             {
                 _peerFinReceived = true;
@@ -2351,6 +2481,11 @@ namespace Ucp.Internal
                     _finSent = true;
                     needSendOwnFin = true;
                 }
+            }
+
+            if (hasAck && packet.AckNumber > 0)
+            {
+                ProcessPiggybackedAck(packet.AckNumber, packet.Header.Timestamp, NowMicros());
             }
 
             SendAckPacket(UcpPacketFlags.FinAck, 0);
@@ -2369,6 +2504,7 @@ namespace Ucp.Internal
 
         /// <summary>
         /// Sends a NAK packet with the given list of missing sequences.
+        /// Includes cumulative ACK number so a separate ACK is not needed.
         /// Respects the per-RTT NAK emission rate limit.
         /// </summary>
         /// <param name="missing">List of missing sequence numbers to report.</param>
@@ -2379,6 +2515,7 @@ namespace Ucp.Internal
                 return;
             }
 
+            uint cumAck;
             lock (_sync)
             {
                 long nowMicros = NowMicros();
@@ -2391,20 +2528,24 @@ namespace Ucp.Internal
                 if (_lastNakWindowMicros == 0 || nowMicros - _lastNakWindowMicros >= rttWindowMicros)
                 {
                     _lastNakWindowMicros = nowMicros;
-                    _naksSentThisRttWindow = 0; // Reset NAK rate limit window.
+                    _naksSentThisRttWindow = 0;
                 }
 
                 if (_naksSentThisRttWindow >= UcpConstants.MAX_NAKS_PER_RTT)
                 {
-                    return; // Rate limit exceeded; drop NAK.
+                    return;
                 }
 
                 _naksSentThisRttWindow++;
+                cumAck = _nextExpectedSequence > 0 ? unchecked(_nextExpectedSequence - 1U) : 0;
+                _lastAckSentMicros = nowMicros;
             }
 
             UcpNakPacket packet = new UcpNakPacket();
             packet.Header = CreateHeader(UcpPacketType.Nak, UcpPacketFlags.None, NowMicros());
+            packet.AckNumber = cumAck;
             packet.MissingSequences.AddRange(missing);
+            
             byte[] encoded = UcpPacketCodec.Encode(packet);
             _sentNakPackets++;
             _transport.Send(encoded, _remoteEndPoint);
@@ -2413,19 +2554,39 @@ namespace Ucp.Internal
         /// <summary>
         /// Sends a control packet (Syn, SynAck, Fin, Rst). Syn and SynAck
         /// include the current next-send-sequence for handshake validation.
+        /// All control packets except the initial SYN carry the cumulative ACK number.
         /// </summary>
         /// <param name="type">The control packet type.</param>
         /// <param name="flags">Packet flags.</param>
         private void SendControl(UcpPacketType type, UcpPacketFlags flags)
         {
             UcpControlPacket packet = new UcpControlPacket();
-            packet.Header = CreateHeader(type, flags, NowMicros());
-            if (type == UcpPacketType.Syn || type == UcpPacketType.SynAck)
+            uint cumAck = 0;
+            bool hasAck = false;
+            lock (_sync)
             {
-                packet.HasSequenceNumber = true;
-                packet.SequenceNumber = _nextSendSequence;
+                if (type == UcpPacketType.Syn || type == UcpPacketType.SynAck)
+                {
+                    packet.HasSequenceNumber = true;
+                    packet.SequenceNumber = _nextSendSequence;
+                }
+                
+                // All control packets except the initial outgoing SYN carry cumulative ACK.
+                if (type != UcpPacketType.Syn && _nextExpectedSequence > 0)
+                {
+                    hasAck = true;
+                    cumAck = unchecked(_nextExpectedSequence - 1U);
+                }
             }
 
+            UcpPacketFlags packetFlags = flags;
+            if (hasAck)
+            {
+                packetFlags |= UcpPacketFlags.HasAckNumber;
+                packet.AckNumber = cumAck;
+            }
+
+            packet.Header = CreateHeader(type, packetFlags, NowMicros());
             byte[] encoded = UcpPacketCodec.Encode(packet);
             if (type == UcpPacketType.Rst)
             {
@@ -2626,7 +2787,10 @@ namespace Ucp.Internal
                     {
                         OutboundSegment segment = segmentsToSend[i];
                         UcpDataPacket packet = new UcpDataPacket();
-                        packet.Header = CreateHeader(UcpPacketType.Data, segment.SendCount > 1 ? UcpPacketFlags.NeedAck | UcpPacketFlags.Retransmit : UcpPacketFlags.NeedAck, nowMicros);
+
+                        packet.Header = CreateHeader(UcpPacketType.Data,
+                            segment.SendCount > 1 ? UcpPacketFlags.NeedAck | UcpPacketFlags.Retransmit : UcpPacketFlags.NeedAck,
+                            nowMicros);
                         packet.SequenceNumber = segment.SequenceNumber;
                         packet.FragmentTotal = segment.FragmentTotal;
                         packet.FragmentIndex = segment.FragmentIndex;
@@ -3059,7 +3223,6 @@ namespace Ucp.Internal
             if (missingForNak.Count > 0)
             {
                 SendNak(missingForNak);
-                SendAckPacket(UcpPacketFlags.None, 0);
             }
 
             if (sendKeepAlive)
@@ -3273,6 +3436,16 @@ namespace Ucp.Internal
             while (connectionId == 0); // Zero is reserved; retry until non-zero.
 
             return connectionId;
+        }
+
+        /// <summary>
+        /// Generates a cryptographically random initial sequence number (like TCP ISN).
+        /// </summary>
+        private static uint NextSequence()
+        {
+            byte[] bytes = new byte[UcpConstants.SEQUENCE_NUMBER_SIZE];
+            SequenceRng.GetBytes(bytes);
+            return BitConverter.ToUInt32(bytes, 0);
         }
 
         /// <summary>
