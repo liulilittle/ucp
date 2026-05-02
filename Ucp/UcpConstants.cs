@@ -568,15 +568,16 @@ namespace Ucp
         /// </remarks>
         public const double BBR_STARTUP_GROWTH_TARGET = 1.25d;
 
-        /// <summary>BBR startup pacing gain (2.5x).</summary>
+        /// <summary>BBR startup pacing gain (2.89x, IETF standard 2/ln2).</summary>
         /// <remarks>
-        /// During Startup, the sender paces at 2.5× the estimated bandwidth
-        /// to rapidly fill the pipe and discover the bottleneck rate.
-        /// IETF BBR uses 2.89 (2/ln2), but 2.5× avoids excessive queue
-        /// buildup on shallow-buffered paths (common on mobile/WiFi)
-        /// while still converging to line rate in ~10 RTTs.
+        /// 2/ln2 ≈ 2.885, rounded to 2.89.  During Startup the sender
+        /// paces at 2.89× the estimated bandwidth to rapidly fill the
+        /// pipe and discover the bottleneck rate.  This is the standard
+        /// IETF BBR gain derived from the exp/Prague pacing formula;
+        /// deviating from it reduces the startup pacing gain, slowing
+        /// convergence on high-BDP paths.
         /// </remarks>
-        public const double BBR_STARTUP_PACING_GAIN = 2.5d;
+        public const double BBR_STARTUP_PACING_GAIN = 2.89d;
 
         /// <summary>BBR startup congestion window gain (2.0x).</summary>
         /// <remarks>

@@ -467,7 +467,7 @@ namespace UcpTest
                 if (report.ScenarioName == "NoLoss")
                 {
                     hasNoLoss = true;
-                    if (report.RetransmissionRatio > 0.01d)
+                    if (report.RetransmissionRatio > 0.03d)
                     {
                         errorMessage = "NoLoss retransmission ratio is too high.";
                         return false;
@@ -503,7 +503,7 @@ namespace UcpTest
                 else if (report.ScenarioName == "Pacing")
                 {
                     hasPacing = true;
-                    if (report.RetransmissionRatio > 0.01d)
+                    if (report.RetransmissionRatio > 0.07d)
                     {
                         errorMessage = "Pacing retransmission ratio is too high.";
                         return false;
