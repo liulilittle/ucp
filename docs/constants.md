@@ -139,7 +139,7 @@ flowchart TD
 | `BENCHMARK_MOBILE_4G_PAYLOAD_BYTES` | 32 MB | 20 Mbps × 32 MB ≈ 12.8s. Higher BW 4G needs larger payload for reliable throughput. |
 | `BENCHMARK_WEAK_4G_PAYLOAD_BYTES` | 16 MB | Covers mid-transfer 80ms outage + recovery. |
 | `BENCHMARK_SATELLITE_PAYLOAD_BYTES` | 16 MB | 10 Mbps × 300ms. 16 MB ≈ 12.8s, covers ~43 RTTs for steady-state BBRv2. |
-| `BENCHMARK_VPN_PAYLOAD_BYTES` | 16 MB | 50 Mbps ≈ 2.56s. Sufficient for asymmetric routing behavior analysis. |
+| `BENCHMARK_VPN_PAYLOAD_BYTES` | 16 MB | 50 Mbps ≈ 2.56s. Sufficient for asymmetric routing behavior evaluation. |
 | `BENCHMARK_1G_PAYLOAD_BYTES` | 16 MB | 1 Gbps ≈ 0.128s. Short but sufficient for no-loss convergence (2-5 RTT). |
 | `BENCHMARK_1G_LOSS_PAYLOAD_BYTES` | 64 MB | 1 Gbps ≈ 0.512s. Larger for lossy gigabit—16 MB would only see ~10 loss events at 1%. |
 | `BENCHMARK_10G_PAYLOAD_BYTES` | 32 MB | 10 Gbps ≈ 25.6ms. Logical clock serialization ensures accurate throughput despite in-process speed. |

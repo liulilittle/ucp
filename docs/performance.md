@@ -58,7 +58,7 @@ The benchmark report produces a normalized ASCII table with 16 columns:
 | `RWND` | `UcpPcb` receiver window | Latest advertised receive window | Flow control window from remote peer |
 | `Conv` | `NetworkSimulator` virtual clock | Elapsed time to steady-state throughput | Convergence time, adaptive ns/us/ms/s units |
 
-### Retrans% vs Loss% Independence — Deep Dive
+### Retrans% vs Loss% Independence — Comprehensive Overview
 
 ```mermaid
 flowchart LR

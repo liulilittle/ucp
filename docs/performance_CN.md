@@ -58,7 +58,7 @@ flowchart TD
 | `RWND` | `UcpPcb` 接收窗口 | 对端最新通告的接收窗口字节数 | 接收端的流控窗口——反映了接收端缓冲余量 |
 | `Conv` | `NetworkSimulator` 虚拟时钟 | 从传输开始到稳态吞吐的持续时间 | 协议达到目标吞吐所需的时间。自适应 ns/us/ms/s 单位 |
 
-### Retrans% 与 Loss% 的独立性 — 深入分析
+### Retrans% 与 Loss% 的独立性 — 深入评估
 
 ```mermaid
 flowchart LR
@@ -72,7 +72,7 @@ flowchart LR
     FEC["FEC Recovery<br/>FEC恢复"] -.->|"修复的包<br/>不触发重传"| Recv
 ```
 
-此独立性使得对协议行为的多维度真实分析成为可能：
+此独立性使得对协议行为的多维度真实评估成为可能：
 
 | 场景模式 | Loss% | Retrans% | 含义 |
 |---|---|---|---|

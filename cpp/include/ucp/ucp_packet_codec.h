@@ -1,5 +1,5 @@
-#pragma once
-
+#pragma once //< Include guard — prevents multiple definitions in a single translation unit.
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              
 /** @file ucp_packet_codec.h
  *  @brief Wire-protocol encoder/decoder for UCP packets — mirrors C# Ucp.Internal.PacketCodec.
  *
@@ -10,60 +10,85 @@
  *  All multi-byte integers are encoded in big-endian (network byte order).
  *  The 48-bit timestamp field is read/written as a uint64_t with upper
  *  16 bits masked to zero.
+ *
+ *  Key equivalence verified against C# UcpPacketCodec.cs:
+ *  - ReadUInt16/WriteUInt16 — big-endian, MSB at offset, LSB at offset+1
+ *  - ReadUInt32/WriteUInt32 — big-endian, bytes [31:24]…[7:0]
+ *  - ReadUInt48/WriteUInt48 — 6 bytes big-endian, 48-bit mask (0x0000FFFFFFFFFFFF)
+ *  - TryReadCommonHeader — field order: Type, Flags, ConnectionId, Timestamp
+ *  - WriteCommonHeader — same field order as C#
+ *  - Encode dispatch — dynamic_cast tag-dispatch, same type priority
+ *  - TryDecode dispatch — switch on header.type, same case order
+ *  - Data encode/decode — same field layout with/without piggybacked ACK
+ *  - Ack encode/decode — same SACK block layout
+ *  - Nak encode/decode — same missing-sequence list layout
+ *  - FecRepair encode/decode — same GroupId/GroupIndex/payload layout
+ *  - Control encode/decode — Syn/SynAck/Fin/Rst with optional AckNumber+SequenceNumber
  */
 
-#include "ucp_packets.h"
+#include "ucp_packets.h" //< UcpPacket base class and all concrete packet type definitions (UcpDataPacket, UcpAckPacket, UcpNakPacket, UcpFecRepairPacket, UcpControlPacket).
 
-#include <cstdint>
-#include <memory>
-#include <vector>
+#include <cstdint>  //< Fixed-width integer types (uint8_t, uint16_t, uint32_t, uint64_t).
+#include "ucp/ucp_vector.h"
+#include "ucp/ucp_memory.h"
 
-namespace ucp {
+namespace ucp { //< All UCP types reside in the ucp namespace to match C# Ucp namespace.
 
 // === Field-size constants (network endian) ===
+// These mirror UcpConstants.cs Section 2 — Packet Format Constants.
+// Every multi-byte integer is stored in big-endian (network byte order)
+// on the wire regardless of host CPU endianness.
 
-constexpr size_t COMMON_HEADER_SIZE        = 12;  //< Total bytes in UcpCommonHeader.
-constexpr size_t SEQUENCE_NUMBER_SIZE      = 4;   //< uint32_t sequence number field width.
-constexpr size_t ACK_NUMBER_SIZE           = 4;   //< uint32_t ack number field width.
-constexpr size_t CONNECTION_ID_SIZE        = 4;   //< uint32_t connection_id field width.
-constexpr size_t ACK_TIMESTAMP_FIELD_SIZE  = 6;   //< 48-bit echo timestamp field width.
-constexpr size_t PACKET_TYPE_FIELD_SIZE    = 1;   //< type field width (uint8_t).
-constexpr size_t PACKET_FLAGS_FIELD_SIZE   = 1;   //< flags field width (uint8_t).
-constexpr size_t SACK_BLOCK_SIZE           = 8;   //< One SACK block: start(4) + end(4).
-constexpr size_t MSS                       = 1220; //< Maximum segment size (payload capacity).
+constexpr size_t COMMON_HEADER_SIZE        = 12;  //< Total bytes in UcpCommonHeader: type(1) + flags(1) + connection_id(4) + timestamp(6) = 12.
+constexpr size_t SEQUENCE_NUMBER_SIZE      = 4;   //< uint32_t sequence number field width (4 bytes, big-endian), mirrors C# UcpConstants.SEQUENCE_NUMBER_SIZE.
+constexpr size_t ACK_NUMBER_SIZE           = 4;   //< uint32_t ack number field width (4 bytes, big-endian), mirrors C# UcpConstants.ACK_NUMBER_SIZE.
+constexpr size_t CONNECTION_ID_SIZE        = 4;   //< uint32_t connection_id field width (4 bytes, big-endian), mirrors C# UcpConstants.CONNECTION_ID_SIZE.
+constexpr size_t ACK_TIMESTAMP_FIELD_SIZE  = 6;   //< 48-bit echo timestamp field width (6 bytes, big-endian), mirrors C# UcpConstants.ACK_TIMESTAMP_FIELD_SIZE.
+constexpr size_t PACKET_TYPE_FIELD_SIZE    = 1;   //< Type field width (uint8_t, 1 byte), mirrors C# UcpConstants.PACKET_TYPE_FIELD_SIZE.
+constexpr size_t PACKET_FLAGS_FIELD_SIZE   = 1;   //< Flags field width (uint8_t, 1 byte), mirrors C# UcpConstants.PACKET_FLAGS_FIELD_SIZE.
+constexpr size_t SACK_BLOCK_SIZE           = 8;   //< One SACK block: start(uint32_t, 4 bytes) + end(uint32_t, 4 bytes) = 8 bytes, mirrors C# UcpConstants.SACK_BLOCK_SIZE.
+constexpr size_t MSS                       = 1220; //< Maximum segment size — payload capacity per data packet (mirrors C# UcpConstants.MSS).
 
 // === Derived header sizes ===
+// Computed identically to C# UcpConstants.cs Section 2.
 
-constexpr size_t DATA_HEADER_SIZE          = COMMON_HEADER_SIZE + sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint16_t);     //< Data header without piggybacked ACK.
-constexpr size_t DATA_HEADER_SIZE_WITH_ACK = DATA_HEADER_SIZE + ACK_NUMBER_SIZE + sizeof(uint16_t) + sizeof(uint32_t) + ACK_TIMESTAMP_FIELD_SIZE; //< Data header with piggybacked ACK.
-constexpr size_t ACK_FIXED_SIZE            = COMMON_HEADER_SIZE + sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint32_t) + ACK_TIMESTAMP_FIELD_SIZE; //< ACK header (excl. SACK blocks).
-constexpr size_t NAK_FIXED_SIZE            = COMMON_HEADER_SIZE + ACK_NUMBER_SIZE + sizeof(uint16_t);  //< NAK header (excl. missing sequences).
+constexpr size_t DATA_HEADER_SIZE          = COMMON_HEADER_SIZE + sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint16_t);     //< Data header without piggybacked ACK: 12 + 4(seq) + 2(frag.total) + 2(frag.index) = 20 bytes.
+constexpr size_t DATA_HEADER_SIZE_WITH_ACK = DATA_HEADER_SIZE + ACK_NUMBER_SIZE + sizeof(uint16_t) + sizeof(uint32_t) + ACK_TIMESTAMP_FIELD_SIZE; //< Data header with piggybacked ACK: 20 + 4(ack) + 2(blockCount) + 4(window) + 6(echo) = 36 bytes.
+constexpr size_t ACK_FIXED_SIZE            = COMMON_HEADER_SIZE + sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint32_t) + ACK_TIMESTAMP_FIELD_SIZE; //< ACK header excl. SACK blocks: 12 + 4(ack) + 2(blockCount) + 4(window) + 6(echo) = 28 bytes.
+constexpr size_t NAK_FIXED_SIZE            = COMMON_HEADER_SIZE + ACK_NUMBER_SIZE + sizeof(uint16_t);  //< NAK header excl. missing sequences: 12 + 4(ack) + 2(missingCount) = 18 bytes.
 
 // === Bit-width constants for shift operations ===
+// Named shift amounts used by the big-endian Read/Write helpers.
+// Mirrors C# UcpConstants.cs Section 2b — Bit Counts for Serialization.
 
-constexpr int BYTE_BITS    = 8;   //< Bits per byte.
-constexpr int UINT16_BITS  = 16;  //< Bits in uint16_t.
-constexpr int UINT24_BITS  = 24;  //< Bits in 3 bytes.
-constexpr int UINT32_BITS  = 32;  //< Bits in uint32_t.
-constexpr int UINT40_BITS  = 40;  //< Bits in 5 bytes.
+constexpr int BYTE_BITS    = 8;   //< Bits per byte — shift amount to move a byte 8 bits, mirrors C# UcpConstants.BYTE_BITS.
+constexpr int UINT16_BITS  = 16;  //< Bits in uint16_t — shift amount for byte 1 of multi-byte serialization, mirrors C# UcpConstants.UINT16_BITS.
+constexpr int UINT24_BITS  = 24;  //< Bits in 3 bytes — shift amount for byte 2 of uint32/uint48 serialization, mirrors C# UcpConstants.UINT24_BITS.
+constexpr int UINT32_BITS  = 32;  //< Bits in uint32_t — shift amount for byte 3 (MSB-1) of uint48, mirrors C# UcpConstants.UINT32_BITS.
+constexpr int UINT40_BITS  = 40;  //< Bits in 5 bytes — shift amount for the MSB of uint48 serialization, mirrors C# UcpConstants.UINT40_BITS.
 
-constexpr uint64_t UINT48_MASK = 0x0000FFFFFFFFFFFFULL;  //< Mask to extract lower 48 bits of a uint64_t.
+constexpr uint64_t UINT48_MASK = 0x0000FFFFFFFFFFFFULL;  //< Mask to extract lower 48 bits of a uint64_t (2^48 − 1), mirrors C# UcpConstants.UINT48_MASK.
 
-/** @brief Maximum number of SACK blocks that fit in one ACK packet given MSS. */
-constexpr int MAX_ACK_SACK_BLOCKS = static_cast<int>((MSS - ACK_FIXED_SIZE) / SACK_BLOCK_SIZE);
+/** @brief Maximum number of SACK blocks that fit in one ACK packet given MSS.
+ *  Computed as (MSS − ACK_FIXED_SIZE) / SACK_BLOCK_SIZE = (1220 − 28) / 8 = 149.
+ *  Mirrors C# UcpConstants.MAX_ACK_SACK_BLOCKS. */
+constexpr int MAX_ACK_SACK_BLOCKS = static_cast<int>((MSS - ACK_FIXED_SIZE) / SACK_BLOCK_SIZE); //< = (1220 − 28) / 8 = 149 — maximum SACK blocks before exceeding MSS, mirrors C# UcpConstants.MAX_ACK_SACK_BLOCKS.
 
 /** @brief Static packet encoder/decoder for big-endian UCP wire format.
  *
  *  All methods are static because encoding requires no mutable state.
- *  Decoded packets are returned via std::unique_ptr<UcpPacket>; the caller
- *  should dynamic_cast to the concrete type based on header.type.
- */
-class UcpPacketCodec {
+     *  Decoded packets are returned via ucp::unique_ptr<UcpPacket>; the caller
+     *  should dynamic_cast to the concrete type based on header.type.
+     *
+     *  Mirrors the internal static class UcpPacketCodec in C# UcpPacketCodec.cs.
+     */
+class UcpPacketCodec { //< Static utility class — no instance state, only pure encode/decode functions (mirrors C# internal static class UcpPacketCodec).
 public:
     /** @brief Encode a concrete UcpPacket into a wire-format byte buffer.
      *  @param packet  The typed packet to encode (Data, Ack, Nak, FecRepair, or Control).
-     *  @return Big-endian byte buffer ready for transmission. */
-    static std::vector<uint8_t> Encode(const UcpPacket& packet);
+     *  @return Big-endian byte buffer ready for transmission.
+     *  Note: Unlike C# (which throws NotSupportedException), returns an empty vector for unknown types. */
+    static ucp::vector<uint8_t> Encode(const UcpPacket& packet); //< Public entry point: converts a typed packet object into a big-endian byte array for wire transmission (mirrors C# public static byte[] Encode).
 
     /** @brief Attempt to decode a byte buffer into a UcpPacket.
      *  @param buffer      Pointer to the start of the datagram.
@@ -71,44 +96,52 @@ public:
      *  @param count       Number of bytes available from offset.
      *  @param out_packet  On success, set to a unique_ptr<UcpPacket>; caller should dynamic_cast.
      *  @return true if decoding succeeded, false if the buffer is incomplete or invalid. */
-    static bool TryDecode(const uint8_t* buffer, size_t offset, size_t count, std::unique_ptr<UcpPacket>& out_packet);
+    static bool TryDecode(const uint8_t* buffer, size_t offset, size_t count, ucp::unique_ptr<UcpPacket>& out_packet); //< Public entry point: attempts to parse raw bytes into a typed packet; returns false on any failure rather than throwing (mirrors C# public static bool TryDecode).
 
 private:
     // === Primitive big-endian read/write helpers ===
+    // These mirror C# UcpPacketCodec.cs Section "BIG-ENDIAN INTEGER READ / WRITE HELPERS".
+    // All multi-byte integers on the wire are big-endian (network byte order).
+    // MSB appears at the lowest offset, matching TCP/IP header encoding.
 
     /** @brief Read a big-endian uint16_t from buffer at offset. */
-    static uint16_t ReadUInt16(const uint8_t* buffer, size_t offset);
+    static uint16_t ReadUInt16(const uint8_t* buffer, size_t offset); //< Reads 2-byte unsigned integer from network byte order (mirrors C# private static ushort ReadUInt16).
     /** @brief Write a uint16_t in big-endian to buffer at offset. */
-    static void     WriteUInt16(uint16_t value, uint8_t* buffer, size_t offset);
+    static void     WriteUInt16(uint16_t value, uint8_t* buffer, size_t offset); //< Writes 2-byte unsigned integer in network byte order (mirrors C# private static void WriteUInt16).
     /** @brief Read a big-endian uint32_t from buffer at offset. */
-    static uint32_t ReadUInt32(const uint8_t* buffer, size_t offset);
+    static uint32_t ReadUInt32(const uint8_t* buffer, size_t offset); //< Reads 4-byte unsigned integer from network byte order (mirrors C# private static uint ReadUInt32).
     /** @brief Write a uint32_t in big-endian to buffer at offset. */
-    static void     WriteUInt32(uint32_t value, uint8_t* buffer, size_t offset);
-    /** @brief Read a 48-bit big-endian value from buffer at offset (returns uint64_t with upper 16 bits zero). */
-    static uint64_t ReadUInt48(const uint8_t* buffer, size_t offset);
+    static void     WriteUInt32(uint32_t value, uint8_t* buffer, size_t offset); //< Writes 4-byte unsigned integer in network byte order (mirrors C# private static void WriteUInt32).
+    /** @brief Read a 48-bit big-endian value from buffer at offset (returns uint64_t with value in low 48 bits).
+     *  Note: C# returns long (signed Int64); C++ returns uint64_t (unsigned). Wire bytes are identical. */
+    static uint64_t ReadUInt48(const uint8_t* buffer, size_t offset); //< Reads 6-byte unsigned 48-bit integer from network byte order (mirrors C# private static long ReadUInt48).
     /** @brief Write a 48-bit value in big-endian to buffer at offset (only lower 48 bits of uint64_t are used). */
-    static void     WriteUInt48(uint64_t value, uint8_t* buffer, size_t offset);
+    static void     WriteUInt48(uint64_t value, uint8_t* buffer, size_t offset); //< Writes 6-byte unsigned 48-bit integer in network byte order, masking input to 48 bits (mirrors C# private static void WriteUInt48).
 
     /** @brief Decode the 12-byte common header from the buffer.
      *  @return true if count >= 12 and parsing succeeded. */
-    static bool TryReadCommonHeader(const uint8_t* buffer, size_t offset, size_t count, UcpCommonHeader& header);
+    static bool TryReadCommonHeader(const uint8_t* buffer, size_t offset, size_t count, UcpCommonHeader& header); //< Parses the universal 12-byte common header (Type, Flags, ConnectionId, Timestamp) that prefixes every UCP packet (mirrors C# private static bool TryReadCommonHeader).
     /** @brief Write the 12-byte common header into the buffer at offset. */
-    static void WriteCommonHeader(const UcpCommonHeader& header, uint8_t* buffer, size_t offset);
+    static void WriteCommonHeader(const UcpCommonHeader& header, uint8_t* buffer, size_t offset); //< Serializes the universal 12-byte common header into the output buffer (mirrors C# private static void WriteCommonHeader).
 
     // === Per-type encode helpers ===
+    // Each handles the type-specific header fields and variable-length data.
+    // Mirrors C# private static byte[] EncodeData / EncodeAck / EncodeNak / EncodeFecRepair / EncodeControl.
 
-    static std::vector<uint8_t> EncodeData(const UcpDataPacket& packet);
-    static std::vector<uint8_t> EncodeAck(const UcpAckPacket& packet);
-    static std::vector<uint8_t> EncodeNak(const UcpNakPacket& packet);
-    static std::vector<uint8_t> EncodeFecRepair(const UcpFecRepairPacket& packet);
-    static std::vector<uint8_t> EncodeControl(const UcpControlPacket& packet);
+    static ucp::vector<uint8_t> EncodeData(const UcpDataPacket& packet);       //< Serializes a Data packet: sequence number, fragment info, optional piggybacked ACK (AckNumber, SACK blocks, window, echo), and payload (mirrors C# EncodeData).
+    static ucp::vector<uint8_t> EncodeAck(const UcpAckPacket& packet);         //< Serializes an ACK packet: ack number, SACK blocks, window size, echo timestamp (mirrors C# EncodeAck).
+    static ucp::vector<uint8_t> EncodeNak(const UcpNakPacket& packet);         //< Serializes a NAK packet: ack number, missing sequence list (mirrors C# EncodeNak).
+    static ucp::vector<uint8_t> EncodeFecRepair(const UcpFecRepairPacket& packet); //< Serializes an FEC repair packet: group ID, group index, parity payload (mirrors C# EncodeFecRepair).
+    static ucp::vector<uint8_t> EncodeControl(const UcpControlPacket& packet);     //< Serializes a Control packet (Syn/SynAck/Fin/Rst): optional AckNumber and SequenceNumber (mirrors C# EncodeControl).
 
     // === Per-type decode helpers ===
+    // Each validates minimum size and reads type-specific fields.
+    // Mirrors C# private static bool TryDecodeData / TryDecodeAck / TryDecodeNak / TryDecodeFecRepair.
 
-    static bool TryDecodeData(const uint8_t* buffer, size_t offset, size_t count, const UcpCommonHeader& header, std::unique_ptr<UcpPacket>& out_packet);
-    static bool TryDecodeAck(const uint8_t* buffer, size_t offset, size_t count, const UcpCommonHeader& header, std::unique_ptr<UcpPacket>& out_packet);
-    static bool TryDecodeNak(const uint8_t* buffer, size_t offset, size_t count, const UcpCommonHeader& header, std::unique_ptr<UcpPacket>& out_packet);
-    static bool TryDecodeFecRepair(const uint8_t* buffer, size_t offset, size_t count, const UcpCommonHeader& header, std::unique_ptr<UcpPacket>& out_packet);
+    static bool TryDecodeData(const uint8_t* buffer, size_t offset, size_t count, const UcpCommonHeader& header, ucp::unique_ptr<UcpPacket>& out_packet);       //< Decodes a Data packet: SequenceNumber, FragmentTotal/Index, optional piggybacked ACK fields, and payload (mirrors C# TryDecodeData).
+    static bool TryDecodeAck(const uint8_t* buffer, size_t offset, size_t count, const UcpCommonHeader& header, ucp::unique_ptr<UcpPacket>& out_packet);        //< Decodes an ACK packet: AckNumber, SACK blocks, WindowSize, EchoTimestamp (mirrors C# TryDecodeAck).
+    static bool TryDecodeNak(const uint8_t* buffer, size_t offset, size_t count, const UcpCommonHeader& header, ucp::unique_ptr<UcpPacket>& out_packet);        //< Decodes a NAK packet: AckNumber, missing sequence list (mirrors C# TryDecodeNak).
+    static bool TryDecodeFecRepair(const uint8_t* buffer, size_t offset, size_t count, const UcpCommonHeader& header, ucp::unique_ptr<UcpPacket>& out_packet);  //< Decodes an FEC repair packet: GroupId, GroupIndex, parity payload (mirrors C# TryDecodeFecRepair).
 };
 
 } // namespace ucp

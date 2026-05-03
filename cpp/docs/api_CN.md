@@ -158,7 +158,7 @@ using StateCallback = std::function<void()>;
 
 | 方法 | 返回值/签名 | 说明 |
 |---|---|---|
-| `ConnectAsync(const std::string& remoteEndpoint)` | `std::future<bool>` | 发起连接。`remoteEndpoint` 格式为 `"host:port"`（通过 `Endpoint::Parse` 解析）。触发 Worker Thread 启动，随机生成 ISN（`mt19937_64`）和 ConnId。future 在握手完成时 resolve。 |
+| `ConnectAsync(const std::string& remoteEndpoint)` | `std::future<bool>` | 发起连接。`remoteEndpoint` 格式为 `"host:port"`（通过 `Endpoint::Parse` 说明）。触发 Worker Thread 启动，随机生成 ISN（`mt19937_64`）和 ConnId。future 在握手完成时 resolve。 |
 | `ConnectAsync(UcpNetwork* network, const std::string& remoteEndpoint)` | `std::future<bool>` | 通过指定网络实例发起连接。用于与 `UcpServer` 共享网络层。 |
 | `Close()` | `void` | 同步发起 FIN 优雅关闭。 |
 | `CloseAsync()` | `std::future<void>` | 异步发起优雅关闭，发送 FIN 后等待。 |
@@ -466,7 +466,7 @@ struct Endpoint {
 };
 ```
 
-`Endpoint::Parse("host:port")` 解析字符串格式端点为地址+端口。`ToString()` 返回 `"address:port"` 格式字符串。
+`Endpoint::Parse("host:port")` 说明字符串格式端点为地址+端口。`ToString()` 返回 `"address:port"` 格式字符串。
 
 ---
 

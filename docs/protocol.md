@@ -104,7 +104,7 @@ flowchart LR
     Echo --> RTTMeas["→ Continuous RTT measurement"]
 ```
 
-### Piggyback Overhead Analysis
+### Piggyback Overhead Evaluation
 
 | Scenario | Piggyback Fields | Overhead Bytes | MSS | Overhead % |
 |---|---|---|---|---|
@@ -469,7 +469,7 @@ flowchart LR
     Sender -->|"Retransmitted DATA"| Retrans["Retrans% Counter"]
 ```
 
-This independence enables realistic analysis:
+This independence enables realistic evaluation:
 - **FEC-dominant**: `Loss%=5%`, `Retrans%=1%` — FEC recovered most without retransmission
 - **Congestion collapse**: `Loss%=3%`, `Retrans%=8%` — protocol aggressively retransmitting, overdriving link
 - **Expected baseline**: `Loss% ≈ Retrans%` with FEC disabled (each loss → one retransmit)

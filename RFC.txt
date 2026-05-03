@@ -1089,7 +1089,7 @@ Table of Contents
                  |            |  or after 5 congestion losses)
                  |            v
                  |   +-------------+
-                 +---|  ProbeRTT   |  Deep-drain for fresh MinRtt
+                 +---|  ProbeRTT   |  Thorough-drain for fresh MinRtt
                      +-------------+
 
 
@@ -1159,7 +1159,7 @@ Table of Contents
 
 8.1.4.  ProbeRTT
 
-   Periodic deep-drain to refresh MinRtt.  Entry conditions:
+   Periodic thorough-drain to refresh MinRtt.  Entry conditions:
    o  MinRtt not refreshed for ProbeRttInterval (30 s).
    o  OR BBR_PROBE_RTT_CONGESTION_LOSS_THRESHOLD (5) congestion losses.
    o  Mobile paths (MobileUnstable) excluded -- skip ProbeRTT entirely.

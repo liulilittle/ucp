@@ -32,6 +32,9 @@
 #include "ucp/ucp_fec_codec.h"
 #include "ucp/ucp_pacing.h"
 
+#include "ucp/ucp_vector.h"
+#include "ucp/ucp_memory.h"
+
 #include <algorithm>
 #include <cstring>
 #include <iostream>
@@ -347,7 +350,7 @@ std::future<int> UcpPcb::SendAsync(const uint8_t* buffer, int offset, int count,
                 if ((int)m_sendBuffer.size() >= maxBufferedSegments) break;  //< Send buffer full — stop.
             }
 
-            std::vector<uint8_t> payload(chunk);
+            ucp::vector<uint8_t> payload(chunk);
             std::memcpy(payload.data(), buffer + currentOffset, (size_t)chunk);
 
             {
@@ -591,7 +594,7 @@ void UcpPcb::DispatchFromNetwork(const UcpPacket* packet, uint64_t remoteEndPoin
 // ====================================================================================================
 
 int UcpPcb::ProcessPiggybackedAck(uint32_t ackNumber, int64_t nowMicros) {
-    std::vector<uint32_t> removeKeys;
+    ucp::vector<uint32_t> removeKeys;
     int deliveredBytes = 0;
     {
         std::lock_guard<std::mutex> lock(m_sync);
@@ -729,7 +732,7 @@ std::future<void> UcpPcb::HandleAckAsync(const UcpAckPacket& ackPacket) {
     UcpAckPacket ackCopy = ackPacket;
     return std::async(std::launch::async, [this, ackCopy]() {
         bool establishByHandshake = false;
-        std::vector<uint32_t> removeKeys;
+        ucp::vector<uint32_t> removeKeys;
         int deliveredBytes = 0;
         int remainingFlight = 0;
         int64_t sampleRtt = 0;
@@ -769,7 +772,7 @@ std::future<void> UcpPcb::HandleAckAsync(const UcpAckPacket& ackPacket) {
 
             // === Process SACK blocks ===
             const auto& sackBlocks = ackCopy.sack_blocks;
-            std::vector<SackBlock> sortedSackBlocks;
+            ucp::vector<SackBlock> sortedSackBlocks;
             SortSackBlocks(sackBlocks, sortedSackBlocks);
 
             uint32_t highestSack = !sortedSackBlocks.empty() ? GetHighestSackEnd(sortedSackBlocks) : 0;
@@ -945,7 +948,7 @@ std::future<void> UcpPcb::HandleNakAsync(const UcpNakPacket& nakPacket) {
             if (notifiedLoss) {
                 bool isCongestion = ClassifyLosses(nakCopy.missing_sequences, nowMicros, 0);
                 if (m_bbr) m_bbr->OnPacketLoss(nowMicros, GetRetransmissionRatio(), isCongestion);
-                TraceLog("NAK loss congestion=" + std::string(isCongestion ? "true" : "false") +
+                TraceLog("NAK loss congestion=" + ucp::string(isCongestion ? "true" : "false") +
                          " count=" + std::to_string(nakCopy.missing_sequences.size()));
             }
         }
@@ -959,8 +962,8 @@ std::future<void> UcpPcb::HandleNakAsync(const UcpNakPacket& nakPacket) {
 // ====================================================================================================
 
 void UcpPcb::HandleData(const UcpDataPacket& dataPacket) {
-    std::vector<uint32_t> missing;
-    std::vector<std::vector<uint8_t>> readyPayloads;
+    ucp::vector<uint32_t> missing;
+    ucp::vector<ucp::vector<uint8_t>> readyPayloads;
     bool shouldEstablish = false;
     bool shouldStore = false;
     bool sendImmediateAck = false;
@@ -1096,8 +1099,8 @@ void UcpPcb::HandleFecRepair(const UcpFecRepairPacket& packet) {
     (void)packet;
     if (!m_fecCodec || packet.payload.empty()) return;
 
-    std::vector<std::vector<uint8_t>> fecReadyPayloads;
-    std::vector<std::pair<uint32_t, std::vector<uint8_t>>> recoveredPackets;
+    ucp::vector<ucp::vector<uint8_t>> fecReadyPayloads;
+    ucp::vector<std::pair<uint32_t, ucp::vector<uint8_t>>> recoveredPackets;
 
     {
         std::lock_guard<std::mutex> lock(m_sync);
@@ -1167,7 +1170,7 @@ void UcpPcb::SendAckPacket(int flags, int64_t overrideEchoTimestamp) {
     m_sentAckPackets++;
 }
 
-void UcpPcb::SendNak(const std::vector<uint32_t>& missing) {
+void UcpPcb::SendNak(const ucp::vector<uint32_t>& missing) {
     if (missing.empty()) return;
 
     uint32_t cumAck;
@@ -1251,7 +1254,7 @@ std::future<void> UcpPcb::FlushSendQueueAsync() {
 
         try {
             while (!m_ctsCanceled) {
-                std::vector<OutboundSegment*> segmentsToSend;
+                ucp::vector<OutboundSegment*> segmentsToSend;
                 int64_t nowMicros = NowMicros();
                 int64_t waitMicros = 0;
                 uint32_t piggyCumAck = 0;
@@ -1394,7 +1397,7 @@ void UcpPcb::ScheduleDelayedFlush(int64_t waitMicros) {
 // EnqueuePayload — deliver received data to the application
 // ====================================================================================================
 
-void UcpPcb::EnqueuePayload(std::vector<uint8_t> payload) {
+void UcpPcb::EnqueuePayload(ucp::vector<uint8_t> payload) {
     if (payload.empty()) return;
     int len = (int)payload.size();
 
@@ -1452,7 +1455,7 @@ std::future<void> UcpPcb::OnTimerAsync(int64_t nowMicros) {
         bool maxRetransmissionsExceeded = false;
         bool timedOutForCongestion = false;
         bool tailLossProbe = false;
-        std::vector<uint32_t> missingForNak;
+        ucp::vector<uint32_t> missingForNak;
 
         {
             std::lock_guard<std::mutex> lock(m_sync);
@@ -1553,7 +1556,7 @@ std::future<void> UcpPcb::OnTimerAsync(int64_t nowMicros) {
                 if (m_bbr) m_bbr->OnPacketLoss(nowMicros, GetRetransmissionRatio(),
                                                 timedOutForCongestion);
                 TraceLog("RTO loss congestion=" +
-                         std::string(timedOutForCongestion ? "true" : "false") +
+                         ucp::string(timedOutForCongestion ? "true" : "false") +
                          " rto=" + std::to_string(m_rtoEstimator->CurrentRtoMicros()));
                 if (timedOutForCongestion) {
                     m_rtoEstimator->Backoff();
@@ -1869,7 +1872,7 @@ double UcpPcb::GetRetransmissionRatio() {
     return total == 0 ? 0.0 : (double)m_retransmittedPackets / (double)total;
 }
 
-void UcpPcb::TraceLog(const std::string& message) {
+void UcpPcb::TraceLog(const ucp::string& message) {
     if (m_config.EnableDebugLog) {
         std::cerr << "[UCP PCB] " << message << std::endl;
     }
@@ -1881,17 +1884,17 @@ void UcpPcb::TraceLog(const std::string& message) {
 
 bool UcpPcb::IsCongestionLoss(uint32_t sequenceNumber, int64_t sampleRttMicros,
                                 int64_t nowMicros, int contiguousLossCount) {
-    std::vector<uint32_t> sequences = { sequenceNumber };
+    ucp::vector<uint32_t> sequences = { sequenceNumber };
     return ClassifyLosses(sequences, nowMicros, sampleRttMicros, contiguousLossCount);
 }
 
-bool UcpPcb::ClassifyLosses(const std::vector<uint32_t>& sequenceNumbers,
+bool UcpPcb::ClassifyLosses(const ucp::vector<uint32_t>& sequenceNumbers,
                               int64_t nowMicros, int64_t sampleRttMicros) {
     return ClassifyLosses(sequenceNumbers, nowMicros, sampleRttMicros,
                            GetMaxContiguousLossRun(sequenceNumbers));
 }
 
-bool UcpPcb::ClassifyLosses(const std::vector<uint32_t>& sequenceNumbers,
+bool UcpPcb::ClassifyLosses(const ucp::vector<uint32_t>& sequenceNumbers,
                               int64_t nowMicros, int64_t sampleRttMicros,
                               int contiguousLossCount) {
     int64_t windowMicros = GetLossClassifierWindowMicros();
@@ -1954,7 +1957,7 @@ void UcpPcb::PruneLossEvents(int64_t nowMicros, int64_t windowMicros) {
 }
 
 int64_t UcpPcb::GetLossWindowMedianRttMicros() {
-    std::vector<int64_t> samples;
+    ucp::vector<int64_t> samples;
     std::queue<LossEvent> copy = m_recentLossEvents;
     while (!copy.empty()) {
         auto& ev = copy.front();
@@ -1979,7 +1982,7 @@ int64_t UcpPcb::GetMinimumObservedRttMicros() {
 
 int UcpPcb::GetMaxContiguousRecentLossRun() {
     if (m_recentLossEvents.empty()) return 0;
-    std::vector<uint32_t> seqs;
+    ucp::vector<uint32_t> seqs;
     std::queue<LossEvent> copy = m_recentLossEvents;
     while (!copy.empty()) {
         seqs.push_back(copy.front().SequenceNumber);
@@ -1988,9 +1991,9 @@ int UcpPcb::GetMaxContiguousRecentLossRun() {
     return GetMaxContiguousLossRun(seqs);
 }
 
-int UcpPcb::GetMaxContiguousLossRun(const std::vector<uint32_t>& sequenceNumbers) {
+int UcpPcb::GetMaxContiguousLossRun(const ucp::vector<uint32_t>& sequenceNumbers) {
     if (sequenceNumbers.empty()) return 0;
-    std::vector<uint32_t> sorted = sequenceNumbers;
+    ucp::vector<uint32_t> sorted = sequenceNumbers;
     std::sort(sorted.begin(), sorted.end());
     int maxRun = 1;
     int currentRun = 1;
@@ -2076,7 +2079,7 @@ uint64_t UcpPcb::PackSackBlockKey(uint32_t start, uint32_t end) {
     return ((uint64_t)start << 32) | end;
 }
 
-uint32_t UcpPcb::GetHighestSackEnd(const std::vector<SackBlock>& blocks) {
+uint32_t UcpPcb::GetHighestSackEnd(const ucp::vector<SackBlock>& blocks) {
     uint32_t highest = 0;
     bool hasValue = false;
     for (auto& block : blocks) {
@@ -2088,7 +2091,7 @@ uint32_t UcpPcb::GetHighestSackEnd(const std::vector<SackBlock>& blocks) {
     return highest;
 }
 
-void UcpPcb::SortSackBlocks(const std::vector<SackBlock>& blocks, std::vector<SackBlock>& sorted) {
+void UcpPcb::SortSackBlocks(const ucp::vector<SackBlock>& blocks, ucp::vector<SackBlock>& sorted) {
     sorted = blocks;
     if (sorted.size() <= 1) return;
     std::sort(sorted.begin(), sorted.end(), [](const SackBlock& a, const SackBlock& b) {
@@ -2097,7 +2100,7 @@ void UcpPcb::SortSackBlocks(const std::vector<SackBlock>& blocks, std::vector<Sa
 }
 
 bool UcpPcb::IsReportedSackHole(uint32_t sequenceNumber, uint32_t cumulativeAckNumber,
-                                  const std::vector<SackBlock>& sackBlocks) {
+                                  const ucp::vector<SackBlock>& sackBlocks) {
     // A SACK hole is a sequence between the cumulative ACK and the highest SACK end
     // that is NOT covered by any SACK block.
     if (sackBlocks.empty()) return false;
@@ -2168,7 +2171,7 @@ bool UcpPcb::ShouldIssueNak(uint32_t sequenceNumber) {
 // CollectMissingForNak — scan receive buffer for gaps and build a NAK list
 // ====================================================================================================
 
-void UcpPcb::CollectMissingForNak(std::vector<uint32_t>& missing, int64_t nowMicros) {
+void UcpPcb::CollectMissingForNak(ucp::vector<uint32_t>& missing, int64_t nowMicros) {
     if (m_recvBuffer.empty() ||
         m_recvBuffer.find(m_nextExpectedSequence) != m_recvBuffer.end()) return;
 
@@ -2221,15 +2224,15 @@ bool UcpPcb::ShouldSendImmediateReorderedAck(int64_t nowMicros) {
 // ====================================================================================================
 
 void UcpPcb::TryRecoverFecAround(uint32_t receivedSequenceNumber,
-                                   std::vector<std::vector<uint8_t>>& readyPayloads) {
+                                   ucp::vector<ucp::vector<uint8_t>>& readyPayloads) {
     if (!m_fecCodec) return;
     (void)receivedSequenceNumber;
     (void)readyPayloads;
 }
 
 int UcpPcb::StoreRecoveredFecPackets(
-    const std::vector<std::pair<uint32_t, std::vector<uint8_t>>>* recoveredPackets,
-    std::vector<std::vector<uint8_t>>& readyPayloads) {
+    const ucp::vector<std::pair<uint32_t, ucp::vector<uint8_t>>>* recoveredPackets,
+    ucp::vector<ucp::vector<uint8_t>>& readyPayloads) {
     if (!recoveredPackets || recoveredPackets->empty()) return 0;
 
     int stored = 0;
@@ -2244,7 +2247,7 @@ int UcpPcb::StoreRecoveredFecPackets(
 }
 
 bool UcpPcb::StoreRecoveredFecSegment(uint32_t recoveredSeq,
-                                        std::vector<uint8_t> recovered) {
+                                        ucp::vector<uint8_t> recovered) {
     // Don't store duplicates or already-acked sequences
     if (recovered.empty() ||
         UcpSequenceComparer::IsBefore(recoveredSeq, m_nextExpectedSequence) ||
@@ -2266,7 +2269,7 @@ bool UcpPcb::StoreRecoveredFecSegment(uint32_t recoveredSeq,
     return true;
 }
 
-void UcpPcb::DrainReadyPayloads(std::vector<std::vector<uint8_t>>& readyPayloads) {
+void UcpPcb::DrainReadyPayloads(ucp::vector<ucp::vector<uint8_t>>& readyPayloads) {
     // Deliver all contiguous in-order segments starting from next_expected_sequence
     while (!m_recvBuffer.empty()) {
         auto it = m_recvBuffer.find(m_nextExpectedSequence);

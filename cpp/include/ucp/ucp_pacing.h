@@ -6,7 +6,7 @@
  *  The pacing controller smooths outbound packet transmission by accumulating
  *  tokens at a configured bytes-per-second rate.  Each send consumes tokens
  *  from the bucket; if insufficient tokens are available, the caller should
- *  wait or force-consume (allowing a bounded deficit).  This prevents bursts
+ *  wait or force-consume (draining tokens to zero).  This prevents bursts
  *  that would overwhelm bottleneck buffers.
  *
  *  The controller is driven by the BBR bandwidth estimate but imposes its own
@@ -23,11 +23,11 @@ namespace ucp {
 /** @brief Token-bucket pacing controller that regulates outbound packet transmission rate. */
 class PacingController {
 public:
-    double PacingRateBytesPerSecond;  //< Current target pacing rate (set dynamically by BBR).
+    double PacingRateBytesPerSecond;  //< Current target pacing rate in bytes per second; set dynamically by BBR bandwidth estimate.
 
     /** @brief Minimum bytes that can be sent per quantum (aligns with packet size granularity).
      *  @return The SendQuantumBytes value. */
-    int SendQuantumBytes() const { return _sendQuantumBytes; }
+    int SendQuantumBytes() const { return _sendQuantumBytes; } // Return the minimum send unit (typically one MSS worth of bytes).
 
     /** @brief Construct with an initial rate and default configuration.
      *  @param initialRateBytesPerSecond  Starting pacing rate (bytes/s). */
@@ -49,10 +49,10 @@ public:
      *  @return true if enough tokens are available; false if the caller should wait. */
     bool TryConsume(int bytes, int64_t nowMicros);
 
-    /** @brief Force-consume tokens even when insufficient (allowing a bounded deficit up to 50% of capacity).
-     *  @param bytes      Number of bytes being sent.
+    /** @brief Force-consume tokens even when insufficient, draining any positive balance to zero.
+     *  @param bytes      Number of bytes being sent (not used in token deduction; only drains positive balance to zero).
      *  @param nowMicros  Current timestamp. */
-    void ForceConsume(int bytes, int64_t nowMicros);
+    void ForceConsume(int /*bytes*/, int64_t nowMicros);
 
     /** @brief Estimate how many microseconds to wait before enough tokens accumulate.
      *  @param bytes      Bytes the caller wants to send.
@@ -65,14 +65,14 @@ private:
      *  @param nowMicros  Current timestamp. */
     void Refill(int64_t nowMicros);
 
-    int _sendQuantumBytes;              //< Minimum send unit (typically = MSS).
-    int _minimumPacketCapacityBytes;    //< Minimum bucket capacity = sizeof(worst-case packet header + payload).
-    int64_t _maxPacingRateBytesPerSecond; //< Absolute ceiling on pacing rate (0 = no limit).
-    int64_t _minPacingIntervalMicros;    //< Floor on pacing interval (0 = no floor).
-    int64_t _bucketDurationMicros;       //< Duration of the token bucket refill window.
-    double _tokens;                      //< Current token count (bytes).
-    double _capacity;                    //< Maximum token count (bucket depth in bytes).
-    int64_t _lastRefillMicros;           //< Timestamp of the most recent Refill call.
+    int _sendQuantumBytes;              //< Minimum send unit in bytes; typically equals MSS, derived from config or MSS fallback.
+    int _minimumPacketCapacityBytes;    //< Minimum bucket capacity in bytes = sizeof(worst-case packet: header + max payload).
+    int64_t _maxPacingRateBytesPerSecond; //< Absolute ceiling on pacing rate in bytes/s; 0 means no limit.
+    int64_t _minPacingIntervalMicros;    //< Floor on pacing interval in microseconds; 0 means no floor.
+    int64_t _bucketDurationMicros;       //< Duration of the token bucket refill window in microseconds.
+    double _tokens;                      //< Current token count in bytes; decremented on consume, incremented on refill.
+    double _capacity;                    //< Maximum token count in bytes (bucket depth); ceiling for _tokens.
+    int64_t _lastRefillMicros;           //< Timestamp in microseconds of the most recent Refill call.
 };
 
 } // namespace ucp

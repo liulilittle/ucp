@@ -29,6 +29,8 @@
 #include "ucp/ucp_network.h"
 #include "ucp/ucp_types.h"
 
+#include "ucp/ucp_vector.h"
+#include "ucp/ucp_memory.h"
 #include <cstdint>
 #include <functional>
 #include <future>
@@ -37,10 +39,8 @@
 #include <queue>
 #include <unordered_map>
 #include <unordered_set>
-#include <vector>
 #include <atomic>
 #include <condition_variable>
-#include <string>
 
 namespace ucp {
 
@@ -120,7 +120,7 @@ public:
     uint32_t SequenceNumber = 0;     //< Sequence number assigned to this segment.
     uint16_t FragmentTotal = 0;      //< Total fragments in the logical message (1 = single-fragment).
     uint16_t FragmentIndex = 0;      //< Zero-based index of this fragment within the message.
-    std::vector<uint8_t> Payload;    //< Application payload bytes.
+    ucp::vector<uint8_t> Payload;    //< Application payload bytes.
     bool InFlight = false;           //< Whether this segment is currently in flight (sent but not acked).
     bool Acked = false;              //< Whether this segment has been acknowledged by the peer.
     bool NeedsRetransmit = false;    //< Whether this segment is marked for retransmission.
@@ -145,6 +145,9 @@ public:
 /** @brief Metadata extracted from the FEC fragment header of a data packet. */
 class FecFragmentMetadata {
 public:
+    FecFragmentMetadata() : FragmentTotal(0), FragmentIndex(0) {}
+    FecFragmentMetadata(uint16_t total, uint16_t index) : FragmentTotal(total), FragmentIndex(index) {}
+
     uint16_t FragmentTotal = 0;   //< Total fragments in the FEC-encoded message.
     uint16_t FragmentIndex = 0;   //< Zero-based fragment index within the FEC group.
 };
@@ -163,13 +166,13 @@ public:
     uint32_t SequenceNumber = 0;      //< Sequence number of the received data.
     uint16_t FragmentTotal = 0;       //< Total fragments in the message.
     uint16_t FragmentIndex = 0;       //< Zero-based fragment index.
-    std::vector<uint8_t> Payload;     //< Received application payload bytes.
+    ucp::vector<uint8_t> Payload;     //< Received application payload bytes.
 };
 
 /** @brief A consecutive chunk of in-order received data queued for application delivery. */
 class ReceiveChunk {
 public:
-    std::vector<uint8_t> Buffer;   //< Contiguous byte buffer of received data.
+    ucp::vector<uint8_t> Buffer;   //< Contiguous byte buffer of received data.
     int Offset = 0;                //< Read offset within the buffer (for partial consumption).
     int Count = 0;                 //< Number of valid bytes in the buffer.
 };
@@ -317,7 +320,7 @@ private:
     int ProcessPiggybackedAck(uint32_t ackNumber, int64_t nowMicros);
     void SendControl(UcpPacketType type, int flags);
     void SendAckPacket(int flags, int64_t overrideEchoTimestamp);
-    void SendNak(const std::vector<uint32_t>& missing);
+    void SendNak(const ucp::vector<uint32_t>& missing);
     void ScheduleAck();
 
     // === Send queue management ===
@@ -327,7 +330,7 @@ private:
 
     // === Receive queue management ===
 
-    void EnqueuePayload(std::vector<uint8_t> payload);
+    void EnqueuePayload(ucp::vector<uint8_t> payload);
 
     // === Timer management ===
 
@@ -346,11 +349,11 @@ private:
 
     static void ValidateBuffer(const uint8_t* buffer, int offset, int count, int bufferLen);
     static uint64_t PackSackBlockKey(uint32_t start, uint32_t end);
-    static uint32_t GetHighestSackEnd(const std::vector<SackBlock>& blocks);
-    static void SortSackBlocks(const std::vector<SackBlock>& blocks, std::vector<SackBlock>& sorted);
+    static uint32_t GetHighestSackEnd(const ucp::vector<SackBlock>& blocks);
+    static void SortSackBlocks(const ucp::vector<SackBlock>& blocks, ucp::vector<SackBlock>& sorted);
     static bool IsReportedSackHole(uint32_t sequenceNumber, uint32_t cumulativeAckNumber,
-                                    const std::vector<SackBlock>& sackBlocks);
-    static int GetMaxContiguousLossRun(const std::vector<uint32_t>& sequenceNumbers);
+                                    const ucp::vector<SackBlock>& sackBlocks);
+    static int GetMaxContiguousLossRun(const ucp::vector<uint32_t>& sequenceNumbers);
 
     // === SACK-based fast retransmit ===
 
@@ -371,7 +374,7 @@ private:
 
     // === Debug logging ===
 
-    void TraceLog(const std::string& message);
+    void TraceLog(const ucp::string& message);
 
     // === ACK validation ===
 
@@ -381,8 +384,8 @@ private:
     // === Loss classification ===
 
     bool IsCongestionLoss(uint32_t sequenceNumber, int64_t sampleRttMicros, int64_t nowMicros, int contiguousLossCount);
-    bool ClassifyLosses(const std::vector<uint32_t>& sequenceNumbers, int64_t nowMicros, int64_t sampleRttMicros);
-    bool ClassifyLosses(const std::vector<uint32_t>& sequenceNumbers, int64_t nowMicros, int64_t sampleRttMicros, int contiguousLossCount);
+    bool ClassifyLosses(const ucp::vector<uint32_t>& sequenceNumbers, int64_t nowMicros, int64_t sampleRttMicros);
+    bool ClassifyLosses(const ucp::vector<uint32_t>& sequenceNumbers, int64_t nowMicros, int64_t sampleRttMicros, int contiguousLossCount);
 
     int64_t GetLossClassifierWindowMicros();
     void PruneLossEvents(int64_t nowMicros, int64_t windowMicros);
@@ -392,11 +395,11 @@ private:
 
     // === FEC recovery ===
 
-    void TryRecoverFecAround(uint32_t receivedSequenceNumber, std::vector<std::vector<uint8_t>>& readyPayloads);
-    int StoreRecoveredFecPackets(const std::vector<std::pair<uint32_t, std::vector<uint8_t>>>* recoveredPackets,
-                                   std::vector<std::vector<uint8_t>>& readyPayloads);
-    bool StoreRecoveredFecSegment(uint32_t recoveredSeq, std::vector<uint8_t> recovered);
-    void DrainReadyPayloads(std::vector<std::vector<uint8_t>>& readyPayloads);
+    void TryRecoverFecAround(uint32_t receivedSequenceNumber, ucp::vector<ucp::vector<uint8_t>>& readyPayloads);
+    int StoreRecoveredFecPackets(const ucp::vector<std::pair<uint32_t, ucp::vector<uint8_t>>>* recoveredPackets,
+                                   ucp::vector<ucp::vector<uint8_t>>& readyPayloads);
+    bool StoreRecoveredFecSegment(uint32_t recoveredSeq, ucp::vector<uint8_t> recovered);
+    void DrainReadyPayloads(ucp::vector<ucp::vector<uint8_t>>& readyPayloads);
     void ClearMissingReceiveState(uint32_t sequenceNumber);
 
     // === NAK generation ===
@@ -407,7 +410,7 @@ private:
     int64_t GetAdaptiveNakReorderGraceMicros();
     void MarkNakIssued(uint32_t sequenceNumber);
     int64_t GetMissingFirstSeenMicros(uint32_t sequenceNumber);
-    void CollectMissingForNak(std::vector<uint32_t>& missing, int64_t nowMicros);
+    void CollectMissingForNak(ucp::vector<uint32_t>& missing, int64_t nowMicros);
 
     // === Send window helpers ===
 
@@ -560,7 +563,7 @@ private:
     int m_fastRetransmissions = 0;        //< Packets retransmitted via fast retransmit.
     int m_timeoutRetransmissions = 0;     //< Packets retransmitted after RTO expiry.
 
-    std::vector<int64_t> m_rttSamplesMicros;   //< Ring buffer of recent RTT samples (max MAX_RTT_SAMPLES).
+    ucp::vector<int64_t> m_rttSamplesMicros;   //< Ring buffer of recent RTT samples (max MAX_RTT_SAMPLES).
 
     // === NAK rate limiting ===
 

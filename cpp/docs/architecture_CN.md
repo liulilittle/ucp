@@ -1,6 +1,6 @@
 # PPP PRIVATE NETWORK™ X — 通用通信协议 (UCP) — C++ 架构
 
-**协议标识: `ppp+ucp`** — 本文档解析 UCP 协议引擎的 C++ 运行时架构，涵盖分层设计、UcpPcb 状态管理、SerialQueue Worker Thread 串行模型、公平队列服务端调度、PacingController Token Bucket 设计、BBRv2 拥塞控制内核、UcpFecCodec Reed-Solomon GF(256) 编解码器、入站/出站路径完整数据流、以及 UcpDatagramNetwork 网路驱动模型。
+**协议标识: `ppp+ucp`** — 本文档说明 UCP 协议引擎的 C++ 运行时架构，涵盖分层设计、UcpPcb 状态管理、SerialQueue Worker Thread 串行模型、公平队列服务端调度、PacingController Token Bucket 设计、BBRv2 拥塞控制内核、UcpFecCodec Reed-Solomon GF(256) 编解码器、入站/出站路径完整数据流、以及 UcpDatagramNetwork 网路驱动模型。
 
 ---
 
@@ -341,7 +341,7 @@ flowchart TD
 
 ### 网络路径分类器 (C++ 实现)
 
-BBRv2 使用 200ms 滑动窗口（`kNetworkClassifierWindowDurationMicros = 200000`）分析 RTT、抖动和丢包率特征：
+BBRv2 使用 200ms 滑动窗口（`kNetworkClassifierWindowDurationMicros = 200000`）评估 RTT、抖动和丢包率特征：
 
 | 网络类型 | C++ 阈值条件 | BBR 自适应行为 |
 |---|---|---|

@@ -1,5 +1,7 @@
 set(TEST_SOURCES
     test_main.cpp
+    ucp_core_tests.cpp
+    network_simulator.cpp
 )
 
 add_executable(ucp_tests ${TEST_SOURCES})

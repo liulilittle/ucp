@@ -147,9 +147,9 @@ kModerateProbeGain         = 1.50;   // 中度探测增益
 
 ```mermaid
 flowchart TD
-    Classifier["200ms Sliding Window<br/>kNetworkClassifierWindowDurationMicros=200000"] --> Analyze["Analyze:<br/>AvgRttMicros, LossRate,<br/>JitterMicros, ThroughputRatio"]
+    Classifier["200ms Sliding Window<br/>kNetworkClassifierWindowDurationMicros=200000"] --> ExamineNode["Examine:<br/>AvgRttMicros, LossRate,<br/>JitterMicros, ThroughputRatio"]
     
-    Analyze --> LAN{"RTT < 5ms<br/>Jitter < 3ms?"}
+    ExamineNode --> LAN{"RTT < 5ms<br/>Jitter < 3ms?"}
     LAN -->|"Yes"| LowLatencyLAN["LowLatencyLAN"]
     LAN -->|"No"| Mobile{"LossRate > 3%<br/>Jitter > 20ms?"}
     Mobile -->|"Yes"| MobileUnstable["MobileUnstable"]

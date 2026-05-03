@@ -2,7 +2,7 @@
 
 [English](architecture.md) | [文档索引](index_CN.md)
 
-**协议标识: `ppp+ucp`** — 本文档解析 UCP 协议引擎的内部运行时架构，涵盖六层分层设计、每连接 UcpPcb 状态管理、Connection-ID 驱动的 IP 无关会话追踪、SerialQueue 串行执行模型、公平队列服务端调度、PacingController Token Bucket 设计、BBRv2 拥塞控制内核、FEC Reed-Solomon GF(256) 编解码器、入站/出站数据包流经协议栈的完整路径、确定性网络模拟器架构以及测试与验证流程。
+**协议标识: `ppp+ucp`** — 本文档说明 UCP 协议引擎的内部运行时架构，涵盖六层分层设计、每连接 UcpPcb 状态管理、Connection-ID 驱动的 IP 无关会话追踪、SerialQueue 串行执行模型、公平队列服务端调度、PacingController Token Bucket 设计、BBRv2 拥塞控制内核、FEC Reed-Solomon GF(256) 编解码器、入站/出站数据包流经协议栈的完整路径、确定性网络模拟器架构以及测试与验证流程。
 
 ---
 
@@ -83,7 +83,7 @@ sequenceDiagram
     Net->>Net: "从公共头提取ConnId"
     Net->>PCB: "分发到对应SerialQueue"
     PCB->>Codec: "解码包+HasAckNumber检查"
-    Codec-->>PCB: "解析包结构"
+    Codec-->>PCB: "说明包结构"
     PCB->>PCB: "ProcessPiggybackedAck"
     PCB->>PCB: "更新累积ACK释放发送缓冲"
     PCB->>PCB: "处理SACK块→快重传检查"
@@ -342,7 +342,7 @@ flowchart LR
 
 ### 网络路径分类器
 
-BBRv2 使用 200ms 滑动窗口分析 RTT、抖动、丢包率、吞吐比率等特征，将路径分类为五种类型以调整 BBR 行为：
+BBRv2 使用 200ms 滑动窗口评估 RTT、抖动、丢包率、吞吐比率等特征，将路径分类为五种类型以调整 BBR 行为：
 
 | 网络类型 | 特征 | BBR 自适应行为 |
 |---|---|---|

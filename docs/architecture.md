@@ -2,7 +2,7 @@
 
 [中文](architecture_CN.md) | [Documentation Index](index.md)
 
-**Protocol designation: `ppp+ucp`** — This document provides a deep dive into UCP's internal runtime architecture, covering the six-layer design, per-connection UcpPcb state management, Connection-ID-driven IP-agnostic session tracking, SerialQueue strand-based execution, fair-queue server scheduling, PacingController token bucket design, BBRv2 congestion control internals, FEC Reed-Solomon GF(256) codec, complete inbound/outbound packet flow through the protocol stack, deterministic network simulator architecture, and test/validation flow.
+**Protocol designation: `ppp+ucp`** — This document provides a comprehensive overview of UCP's internal runtime architecture, covering the six-layer design, per-connection UcpPcb state management, Connection-ID-driven IP-agnostic session tracking, SerialQueue strand-based execution, fair-queue server scheduling, PacingController token bucket design, BBRv2 congestion control internals, FEC Reed-Solomon GF(256) codec, complete inbound/outbound packet flow through the protocol stack, deterministic network simulator architecture, and test/validation flow.
 
 ---
 
