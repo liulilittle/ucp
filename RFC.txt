@@ -1,0 +1,2212 @@
+SupersocksR ORG (SRO)                              PPP PRIVATE NETWORK™ X
+Request for Comments:  UCP-1
+Category: Standards Track
+
+                     Universal Communication Protocol
+                                  (UCP)
+
+                             Version 1.0
+
+                             May 2026
+
+
+Abstract
+
+   This document specifies the Universal Communication Protocol (UCP), a
+   reliable, in-order, connection-oriented transport protocol designed to
+   operate over unreliable datagram transports such as UDP.  UCP combines
+   a TCP-style three-way handshake with cryptographically random Initial
+   Sequence Numbers (ISNs), cumulative acknowledgment with QUIC-style
+   Selective Acknowledgment (SACK) blocks, NAK-based receiver-side loss
+   reporting with multi-tier confidence classification, RFC 6298 RTO
+   computation with gentle multiplicative backoff, BBRv2-style congestion
+   control with adaptive path classification, Reed-Solomon Forward Error
+   Correction (FEC) over GF(256), token-bucket pacing, and IP-agnostic
+   connection migration.  The protocol uses a 12-byte common header with
+   all multi-byte integer fields encoded in network byte order (big-
+   endian).  This document defines the wire format for all eight packet
+   types, the connection state machine, the loss detection and recovery
+   algorithms, the congestion control rules, and all protocol constants.
+
+
+Status of This Memo
+
+   This is an Internet Standards Track document.  This document is a
+   product of the PPP PRIVATE NETWORK™ X project.  It represents the
+   consensus of the protocol designers and has been verified against the
+   reference C# implementation.
+
+Copyright Notice
+
+   Copyright (c) 2026 PPP PRIVATE NETWORK™ X.  All rights reserved.
+
+
+
+Table of Contents
+
+   1.  Introduction ...................................................5
+      1.1.  Design Philosophy ........................................5
+      1.2.  Terminology ..............................................7
+   2.  Protocol Overview .............................................8
+      2.1.  Architectural Model ......................................8
+      2.2.  Relationship to TCP and QUIC .............................9
+   3.  Packet Format ................................................10
+      3.1.  Common Header ...........................................10
+      3.2.  Packet Types ...........................................12
+      3.3.  Packet Flags ...........................................12
+      3.4.  Integer Encoding (Big-Endian) ...........................14
+      3.5.  SYN Packet (Type 0x01) ..................................15
+      3.6.  SYN-ACK Packet (Type 0x02) ..............................16
+      3.7.  ACK Packet (Type 0x03) ..................................17
+      3.8.  NAK Packet (Type 0x04) ..................................19
+      3.9.  DATA Packet (Type 0x05) .................................20
+      3.10. FIN Packet (Type 0x06) ..................................22
+      3.11. RST Packet (Type 0x07) ..................................23
+      3.12. FEC_REPAIR Packet (Type 0x08) ...........................23
+      3.13. Piggybacked ACK Mechanism ...............................25
+   4.  Connection Management ........................................26
+      4.1.  Connection State Machine ................................26
+      4.2.  Three-Way Handshake .....................................28
+      4.3.  Random Initial Sequence Number (ISN) ....................29
+      4.4.  Connection-ID-Based Session Tracking ....................30
+      4.5.  Connection Migration (IP-Agnostic) ......................31
+      4.6.  PAWS (Protection Against Wrapped Sequences) .............32
+      4.7.  Graceful Close (FIN) ....................................33
+      4.8.  Abrupt Close (RST) ......................................34
+   5.  Reliable Delivery and Acknowledgment .........................35
+      5.1.  Cumulative ACK ..........................................35
+      5.2.  Selective Acknowledgment (SACK) .........................36
+      5.3.  Piggybacked ACK .........................................37
+      5.4.  Delayed ACK .............................................38
+   6.  Loss Detection and Recovery ..................................38
+      6.1.  Duplicate ACK Fast Retransmit ...........................39
+      6.2.  SACK-Based Fast Retransmit ..............................40
+      6.3.  NAK-Based Loss Reporting ................................42
+         6.3.1.  Tiered Confidence NAK ..............................43
+      6.4.  RTO Timeout Recovery ....................................45
+      6.5.  Tail-Loss Probe (TLP) ...................................46
+      6.6.  Early Retransmit (RFC 5827) .............................46
+      6.7.  Loss Classification: Congestion vs. Random ..............47
+   7.  RTO Computation ..............................................47
+      7.1.  RFC 6298 Smoothed RTT Estimation ........................48
+      7.2.  RTO Backoff .............................................49
+   8.  Congestion Control ...........................................49
+      8.1.  BBRv2 State Machine .....................................50
+         8.1.1.  Startup ............................................52
+         8.1.2.  Drain ..............................................53
+         8.1.3.  ProbeBW ............................................53
+         8.1.4.  ProbeRTT ...........................................54
+      8.2.  BBR Parameters and Gains ................................56
+      8.3.  Bandwidth Estimation (Max-Filter) .......................57
+      8.4.  RTT Estimation and Percentiles ..........................58
+      8.5.  Congestion Window (CWND) Computation ....................60
+      8.6.  Inflight Guardrails .....................................61
+      8.7.  Adaptive Pacing Gain Decision Tree ......................61
+      8.8.  Network Path Classification .............................63
+      8.9.  Loss Classification for Congestion Control ..............65
+      8.10. Loss-Tiered Pacing Gains ................................66
+      8.11. Fast Recovery Pacing ....................................67
+   9.  Pacing .......................................................67
+      9.1.  Token-Bucket Pacing Controller ..........................68
+   10. Forward Error Correction (FEC) ...............................69
+      10.1. Galois Field GF(256) Arithmetic .........................69
+      10.2. FEC Encode ..............................................70
+      10.3. FEC Decode and Recovery .................................71
+      10.4. Adaptive FEC Redundancy .................................72
+      10.5. FEC Group Size and Repair Count .........................73
+   11. Flow Control .................................................73
+      11.1. Advertised Receive Window ...............................73
+   12. Server-Side Scheduling .......................................74
+      12.1. Fair-Queue Credit Scheduling ............................74
+   13. Fragmentation ................................................75
+   14. Quality of Service (QoS) Prioritization ......................75
+   15. Protocol Constants ...........................................76
+      15.1. Time Unit Conversions ...................................76
+      15.2. Packet Format Constants .................................77
+      15.3. Window and Buffer Sizes .................................78
+      15.4. RTO Constants ...........................................79
+      15.5. BBR Congestion Control Constants ........................80
+      15.6. Network Classifier Constants ............................82
+      15.7. FEC Constants ...........................................83
+      15.8. Loss Detection and NAK Constants ........................83
+      15.9. Connection Management Constants .........................85
+      15.10. Wire-Format Type and Flag Values .......................86
+   16. Security Considerations ......................................87
+   17. IANA Considerations ..........................................87
+   18. References ...................................................87
+   Appendix A.  Pseudocode for RTO Update ...........................89
+   Appendix B.  Pseudocode for BBR State Machine Dispatch ...........90
+   Appendix C.  Complete Constant Value Reference ...................92
+   Acknowledgments ..................................................95
+   Authors' Addresses ...............................................95
+
+
+
+1.  Introduction
+
+   The Universal Communication Protocol (UCP) is a transport-layer
+   protocol providing reliable, in-order delivery of application data
+   over unreliable datagram transports, most commonly UDP.  UCP is
+   designed for deployment scenarios ranging from low-latency datacenter
+   interconnects (sub-millisecond RTTs at 10 Gbps) through mobile
+   wireless paths (high jitter, burst loss, handover events at 4G/5G
+   speeds) to satellite and long-fat-pipe networks (600 ms RTT, steady
+   background loss).  A single UCP implementation adapts its behavior to
+   the path characteristics without operator tuning.
+
+   UCP provides:
+
+   o  Reliable, in-order byte-stream delivery with message fragmentation.
+
+   o  Connection-oriented communication with 32-bit connection
+      identifiers for demultiplexing independent of IP 5-tuples.
+
+   o  A three-way handshake using cryptographically random ISNs for
+      off-path injection defense.
+
+   o  Cumulative acknowledgment with QUIC-style SACK blocks for precise
+      out-of-order reception reporting.
+
+   o  NAK-based explicit loss signaling with tiered confidence levels
+      (Standard, Medium, High) that adapt to the degree of reordering.
+
+   o  Duplicate-ACK-triggered fast retransmit (threshold = 3).
+
+   o  SACK-based fast retransmit (threshold = 2 observations), matching
+      QUIC behavior.
+
+   o  RFC 6298 RTO computation (SRTT + 4*RTTVAR) with 1.2x backoff.
+
+   o  BBRv2 congestion control with adaptive path classification.
+
+   o  Token-bucket pacing that matches the BBR-computed pacing rate.
+
+   o  Reed-Solomon FEC over GF(256) with adaptive redundancy.
+
+   o  Piggybacked ACK support on all packet types.
+
+   o  IP-agnostic connection migration through Connection-ID-based
+      session tracking.
+
+   o  PAWS (Protection Against Wrapped Sequences) timestamp validation.
+
+   o  Fair-queue server scheduling for per-connection bandwidth
+      isolation.
+
+
+1.1.  Design Philosophy
+
+   UCP is designed around the following principles:
+
+   Microsecond-Precision Timing.  All internal time values and the wire-
+   format timestamp field use microseconds rather than milliseconds.
+   This is necessary because: (a) RTTs on LAN and datacenter paths are
+   sub-millisecond, requiring microsecond precision for meaningful
+   measurement; (b) BBR pacing intervals at 10 Gbps are often 100-1000
+   microseconds; and (c) the delayed-ACK timer at 100 microseconds would
+   be impossible to express in millisecond units.
+
+   No IP Fragmentation.  The Maximum Segment Size (MSS) of 1220 bytes is
+   chosen to fit within the IPv6 minimum MTU (1280 bytes) minus the
+   40-byte IPv6 header and 8-byte UDP header, leaving a 12-byte safety
+   margin for IP options and tunneling headers.  Avoiding IP
+   fragmentation is critical for UDP-based transports because a single
+   lost fragment discards the entire datagram.
+
+   Connection-ID Demultiplexing.  UCP identifies connections by a 32-bit
+   Connection ID rather than the traditional IP 4-tuple.  This enables
+   connection migration: a mobile device switching from WiFi to cellular
+   changes its source IP address, but the UCP connection survives because
+   the Connection ID remains constant.  The 32-bit Connection ID supports
+   up to approximately 4 billion simultaneous connections per endpoint.
+
+   Model-Based Congestion Control.  UCP uses BBRv2, which models the
+   path as a pipe with a bottleneck bandwidth (BtlBw) and round-trip
+   propagation time (RTprop).  This is fundamentally different from loss-
+   based algorithms (Reno, CUBIC) that interpret every loss as congestion.
+   On modern paths with random loss (wireless, noisy links), BBR maintains
+   high throughput where loss-based CC would collapse.
+
+   Aggressive Loss Recovery.  UCP employs a three-tier loss recovery
+   strategy: (1) SACK-based fast retransmit catches most losses within
+   2-3 RTTs without waiting for RTO; (2) NAK-based receiver push
+   explicitly signals missing packets for immediate retransmit; (3) RTO
+   timeout is the last resort.  The RTO backoff factor is 1.2x (not TCP's
+   2.0x) because NAK and SACK handle most loss.
+
+   FEC for High-Latency Paths.  On paths with RTT > 80 ms, retransmitting
+   a lost packet costs at least one RTT of additional latency.  FEC
+   recovery can reconstruct a lost packet from parity data that has
+   already arrived, eliminating the retransmission round-trip.
+
+   Big-Endian Wire Format.  All multi-byte integer fields on the wire are
+   encoded in network byte order (big-endian) using explicit shift-and-
+   mask operations.  This guarantees identical wire format regardless of
+   whether the host CPU is x86 (little-endian), ARM (configurable), or
+   RISC-V.
+
+
+1.2.  Terminology
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this
+   document are to be interpreted as described in RFC 2119 [RFC2119].
+
+   This document uses the following notation for multi-byte fields:
+
+   uint8   An 8-bit unsigned integer (1 byte).
+   uint16  A 16-bit unsigned integer (2 bytes, big-endian).
+   uint32  A 32-bit unsigned integer (4 bytes, big-endian).
+   uint48  A 48-bit unsigned integer (6 bytes, big-endian).
+
+   The following protocol-specific terms are used throughout:
+
+   MSS        Maximum Segment Size (1220 bytes).
+   ISN        Initial Sequence Number (random 32-bit value).
+   SACK       Selective Acknowledgment block [Start, End).
+   NAK        Negative Acknowledgment, listing missing sequences.
+   RTO        Retransmission Timeout.
+   SRTT       Smoothed Round-Trip Time.
+   RTTVAR     Round-Trip Time Variation.
+   BtlBw      Bottleneck Bandwidth (bytes per second).
+   RTprop     Round-Trip Propagation time (minimum RTT).
+   BDP        Bandwidth-Delay Product: BtlBw * RTprop.
+   CWND       Congestion Window (bytes).
+   TLP        Tail-Loss Probe.
+   PAWS       Protection Against Wrapped Sequences.
+   FEC        Forward Error Correction.
+   PCB        Protocol Control Block (per-connection state object).
+
+
+2.  Protocol Overview
+
+2.1.  Architectural Model
+
+   UCP operates over an unreliable datagram transport, typically UDP.
+   Each UCP endpoint maintains one or more Protocol Control Blocks
+   (PCBs), each representing a single logical connection identified by a
+   unique 32-bit Connection ID.  A single UDP socket may carry packets
+   for many UCP connections simultaneously; the Connection ID in the
+   packet header is used to demultiplex arriving datagrams to the correct
+   PCB.
+
+   The UCP stack layers are:
+
+   +----------------------------------------------------------+
+   |                    Application                           |
+   +----------------------------------------------------------+
+   |    UcpConnection (SendAsync / ReceiveAsync API)           |
+   +----------------------------------------------------------+
+   |    UcpPcb (Protocol Control Block: state machine,        |
+   |            send buffer, receive reorder buffer,           |
+   |            NAK tracking, SACK generation, loss recovery)  |
+   +----------------------------------------------------------+
+   |    BbrCongestionControl (pacing rate, CWND computation)  |
+   |    PacingController (token-bucket rate enforcement)       |
+   |    UcpRtoEstimator (RFC 6298 RTO computation)             |
+   |    UcpFecCodec (Reed-Solomon FEC encode/decode)           |
+   +----------------------------------------------------------+
+   |    UcpPacketCodec (big-endian packet serialization)       |
+   +----------------------------------------------------------+
+   |    ITransport (UDP socket abstraction)                   |
+   +----------------------------------------------------------+
+
+   Packets are dispatched through a SerialQueue per connection to avoid
+   lock contention between application API calls and network events.
+   All protocol state mutation is serialized by a per-connection lock
+   (referred to as _sync in the reference implementation).
+
+
+2.2.  Relationship to TCP and QUIC
+
+   UCP draws design inspiration from both TCP and QUIC while making
+   different trade-offs for its target deployment scenarios.
+
+   From TCP, UCP inherits:
+   o  Three-way handshake with random ISN
+   o  Cumulative ACK semantics
+   o  Duplicate-ACK fast retransmit (threshold = 3)
+   o  RFC 6298 RTO computation
+   o  PAWS timestamp validation
+
+   From QUIC, UCP inherits:
+   o  Connection-ID-based session identification
+   o  QUIC-style SACK block encoding [Start, End)
+   o  SACK-based fast retransmit (threshold = 2)
+   o  IP-agnostic connection migration
+   o  Piggybacked ACK on all packet types
+   o  BBRv2 congestion control with ProbeBW gain cycling
+
+   Novel UCP contributions include:
+   o  NAK-based loss reporting with tiered confidence (Standard/Medium/
+      High) adapting the reorder grace period
+   o  Reed-Solomon FEC over GF(256) with adaptive redundancy
+   o  Three-tier congestion classifier (rate drop + RTT growth + loss
+      observation) with composite scoring
+   o  Network path classification into six types for adaptive gain
+      policies
+   o  Multi-tier loss-conditional pacing gains
+   o  Gentle RTO backoff (1.2x vs. TCP's 2.0x)
+   o  Percentile-based RTT modeling (P10, P25, P30) for CWND computation
+
+
+
+3.  Packet Format
+
+   Every UCP packet begins with a 12-byte common header, followed by
+   type-specific fields and an optional payload.  All multi-byte integer
+   fields are encoded in network byte order (big-endian): the most
+   significant byte (MSB) appears at the lowest offset.  The Maximum
+   Segment Size (MSS) is 1220 bytes.  This value fits the IPv6 minimum
+   MTU (1280 bytes) with a 12-byte safety margin for IP options and
+   tunnel headers, and avoids IP fragmentation on 1500-byte Ethernet MTU.
+
+
+3.1.  Common Header
+
+   The common header occupies the first 12 bytes of every UCP packet:
+
+    0                   1                   2                   3
+    0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |     Type      |     Flags     |                               |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+                               |
+   |                     ConnectionId (uint32)                     |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                                                               |
+   +                                                               |
+   |                     Timestamp (uint48)                        |
+   +                                                               |
+   |                                                               |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+   Type (byte 0):  1 byte.  Identifies the packet type (see Section 3.2).
+   Flags (byte 1): 1 byte.  Bitmask of processing flags (see Section
+   3.3).  ConnectionId (bytes 2-5): 4 bytes, uint32, big-endian.
+   Identifies the logical connection.  Timestamp (bytes 6-11): 6 bytes,
+   uint48, big-endian, microseconds.  Sender's monotonic clock value
+   echoed back in ACK EchoTimestamp for RTT measurement.  48 bits yields
+   ~8,925 years of microsecond range.  The value is masked to
+   0x0000FFFFFFFFFFFF before writing.
+
+   Common Header Size Constant:
+      COMMON_HEADER_SIZE = 1 + 1 + 4 + 6 = 12 bytes
+
+
+
+3.2.  Packet Types
+
+   The Type field identifies the packet type.  Defined values:
+
+      +--------+----------+--------------------------------------+
+      | Value  | Name     | Description                          |
+      +--------+----------+--------------------------------------+
+      | 0x01   | SYN      | Connection request (handshake step 1)|
+      | 0x02   | SYN-ACK  | Connection acceptance (step 2)       |
+      | 0x03   | ACK      | Cumulative ACK with SACK blocks      |
+      | 0x04   | NAK      | Negative ACK: missing sequence list  |
+      | 0x05   | DATA     | Application data + piggybacked ACK   |
+      | 0x06   | FIN      | Graceful close request               |
+      | 0x07   | RST      | Hard connection reset                |
+      | 0x08   | FEC_     | FEC repair packet (parity data)      |
+      |        |   REPAIR |                                      |
+      +--------+----------+--------------------------------------+
+
+   Unknown Type values MUST be silently discarded.
+
+
+3.3.  Packet Flags
+
+   The Flags field is a bitmask.  Defined flags:
+
+      +--------+----------+-------+---------------------------------+
+      | Bit(s) | Value    | Name  | Description                     |
+      +--------+----------+-------+---------------------------------+
+      | 0      | 0x01     | Need- | Receiver SHOULD send immediate  |
+      |        |          | Ack   | ACK (bypass delayed-ACK timer)  |
+      | 1      | 0x02     | Re-   | Packet is a retransmission      |
+      |        |          | trans-| (Karn's algorithm: no RTT samp) |
+      |        |          | mit   |                                 |
+      | 2      | 0x04     | Fin-  | FIN has been acknowledged       |
+      |        |          | Ack   | (teardown handshake)            |
+      | 3      | 0x08     | Has-  | Packet carries piggybacked ACK  |
+      |        |          | Ack-  | fields after type-specific hdr  |
+      |        |          | Number|                                 |
+      | 4-5    | 0x30     | Pri-  | 2-bit QoS priority (mask 0x30)  |
+      |        | (mask)   | ority | 0=Background,1=Normal,          |
+      |        |          |       | 2=Interactive,3=Urgent          |
+      +--------+----------+-------+---------------------------------+
+
+   The NeedAck flag bypasses the delayed-ACK timer.  The Retransmit flag
+   enables Karn's algorithm.  HasAckNumber extends the packet header with
+   piggybacked ACK fields.  Flags may be combined by bitwise OR.
+
+
+3.4.  Integer Encoding (Big-Endian)
+
+   Multi-byte fields MUST be big-endian.  Encoding/decoding uses explicit
+   shift-and-mask operations (not platform-dependent BitConverter):
+
+   uint16: Write/Read using shifts of 8 bits.
+   uint32: Write/Read using shifts of 24, 16, 8 bits.
+   uint48: Write/Read using shifts of 40, 32, 24, 16, 8 bits.
+           Input masked to 0x0000FFFFFFFFFFFF before write.
+           Result cast to signed Int64 after read (sign bit at bit 47).
+
+
+3.5.  SYN Packet (Type 0x01)
+
+    0                   1                   2                   3
+    0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |    0x01       |    Flags      |                               |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+                               |
+   |                    ConnectionId (uint32)                      |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                                                               |
+   +                    Timestamp (uint48)                         +
+   |                                                               |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                 SequenceNumber (uint32)                       |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |   [AckNumber (uint32)] - present if HasAckNumber = 0x08       |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+   Offsets: [0]=0x01, [1]=Flags, [2:5]=ConnectionId, [6:11]=Timestamp,
+   [12:15]=SequenceNumber (client ISN), [16:19]=AckNumber (optional,
+   for re-SYN).  Size: 16 bytes (20 with ACK).
+
+
+3.6.  SYN-ACK Packet (Type 0x02)
+
+   Same wire format as SYN, but Type=0x02.  SequenceNumber carries the
+   server's ISN.  The HasAckNumber flag is typically set; AckNumber
+   echoes the client's ISN.  Size: 20 bytes.
+
+
+3.7.  ACK Packet (Type 0x03)
+
+    0                   1                   2                   3
+    0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |    0x03       |    Flags      |                               |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+                               |
+   |                    ConnectionId (uint32)                      |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                                                               |
+   +                    Timestamp (uint48)                         +
+   |                                                               |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                   AckNumber (uint32)                          |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                 SackBlockCount (uint16)                       |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                                                               |
+   +             SACK Blocks (N x 8 bytes each)                    +
+   .                                                               .
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                   WindowSize (uint32)                         |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                                                               |
+   +                 EchoTimestamp (uint48)                        +
+   |                                                               |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+   Each SACK block: Start (uint32, inclusive) + End (uint32, exclusive).
+   ACK_FIXED_SIZE = 28 bytes.  SACK_BLOCK_SIZE = 8 bytes.  Total = 28 +
+   (SackBlockCount * 8).  Max SACK blocks = (1220-28)/8 = 149, but
+   default limit is 2 (DEFAULT_ACK_SACK_BLOCK_LIMIT).  Each SACK range
+   sent at most 2 times (MAX_SACK_SEND_COUNT = 2).  EchoTimestamp enables
+   one-sided RTT: RTT_sample = now - EchoTimestamp.
+
+
+3.8.  NAK Packet (Type 0x04)
+
+   Wire format: Common header (12) + AckNumber (4, uint32: cumulative
+   ACK) + MissingCount (2, uint16) + MissingSequences (M * 4, uint32
+   each).  NAK_FIXED_SIZE = 18 bytes.  Max 256 missing entries per NAK
+   (MAX_NAK_SEQUENCES_PER_PACKET), yielding max 1042 bytes < 1220 MSS.
+   NAK rate-limit: 1024 per SRTT window (MAX_NAKS_PER_RTT), at most one
+   re-NAK per sequence per 5000 us (NAK_REPEAT_INTERVAL_MICROS).
+
+
+3.9.  DATA Packet (Type 0x05)
+
+   Basic header (no piggybacked ACK): Common header (12) + SequenceNumber
+   (4) + FragmentTotal (2) + FragmentIndex (2) + Payload.  Total header
+   = 20 bytes.  With piggybacked ACK (HasAckNumber=0x08): additional
+   AckNumber (4) + SackBlockCount (2) + SACK blocks (N*8) + WindowSize
+   (4) + EchoTimestamp (6).  DATA_HEADER_SIZE_WITH_ACK = 36 bytes
+   (excludes variable SACK blocks).  MAX_PAYLOAD_SIZE = 1200 bytes (MSS
+   minus 20-byte header).  FragmentTotal/FragmentIndex support message
+   fragmentation for payloads exceeding 1200 bytes.
+
+
+3.10.  FIN Packet (Type 0x06)
+
+   Control packet wire format: Common header + optional SequenceNumber
+   + optional AckNumber (when HasAckNumber flag set).  Total: 12-20
+   bytes.  Initiates graceful connection close.
+
+
+3.11.  RST Packet (Type 0x07)
+
+   Control packet wire format.  Typically 12 bytes (common header only).
+   Immediately aborts the connection; receiver transitions to Closed.
+
+
+3.12.  FEC_REPAIR Packet (Type 0x08)
+
+   Wire format: Common header (12) + GroupId (4, uint32: group base
+   sequence) + GroupIndex (1, uint8: 0-based repair index) + Payload.
+   Minimum: 17 bytes.  Payload: length table (groupSize * 2 bytes,
+   big-endian uint16 per slot) + GF(256) weighted-XOR parity data.
+
+
+
+3.13.  Piggybacked ACK Mechanism
+
+   The HasAckNumber flag (0x08) extends any packet with ACK information.
+   On DATA packets: AckNumber + SackBlockCount + SACK blocks + WindowSize
+   + EchoTimestamp are appended after FragmentIndex.  On CONTROL packets:
+   only AckNumber is appended (control packets omit SACK, window, and
+   echo for compactness).  The piggybacked ACK is semantically identical
+   to a standalone ACK type 0x03 packet; it saves one round-trip on
+   bidirectional flows.
+
+
+4.  Connection Management
+
+4.1.  Connection State Machine
+
+   A UCP connection progresses through seven states:
+
+                           +------+
+                           | Init |
+                           +------+
+                          /        \
+              (client)   /          \   (server)
+              send SYN  /            \  recv SYN
+                       v              v
+         +----------------+   +----------------------+
+         | HandshakeSyn   |   | HandshakeSynReceived |
+         | Sent           |   |                      |
+         +----------------+   +----------------------+
+                |                       |
+       recv SYN-ACK              recv ACK
+                |                       |
+                v                       v
+         +------------------------------------------+
+         |              Established                  |
+         +------------------------------------------+
+          |                          |
+   (close)|                          |(recv FIN)
+          v                          v
+   +----------------+   +----------------------+
+   | ClosingFinSent |   | ClosingFinReceived   |
+   +----------------+   +----------------------+
+          |                          |
+   FIN-ACK recv              FIN sent & ACKed
+          |                          |
+          v                          v
+   +------------------------------------------+
+   |               Closed                      |
+   +------------------------------------------+
+
+   Init:                    Created, no packets exchanged.
+   HandshakeSynSent:        Client sent SYN; awaiting SYN-ACK.
+   HandshakeSynReceived:    Server received SYN, sent SYN-ACK; awaiting
+                            client's ACK of server ISN.
+   Established:            Three-way handshake complete; bidirectional
+                            data transfer permitted.
+   ClosingFinSent:          Local side sent FIN; may still receive data.
+   ClosingFinReceived:      Peer sent FIN; local may still send data.
+   Closed:                  Terminal state; all resources released.
+
+   Transitions to Closed also occur immediately on RST receipt, internal
+   timeout (DisconnectTimeoutMicros = 4 s), or explicit Abort() call.
+
+
+4.2.  Three-Way Handshake
+
+   Step 1 -- Client SYN:
+       Client generates random ISN_c via CSPRNG and sends:
+           SYN(ConnectionId=C_c, SequenceNumber=ISN_c)
+       Transitions to HandshakeSynSent.
+
+   Step 2 -- Server SYN-ACK:
+       Server receives SYN, records client ISN_c as _nextExpectedSequence,
+       generates random ISN_s, replies:
+           SYN-ACK(ConnectionId=C_c, SequenceNumber=ISN_s,
+                   AckNumber=ISN_c, Flags=HasAckNumber)
+       Transitions to HandshakeSynReceived.
+
+   Step 3 -- Client ACK:
+       Client receives SYN-ACK, records server ISN_s, processes
+       piggybacked ACK, sends:
+           ACK(ConnectionId=C_c, AckNumber=ISN_s)
+       Transitions to Established.  Server transitions to Established
+       upon receiving this ACK.
+
+   Handshake retransmission: SYN retransmitted at RTO intervals with
+   minimum 100 ms between attempts (MIN_HANDSHAKE_WAIT_MILLISECONDS).
+   Must complete within CONNECT_TIMEOUT_MILLISECONDS (5000 ms).
+
+
+4.3.  Random Initial Sequence Number (ISN)
+
+   ISNs are generated using a cryptographically secure PRNG
+   (System.Security.Cryptography.RandomNumberGenerator).  The ISN is a
+   32-bit unsigned integer.  At max throughput of 10 Gbps with 1200-byte
+   payloads (~1,041,667 packets/second), the sequence space wraps in
+   ~4,124 seconds (~69 minutes).  At 100 Mbps, wrap time is ~4.8 days.
+   This exceeds any practical connection lifetime.
+
+   The random ISN prevents off-path injection: an attacker who cannot
+   observe the ISN has a probability of approximately 1 / 2^32 of
+   guessing a valid in-window sequence number.
+
+   Connection IDs are also generated by a separate CSPRNG.  Zero is
+   reserved (never assigned); every valid connection has a non-zero ID.
+
+
+4.4.  Connection-ID-Based Session Tracking
+
+   UCP identifies connections by a 32-bit Connection ID rather than the
+   IP 5-tuple.  Benefits: (1) Demultiplexing without IP binding -- a
+   single UDP socket can carry many connections.  (2) Connection migration
+   -- connection survives IP/port changes (WiFi to cellular).  (3) Load-
+   balancer friendliness -- distribute by hashing Connection ID.
+
+
+4.5.  Connection Migration (IP-Agnostic)
+
+   After the initial handshake, subsequent packets from a different IP or
+   port with a matching Connection ID are accepted.  The PCB's remote
+   endpoint is updated.  When _pathChanged is set, OnPathChange() resets
+   MinRtt, RTT history, classifier windows, and bandwidth growth tracking
+   while preserving BtlBw and pacing rate as a starting point.  This
+   enables mobile handover survival without connection loss.
+
+
+
+4.6.  PAWS (Protection Against Wrapped Sequences)
+
+   UCP implements PAWS analogous to TCP PAWS (RFC 7323).  Each packet
+   carries a 48-bit microsecond Timestamp.  The receiver tracks
+   _largestTimestampSeen, the maximum timestamp observed from this peer
+   across valid packets.  When a packet arrives:
+
+       if (PAWS enabled AND largestSeen > 0 AND
+           largestSeen - packet.Timestamp > PAWS_TIMEOUT_MICROS):
+           REJECT as stale duplicate
+
+   PAWS_TIMEOUT_MICROS = 60,000,000 us (60 seconds).  At 100 Gbps, 32-bit
+   sequence numbers wrap in ~3 seconds; the 60-second PAWS window provides
+   a 20x safety margin.  If passed, and packet.Timestamp > largestSeen,
+   advance largestSeen.  PAWS is also applied in the ACK plausibility
+   check to reject stale ACKs after sequence number wrap.
+
+
+4.7.  Graceful Close (FIN)
+
+   UCP's graceful close is a two-way FIN handshake:
+
+       A -> B:  FIN(seq=a)
+       B -> A:  ACK(AckNumber=a+1, Flags=FinAck)
+
+   Either side can initiate close.  Initiator procedure (CloseAsync):
+   1. Drain send buffer: wait for all in-flight data to be ACKed (up to
+      DisconnectTimeoutMicros = 4 s).
+   2. Send FIN.  Transition from Established to ClosingFinSent.
+   3. Wait for peer FIN-ACK (ACK with FinAck flag 0x04).
+   4. Transition to Closed.
+
+   When both _finSent, _finAcked, and _peerFinReceived are true, the
+   connection transitions to Closed.  CLOSE_WAIT_TIMEOUT_MILLISECONDS =
+   1000 ms (1 s) timeout for the final FIN-ACK.
+
+
+4.8.  Abrupt Close (RST)
+
+   A RST packet (type 0x07) immediately terminates a connection.  The
+   receiver discards all state and transitions to Closed without any
+   negotiation.  RSTs are minimal 12-byte packets (common header only).
+   Generated via Abort(sendReset=true).
+
+
+5.  Reliable Delivery and Acknowledgment
+
+   UCP provides reliable, in-order delivery through cumulative ACK,
+   selective ACK (SACK), and negative ACK (NAK).
+
+
+5.1.  Cumulative ACK
+
+   The AckNumber (uint32) indicates all data with SequenceNumber strictly
+   less than AckNumber have been received contiguously.  The cumulative
+   ACK MUST be monotonic (never recede).  A receding ACK is rejected as
+   a possible replay.
+
+   Sender processing: Walk send buffer in sorted sequence order, mark all
+   segments with SequenceNumber <= AckNumber as ACKed.  Remove ACKed
+   segments.  For each: if InFlight, decrement _flightBytes.  If first
+   transmission (SendCount == 1), sample RTT = now - LastSendMicros
+   (feed RTO estimator).  Retransmitted packets (SendCount > 1) are NOT
+   used for RTT (Karn's algorithm).
+
+
+5.2.  Selective Acknowledgment (SACK)
+
+   SACK blocks use QUIC-style [Start, End) encoding:
+
+   struct SackBlock {
+       uint32 Start;  // First sequence in range (inclusive)
+       uint32 End;    // Past-the-end of range (exclusive)
+   }
+
+   SACK blocks are generated from the receive buffer's set of received
+   (out-of-order) sequence numbers via UcpSackGenerator.  Default: 2
+   blocks per ACK (DEFAULT_ACK_SACK_BLOCK_LIMIT).  Each block sent at
+   most 2 times (MAX_SACK_SEND_COUNT = 2).
+
+   On receiving an ACK with SACK blocks, the sender sorts blocks by Start
+   and performs a two-pointer walk with the send buffer, checking each
+   segment against cumulative ACK and SACK coverage.  Segments in SACK
+   blocks are selectively ACKed.  Segments below highest SACK End but
+   NOT in any SACK block are "SACK holes" -- candidates for fast
+   retransmit.
+
+
+
+5.3.  Piggybacked ACK
+
+   Every outbound DATA and CONTROL packet MAY carry a piggybacked ACK
+   via the HasAckNumber flag (0x08).  Processing is identical to a
+   standalone ACK: AckNumber validated (non-zero, non-receding), segments
+   <= AckNumber marked ACKed, SACK blocks scanned, WindowSize updated.
+   On bidirectional flows, this eliminates standalone ACK overhead.
+
+
+5.4.  Delayed ACK
+
+   When the receiver has data to acknowledge but no outbound data for
+   piggybacking, it schedules a delayed ACK at
+   DEFAULT_DELAYED_ACK_TIMEOUT_MICROS (100 us).  This accumulates up to
+   100 us of received data into one ACK.  The delayed ACK is replaced by
+   a piggybacked ACK if outbound data becomes available before the timer
+   fires.
+
+   Immediate ACK triggers: NeedAck flag (0x01) on received packet;
+   IMMEDIATE_ACK_REORDERED_PACKET_THRESHOLD (4) reordered packets
+   buffered; with REORDERED_ACK_MIN_INTERVAL_MICROS (250 us) minimum
+   spacing between reordered-data immediate ACKs to prevent floods.
+
+
+6.  Loss Detection and Recovery
+
+   UCP detects loss through four mechanisms (fastest to slowest):
+
+   1. NAK-based receiver push -- explicit loss signal; retransmit
+      immediately (Section 6.3).
+   2. SACK-based fast retransmit -- sender infers loss from SACK holes;
+      retransmit after 2 observations (Section 6.2).
+   3. Duplicate ACK fast retransmit -- sender infers loss from duplicate
+      ACKs; retransmit after 3 duplicate ACKs (Section 6.1).
+   4. RTO timeout recovery -- last resort when all else fails; retransmit
+      after RTO timer expires (Section 6.4).
+
+
+6.1.  Duplicate ACK Fast Retransmit
+
+   State variables:
+      _lastAckNumber:      Last cumulative ACK number received.
+      _duplicateAckCount:  Consecutive duplicate ACK count.
+      _fastRecoveryActive: Whether fast recovery is in progress.
+
+   On each ACK:
+       If AckNumber > _lastAckNumber (non-duplicate):
+           _lastAckNumber = AckNumber; _duplicateAckCount = 0
+           _fastRecoveryActive = false
+       Else if AckNumber == _lastAckNumber (duplicate):
+           _duplicateAckCount++
+
+           If _duplicateAckCount >= DUPLICATE_ACK_THRESHOLD (3)
+              AND NOT _fastRecoveryActive:
+               firstMissingSeq = AckNumber + 1
+               Mark segment for fast retransmit.
+               _fastRecoveryActive = true
+               Notify BBR of fast retransmit event.
+
+   The threshold of 3 matches TCP: first ACK after gap is hole
+   notification; next 3 confirm real loss (not reordering).
+
+
+6.2.  SACK-Based Fast Retransmit
+
+   Unlike duplicate ACK fast retransmit (only detects leading hole),
+   SACK-based fast retransmit detects non-leading holes.  Cold-path
+   SackTrackingState is lazily allocated when a segment appears as a
+   SACK hole.
+
+   SackTrackingState fields:
+      MissingAckCount:        Times observed as SACK hole.
+      FirstMissingAckMicros:  First observation timestamp.
+      UrgentRetransmit:       Bypass pacing for this retransmit.
+
+   Decision criteria (ShouldFastRetransmitSackHoleUnsafe):
+
+   1. Segment must be sent at least once; not already notified.
+   2. EnableAggressiveSackRecovery must be true (default true, QUIC-like).
+   3. Reorder grace expired: now - LastSendMicros >= SRTT.
+   4. No pending FEC repair for this segment's group.
+   5. Leading hole: MissingAckCount >= SACK_FAST_RETRANSMIT_THRESHOLD (2).
+      Always retransmit when threshold met.
+   6. Non-leading holes: Required observations = THRESHOLD + 1 (3).
+      BUT if reported SACK hole AND distance >=
+      SACK_FAST_RETRANSMIT_DISTANCE_THRESHOLD (48): reduce to 2.
+
+   SACK_FAST_RETRANSMIT_THRESHOLD = 2 matches QUIC.  Distance threshold
+   of 48 sequences (~57 KB at 1200 B/pkt) provides a reorder window.
+
+
+
+6.3.  NAK-Based Loss Reporting
+
+   NAK is the receiver's explicit loss signal.  The receiver scans its
+   _recvBuffer from _nextExpectedSequence forward.  For each gap (missing
+   sequence X): increment missingCount for X; record firstSeenMicros.
+   If missingCount >= NAK_MISSING_THRESHOLD (2) AND reorder grace
+   expired AND X not already NAKed: add X to the NAK candidate list.
+
+   When the list is non-empty, build and transmit a NAK packet.  Add
+   issued sequences to _nakIssued for deduplication.  Record
+   _lastNakIssuedMicros[X] for rate-limiting.
+
+   Sender processing (HandleNakAsync): For each missing sequence, look
+   up OutboundSegment.  If not already marked for retransmit, not already
+   ACKed, and retransmit cooldown expired (at least 1 SRTT since last
+   retransmit), mark for retransmit.  Classify loss and notify BBR.
+
+   Rate-limiting:
+   o  At most MAX_NAKS_PER_RTT (1024) NAKs per SRTT window.
+   o  Re-NAK for same gap after NAK_REPEAT_INTERVAL_MICROS (5000 us).
+   o  Scan capped at MAX_NAK_MISSING_SCAN (16384) slots per cycle.
+   o  At most MAX_NAK_SEQUENCES_PER_PACKET (256) entries per NAK.
+
+
+6.3.1.  Tiered Confidence NAK
+
+   UCP's NAK system uses tiered confidence levels that adapt the reorder
+   grace period.  The more packets that arrive past a gap, the more
+   confident the receiver is that the gap is real loss.
+
+   +------------+--------+--------+------------------------------+
+   | Tier       | Obs.   | Grace  | Use Case                     |
+   +------------+--------+--------+------------------------------+
+   | Standard   | 2      | 2000 us| Initial suspicion; normal    |
+   |            |        |        | 2 ms reorder window          |
+   | Medium     | 32     | 1000 us| Many packets past gap;       |
+   |            |        |        | loss is likely               |
+   | High       | 128    | 1000 us| Near-certain loss; 128       |
+   |            |        |        | arrivals past gap extremely  |
+   |            |        |        | unlikely to be reordering    |
+   +------------+--------+--------+------------------------------+
+
+   Constants:
+      NAK_MISSING_THRESHOLD                  = 2
+      NAK_REORDER_GRACE_MICROS               = 2000 (2 ms)
+      NAK_MEDIUM_CONFIDENCE_MISSING_THRESHOLD = 32
+      NAK_MEDIUM_CONFIDENCE_REORDER_GRACE_MICROS = 1000 (1 ms)
+      NAK_HIGH_CONFIDENCE_MISSING_THRESHOLD   = 128
+      NAK_HIGH_CONFIDENCE_REORDER_GRACE_MICROS = 1000 (1 ms)
+
+   Selection pseudocode:
+
+      if missingCount >= NAK_HIGH_CONFIDENCE_MISSING_THRESHOLD:
+          graceMicros = NAK_HIGH_CONFIDENCE_REORDER_GRACE_MICROS
+      else if missingCount >= NAK_MEDIUM_CONFIDENCE_MISSING_THRESHOLD:
+          graceMicros = NAK_MEDIUM_CONFIDENCE_REORDER_GRACE_MICROS
+      else:
+          graceMicros = NAK_REORDER_GRACE_MICROS
+
+      if NowMicros() - firstSeenMicros >= graceMicros:
+          // NAK can be issued for this sequence
+
+
+6.4.  RTO Timeout Recovery
+
+   The RTO timer is the last-resort loss detection mechanism.  On timer
+   tick (OnTimerAsync):
+
+   1. Walk send buffer in sorted sequence order.
+   2. For each in-flight segment where (now - LastSendMicros) exceeds
+      CurrentRtoMicros:
+         a. If SendCount >= MAX_RETRANSMISSIONS (10): teardown connection.
+         b. Else: mark segment for retransmit.
+   3. At most RTO_RETRANSMIT_BUDGET_PER_TICK (4) segments retransmitted
+      per tick to prevent dumping hundreds of retransmits after an outage.
+   4. If any ACK arrived within RTO_ACK_PROGRESS_SUPPRESSION_MICROS
+      (2000 us = 2 ms), suppress bulk RTO retransmission (sender making
+      forward progress).
+
+   MAX_RETRANSMISSIONS = 10.  With initial RTO 100 ms and 1.2x backoff,
+   cumulative time before teardown is ~2-3 seconds.
+
+
+
+6.5.  Tail-Loss Probe (TLP)
+
+   TLP addresses the scenario where the last few packets in a burst are
+   lost.  Arming condition: _flightBytes <= TLP_MAX_INFLIGHT_SEGMENTS
+   (2) * MSS AND no ACK arrived since last send.  Timer fires at TLP_
+   TIMEOUT_RTT_RATIO (1.5) * SRTT after last ACK.  When timer fires,
+   retransmit the last unacknowledged segment as a probe.  TLP is
+   cancelled when any ACK arrives.
+
+
+6.6.  Early Retransmit (RFC 5827)
+
+   When in-flight <= EARLY_RETRANSMIT_MAX_INFLIGHT_SEGMENTS (4) and a
+   duplicate ACK arrives, retransmit immediately without waiting for
+   threshold of 3 duplicate ACKs.  With few packets in flight, the
+   receiver cannot generate 3 duplicate ACKs.
+
+
+6.7.  Loss Classification: Congestion vs. Random
+
+   Loss is classified at two layers:
+
+   Layer 1 -- BBR Internal Classifier (Section 8.9): Three-tier
+   composite scoring based on delivery-rate trend, RTT increase, and
+   loss ratio.  Returns Congested, RandomLoss, LightLoad, or Idle.
+
+   Layer 2 -- PCB-Level Deduplication: Maintains _recentLossEvents queue
+   keyed by sequence number for O(1) deduplication.  Compares median RTT
+   across recent loss events to minimum RTT.  If median RTT significantly
+   exceeds min RTT, loss is classified as congestion.
+
+   The combined classification drives isCongestion parameter to
+   BBR.OnPacketLoss() and BBR.OnFastRetransmit(), determining whether
+   CWND reduction is applied.
+
+
+7.  RTO Computation
+
+   UCP computes the Retransmission Timeout following RFC 6298 with UCP-
+   specific tuning.  The RTO backoff factor is 1.2x (gentler than TCP's
+   2.0x) because NAK and SACK recover most loss without the RTO timer.
+
+
+7.1.  RFC 6298 Smoothed RTT Estimation
+
+   State variables:
+      SRTT   (SmoothedRttMicros):   EWMA of RTT samples.
+      RTTVAR (RttVarianceMicros):   EWMA of |SRTT - sample|.
+      RTO    (CurrentRtoMicros):    Computed timeout.
+
+   Algorithm on new sample (sampleMicros):
+
+      if first sample:
+          SRTT   = sampleMicros
+          RTTVAR = sampleMicros / 2
+      else:
+          delta  = |SRTT - sampleMicros|
+          RTTVAR = (3 * RTTVAR + delta) / 4          // beta = 1/4
+          SRTT   = (7 * SRTT + sampleMicros) / 8      // alpha = 1/8
+
+      RTO = SRTT + 4 * RTTVAR                        // K = 4
+      RTO = clamp(RTO, MIN_RTO_MICROS, MAX_RTO_MICROS)
+
+   Constants:
+      RTT_VAR_DENOM (beta)              = 4
+      RTT_VAR_PREVIOUS_WEIGHT (1-beta)  = 3
+      RTT_SMOOTHING_DENOM (alpha)       = 8
+      RTT_SMOOTHING_PREVIOUS_WEIGHT     = 7
+      RTO_GAIN_MULTIPLIER (K)           = 4
+
+   Initial RTO:  INITIAL_RTO_MICROS = 100,000 us (100 ms).  This
+   conservative value covers most WAN paths (trans-Pacific ~80 ms).
+
+   Minimum RTO:  DEFAULT_RTO_MICROS = 50,000 us (50 ms).  Absolute floor
+   is MIN_RTO_MICROS = 20,000 us (20 ms).  TCP typically uses 200 ms;
+   UCP can use 20 ms because NAK recovers most packets in <5 ms.
+
+   Maximum RTO:  DEFAULT_MAX_RTO_MICROS = 15,000,000 us (15 s).  Absolute
+   ceiling is MAX_RTO_MICROS = 60,000,000 us (60 s).
+
+   Sample filtering:  Only first-transmission packets (SendCount == 1)
+   for RTT (Karn).  Samples > 4.0 * CurrentRtoMicros during recovery are
+   discarded (RTT_RECOVERY_SAMPLE_MAX_RTO_MULTIPLIER = 4.0).
+
+
+
+7.2.  RTO Backoff
+
+   On consecutive RTO events, RTO is multiplicatively increased:
+
+       RTO = RTO * RTO_BACKOFF_FACTOR (1.2x)
+
+   Capped: max(current_RTO, MIN_RTO_MICROS * 2) <= RTO <= MAX_RTO_MICROS.
+   The 1.2x factor (vs TCP's 2.0x) avoids multi-second stalls on bursty-
+   loss paths.  The floor at 2 * MIN_RTO_MICROS (40 ms) prevents RTO
+   collapse on very stable paths with occasional loss bursts.
+
+
+8.  Congestion Control
+
+   UCP uses BBRv2 congestion control, modeling the path as a pipe with
+   bottleneck bandwidth (BtlBw) and round-trip propagation time (RTprop).
+   BBR paces at the estimated BtlBw and caps inflight at BDP * CwndGain.
+
+   This model-based approach differs fundamentally from loss-based CC
+   (Reno, CUBIC) which interprets every loss as congestion.  On paths
+   with random loss (wireless, satellite), BBR maintains throughput
+   where loss-based CC collapses.
+
+
+8.1.  BBRv2 State Machine
+
+   BBR cycles through four operating modes:
+
+                    +---------+
+                    | Startup |  Exponential bandwidth probing
+                    +---------+
+                         |
+                         | (bandwidth growth stalls for 3 rounds)
+                         v
+                    +---------+
+                    |  Drain  |  Flush the standing queue
+                    +---------+
+                         |
+                         | (inflight drops to BDP target)
+                         v
+              +-------------------+
+              |     ProbeBW       |  Steady-state 8-phase gain cycling
+              +-------------------+
+                 ^            |
+                 |            | (every ProbeRttInterval = 30s,
+                 |            |  or after 5 congestion losses)
+                 |            v
+                 |   +-------------+
+                 +---|  ProbeRTT   |  Deep-drain for fresh MinRtt
+                     +-------------+
+
+
+8.1.1.  Startup
+
+   Goal: Find bottleneck bandwidth rapidly, then exit before queue
+   becomes excessive.
+
+   Parameters:
+      PacingGain = BBR_STARTUP_PACING_GAIN = 2.89 (2/ln(2) ~ 2.885)
+      CwndGain   = BBR_STARTUP_CWND_GAIN   = 2.0
+
+   At each round boundary (approximately one BDP of delivered data):
+
+      if first round:
+          _fullBandwidthEstimate = BtlBw; return
+
+      if BtlBw >= _fullBandwidthEstimate * 1.25:
+          // Still growing: update estimate, reset stall counter
+          _fullBandwidthEstimate = BtlBw
+          _fullBandwidthRounds = 0
+      else:
+          // Growth stalled this round
+          _fullBandwidthRounds++
+
+   Exit to Drain when _fullBandwidthRounds >= 3 (BBR_MIN_STARTUP_FULL_
+   BANDWIDTH_ROUNDS).  Fast exit: only 1 stall round if BtlBw >= 90%
+   of configured MaxPacingRate.
+
+   Delivery rate cap in Startup: deliveryRate = min(deliveryRate,
+   PacingRate * 4.0) (BBR_STARTUP_ACK_AGGREGATION_RATE_CAP_GAIN).
+
+
+8.1.2.  Drain
+
+   Transition after Startup.  Flush the standing queue.
+
+   Drain pacing gain:
+      If recent loss ratio <= 0 AND EstimatedLossPercent <= 0:
+          PacingGain = 1.0 (clean drain)
+      Else:
+          PacingGain = config DrainPacingGain (default 1.0)
+
+   Exit when inflight <= TargetCWND OR elapsed >= max(MinRtt, 1 ms).
+
+
+8.1.3.  ProbeBW
+
+   Steady-state mode.  Cycles through 8-phase gain sequence:
+
+      Phase 0: PacingGain = 1.35 (probe)
+      Phase 1: PacingGain = 0.85 (drain)
+      Phases 2-7: PacingGain = 1.00 (cruise)
+
+   Cycle advances once per MinRtt.  CWND = 2.0x BDP (BBR_PROBE_BW_CWND_
+   GAIN).  Adaptive gain override: on mobile/lossy non-congested paths,
+   high-gain phase extended to 7/8 of cycle (only phase 7 is low gain).
+
+   Mobile/Lossy path policy:
+      If (MobileUnstable or LossyLongFat) AND not Congested:
+          if phase < 7: PacingGain = CalculatePacingGain()
+          else:         PacingGain = min(1.0, ProbeBwLowGain)
+      Else:
+          PacingGain = CalculatePacingGain()
+
+
+
+8.1.4.  ProbeRTT
+
+   Periodic deep-drain to refresh MinRtt.  Entry conditions:
+   o  MinRtt not refreshed for ProbeRttInterval (30 s).
+   o  OR BBR_PROBE_RTT_CONGESTION_LOSS_THRESHOLD (5) congestion losses.
+   o  Mobile paths (MobileUnstable) excluded -- skip ProbeRTT entirely.
+
+   During ProbeRTT:
+      PacingGain = BBR_PROBE_RTT_PACING_GAIN = 0.85
+      CWND reduced to 4 * MSS (absolute minimum).
+
+   Exit conditions:
+   1. After min duration (ProbeRttDurationMicros = 100 ms):
+      Fresh RTT sample <= 1.05 * MinRtt observed -> probe succeeded.
+      On non-congested paths, min duration halved (floor 30 ms).
+   2. Safety timeout: elapsed >= 2 * ProbeRttDurationMicros.
+
+   On exit: if sample <= 1.25 * MinRtt, adopt sample as new MinRtt.
+   Reset MinRtt timestamp; transition to ProbeBW.
+
+
+8.2.  BBR Parameters and Gains
+
+   (All values are protocol constants in UcpConstants.)
+
+      BBR_STARTUP_PACING_GAIN            = 2.89
+      BBR_STARTUP_CWND_GAIN              = 2.0
+      BBR_STARTUP_GROWTH_TARGET          = 1.25   (25% growth per round)
+      BBR_DRAIN_PACING_GAIN              = 1.0
+      BBR_PROBE_BW_HIGH_GAIN             = 1.35
+      BBR_PROBE_BW_LOW_GAIN              = 0.85
+      BBR_PROBE_BW_CWND_GAIN             = 2.0
+      BBR_PROBE_BW_GAIN_COUNT            = 8      (phases per cycle)
+      BBR_PROBE_RTT_PACING_GAIN          = 0.85
+      BBR_MIN_STARTUP_FULL_BW_ROUNDS     = 3
+      BBR_PROBE_RTT_INTERVAL_MICROS      = 30,000,000  (30 s)
+      BBR_PROBE_RTT_DURATION_MICROS      = 100,000     (100 ms)
+      BBR_PROBE_RTT_EXIT_RTT_MULTIPLIER  = 1.05
+      BBR_PROBE_RTT_MAX_DURATION_MULTIPLIER = 2
+      BBR_WINDOW_RTT_ROUNDS              = 10     (max-filter window)
+      BBR_RECENT_RATE_SAMPLE_COUNT       = 10
+      BBR_LOW_RTT_INCREASE_RATIO         = 0.10   (<10% = green)
+      BBR_MODERATE_RTT_INCREASE_RATIO    = 0.20   (10-20% = moderate)
+      BBR_LOW_LOSS_RATIO                 = 0.01   (<1% loss = clean)
+      BBR_MODERATE_LOSS_RATIO            = 0.03   (1-3% = moderate)
+      BBR_LIGHT_LOSS_RATIO               = 0.08   (<8% = light)
+      BBR_MEDIUM_LOSS_RATIO              = 0.15   (8-15% = medium)
+      BBR_MODERATE_PROBE_GAIN            = 1.50   (moderate RTT/low loss)
+      BBR_LIGHT_LOSS_PACING_GAIN         = 1.10
+      BBR_MEDIUM_LOSS_PACING_GAIN        = 1.05
+      BBR_HIGH_LOSS_PACING_GAIN          = 1.00
+      BBR_FAST_RECOVERY_PACING_GAIN      = 1.25
+      BBR_MIN_CONGESTION_PACING_GAIN     = 0.92
+      BBR_CONGESTION_LOSS_REDUCTION      = 0.98   (2% per congestion)
+      BBR_MIN_LOSS_CWND_GAIN             = 0.95
+      BBR_LOSS_CWND_RECOVERY_STEP        = 0.08   (standard recovery)
+      BBR_LOSS_CWND_RECOVERY_STEP_FAST   = 0.15   (mobile acceleration)
+      BBR_INFLIGHT_LOW_GAIN              = 1.25   (min inflight/ BDP)
+      BBR_INFLIGHT_HIGH_GAIN             = 2.00   (max inflight/ BDP)
+
+
+8.3.  Bandwidth Estimation (Max-Filter)
+
+   BtlBw = maximum delivery rate in a sliding time window.  AddRateSample
+   algorithm:
+
+   1. Store delivery rate and timestamp in circular buffer (10 entries).
+   2. Window = MinRtt * BbrWindowRtRounds (10), or 1 s if no MinRtt yet.
+   3. Scan all in-window samples; select max.
+   4. Clamp growth: maxRate = min(candidate, windowStartRate * growthGain)
+      where growthGain = 4.0 (Startup) or 1.25 (steady state).
+   5. Hard floor: BtlBw >= InitialBandwidthBytesPerSecond.
+   6. Soft floor: if not congested AND loss < 5%:
+         BtlBw = max(BtlBw, 0.90 * maxBtlBwInNonCongestedWindow)
+   7. Hard cap: if MaxPacingRate configured, BtlBw <= MaxPacingRate.
+
+   Delivery rate capping to prevent ACK aggregation inflation:
+      Startup:  deliveryRate = min(deliveryRate, PacingRate * 4.0)
+      Steady:   deliveryRate = min(deliveryRate, PacingRate * 1.50)
+
+
+8.4.  RTT Estimation and Percentiles
+
+   RTT history: ring buffer of BBR_RTT_HISTORY_COUNT (32) entries.
+   Samples > 500 ms (RTO stalls) are discarded.
+
+   MinRtt with sticky floor: sample < MinRtt -> MinRtt = max(sample,
+   MinRtt * 0.75).  Allows at most 25% decrease per sample.
+
+   Percentile RTT for BDP model:
+      P10 (10th percentile): Primary propagation delay estimate.  Robust
+          against occasional fast samples.
+      P25 (25th percentile): Used for LossyLongFat paths.
+      P30 (30th percentile): Used for MobileUnstable paths.
+
+   CWND model RTT: modelRtt = max(MinRtt, P10-RTT), capped at 500 ms.
+
+
+
+8.5.  Congestion Window (CWND) Computation
+
+   Target CWND from BDP model:
+
+      bdp              = BtlBw * (modelRttMicros / 1,000,000)
+      effectiveCwndGain = GetEffectiveCwndGain()
+      cwnd             = ceil(bdp * effectiveCwndGain)
+
+   Clamping chain:
+   1. Floor: max(cwnd, InitialCongestionWindowBytes).
+   2. Loss reduction: cwnd = ceil(cwnd * _lossCwndGain).  _lossCwndGain
+      starts at 1.0, drops to minimum 0.95 after congestion (multiplied
+      by 0.98 per event), recovers by 0.08/ACK (or 0.15 on mobile paths).
+   3. Inflight guardrails: clamp to [_inflightLowBytes, _inflightHigh-
+      Bytes].
+   4. Time ceiling: cwnd = min(cwnd, BtlBw * 0.200s).  Prevents
+      pathological CWND growth.
+   5. Absolute minimum: max(cwnd, 2 * MSS).
+   6. Hard cap: min(cwnd, MaxCongestionWindowBytes) if configured (default
+      64 MB).
+
+   Effective CWND gain (GetEffectiveCwndGain):
+      o  Mobile/lossy paths: return CwndGain unchanged (need retransmit
+         headroom).
+      o  Startup: return CwndGain unchanged (need rapid ramp-up).
+      o  Otherwise: cap at wasteBudget limit.  If PacingGain * CwndGain >
+         (1 + wasteBudget) * ProbeBwCwndGain, return capped value.
+         wasteBudget = max(0.50, MaxBandwidthWastePercent).
+
+
+8.6.  Inflight Guardrails
+
+   _inflightLowBytes  = max(InitialCwnd, BDP * 1.25)
+   _inflightHighBytes = max(_inflightLowBytes, BDP * highGain)
+      where highGain = 2.00 for all path types (BBR_INFLIGHT_HIGH_GAIN
+      and BBR_INFLIGHT_MOBILE_HIGH_GAIN are both 2.00).
+
+
+8.7.  Adaptive Pacing Gain Decision Tree
+
+   CalculatePacingGain() returns the pacing gain multiplier (0.85-1.50)
+   based on network condition, path class, RTT increase, and loss ratio.
+   Decision priority order:
+
+   1. Loss-control over budget + congested -> 1.00 (BBR_HIGH_LOSS_PACING_
+      GAIN)
+   2. Fast recovery active -> 1.25 (BBR_FAST_RECOVERY_PACING_GAIN)
+   3. Congested network:
+         if loss <= budget -> 1.00
+         else -> 0.85 (BBR_PROBE_RTT_PACING_GAIN)
+   4. MobileUnstable path:
+         rttIncrease < 0.10 -> 1.35 (ProbeBwHighGain)
+         rttIncrease < 0.20 -> 1.10
+         else -> 1.00
+   5. LossyLongFat path:
+         rttIncrease < 0.20 -> 1.50 (BBR_MODERATE_PROBE_GAIN)
+         else -> 1.00
+   6. RandomLoss condition:
+         rttIncrease < 0.10 -> max(1.0, ProbeBwHighGain)
+         rttIncrease < 0.20 -> max(1.0, BBR_MODERATE_PROBE_GAIN)
+         else -> 1.00
+   7. LowLatencyLAN -> 1.35 (always aggressive on LAN)
+   8. Default -- tiered by loss and RTT:
+         loss < 0.01 AND rttIncrease < 0.10 -> max(1.0, ProbeBwHighGain)
+         loss < 0.03 AND rttIncrease < 0.20 -> max(1.0, BBR_MODERATE_
+            PROBE_GAIN)
+         loss < 0.08 -> max(1.0, BBR_LIGHT_LOSS_PACING_GAIN)
+         loss < 0.15 -> max(1.0, BBR_MEDIUM_LOSS_PACING_GAIN)
+         else -> max(1.0, BBR_HIGH_LOSS_PACING_GAIN)
+
+
+
+8.8.  Network Path Classification
+
+   BBR classifies the path into six categories from 200 ms classifier
+   windows (8 windows = 1.6 s history).  Statistics per window: AvgRtt,
+   Jitter (max-min), LossRate, ThroughputRatio (actual/BtlBw).
+
+   Rules (checked top-to-bottom; first match wins):
+
+   1. LowLatencyLAN:    avgRtt < 5 ms AND loss < 0.1% AND jitter < 3 ms.
+         Policy: Always 1.35x gain.  Zero queuing risk on LAN.
+
+   2. MobileUnstable:   loss >= 3% AND jitter >= 20 ms.
+         Policy: Gain depends on RTT trend.  Skip ProbeRTT.  Use P30 RTT
+         and fast CWND recovery.
+
+   3. LossyLongFat:     avgRtt >= 80 ms AND loss > 1%.
+         Policy: RTT trend is primary congestion signal (background loss
+         is physical noise).  Skip ProbeRTT if BtlBw growing.  P25 RTT.
+
+   4. CongestedBottleneck: throughput < 70% AND RTT growing.
+         Policy: Conservative gain.  Tight CWND cap.
+
+   5. SymmetricVPN:     avgRtt > 60 ms AND loss < 0.5% AND jitter stable.
+         Policy: Moderate gain and CWND headroom.
+
+   6. Default:          None of the above.
+         Policy: Generic tiered approach.
+
+   At least 2 classifier windows (~400 ms data) required for reliable
+   classification.
+
+
+8.9.  Loss Classification for Congestion Control
+
+   Three-tier scoring system (ClassifyNetworkCondition):
+
+   Tier 1 -- Rate drop + RTT rise:
+      deliveryRateChange <= -0.15 (15% drop) AND
+      rttIncrease >= 0.50 (50% above min):
+          score += 1 (BBR_CONGESTION_RATE_DROP_SCORE)
+
+   Tier 2 -- RTT growth alone:
+      rttIncrease >= 0.50:
+          score += 1 (BBR_CONGESTION_RTT_GROWTH_SCORE)
+
+   Tier 3 -- Loss + RTT rise:
+      lossRatio >= 0.10 AND rttIncrease >= 0.50:
+          score += 1 (BBR_CONGESTION_LOSS_SCORE)
+
+   Classification:
+      score >= BBR_CONGESTION_CLASSIFIER_SCORE_THRESHOLD (2):
+          return Congested
+      lossRatio > 0 AND rttIncrease <= 0.20:
+          return RandomLoss
+      lossRatio < 0.01: return LightLoad
+      else: return Idle
+
+   CWND reduction decision (ShouldTreatLossAsCongestion):
+      1. If external signal NOT congestion: return false (random).
+      2. If internal classifier says Congested: return true.
+      3. Else: require BOTH rttIncrease >= 0.50 AND lossRatio >= 0.10.
+
+
+8.10.  Loss-Tiered Pacing Gains
+
+   Loss without RTT increase is classified as random; gain stays
+   elevated to compensate for throughput loss.
+
+      High-gain (1.35x):  loss < 1% AND rttIncrease < 10%
+      Moderate (1.50x):   loss < 1% AND rttIncrease 10-20%
+      Light (1.10x):      loss < 8%
+      Medium (1.05x):     loss 8-15%
+      High (1.00x):       loss > 15% -- no gain; pacing = BtlBw
+
+   Loss with RTT increase is classified as Congested and triggers
+   CWND reduction and potential ProbeRTT entry.
+
+
+8.11.  Fast Recovery Pacing
+
+   After non-congestion fast retransmit (SACK/NAK), BBR enters fast
+   recovery for <= 1 RTT with PacingGain = BBR_FAST_RECOVERY_PACING_GAIN
+   (1.25x).  The elevated gain refills the loss hole quickly.  Congestion-
+   triggered retransmits cause _lossCwndGain reduction (multiplied by 0.98
+   per event).
+
+
+
+9.  Pacing
+
+   Pacing is BBR's primary rate control mechanism.  Rather than releasing
+   a burst when CWND permits (as TCP does), BBR spaces transmissions to
+   match the estimated bottleneck rate, preventing burst-induced loss.
+
+
+9.1.  Token-Bucket Pacing Controller
+
+   The PacingController enforces the BBR-computed pacing rate with a
+   token-bucket model:
+
+   o  Tokens accumulate at PacingRate = BtlBw * PacingGain (bytes/sec).
+   o  Bucket capacity = PacingRate * PacingBucketDuration (10 ms).
+   o  Each packet sent consumes tokens = packet size.
+   o  When tokens insufficient, flush deferred until tokens accumulate.
+
+   Per FlushSendQueueAsync:
+   1. Collect eligible segments from send buffer (not yet in-flight, or
+      marked for retransmit).  Sort by priority then sequence.
+   2. For each candidate:
+         if tokens >= packetSize: send, deduct tokens, mark InFlight.
+         else: schedule delayed flush at now + waitTime.
+   3. Urgent retransmits (SACK/NAK/TLP-triggered) may bypass token bucket
+      up to URGENT_RETRANSMIT_BUDGET_PER_RTT (8192) per RTT window.
+
+   DEFAULT_MIN_PACING_INTERVAL_MICROS = 0 (no floor; allows sub-us gaps
+   at 10 Gbps).  DEFAULT_PACING_BUCKET_DURATION_MICROS = 10,000 us (10 ms
+   token-bucket window).  DEFAULT_PACING_WAIT_MICROS = 1000 us (1 ms
+   fallback when no rate is available).
+
+
+10.  Forward Error Correction (FEC)
+
+   UCP provides Reed-Solomon-style FEC over GF(256).  FEC allows
+   reconstructing lost DATA packets from parity repair packets without
+   retransmission -- critical on high-RTT paths (satellite, long-haul).
+
+   FEC operates on groups of FecGroupSize consecutive data packets.  When
+   a group is complete, _repairCount repair packets are generated as
+   weighted XOR sums on GF(256).  The receiver recovers up to R missing
+   packets from R independent repair packets via Gaussian elimination.
+
+
+10.1.  Galois Field GF(256) Arithmetic
+
+   Generator polynomial: g(x) = x^8 + x^4 + x^3 + x^2 + 1 (0x11d).
+
+   Precomputed tables:
+      GfExp[512]: alpha^i for i in [0, 511] (wrap for fast multiply).
+      GfLog[256]: discrete log, GfLog[alpha^i] = i.
+
+   Operations:
+      Multiply(a, b): if a==0||b==0: return 0
+                       return GfExp[GfLog[a] + GfLog[b]]
+      Inverse(a):      if a==0: error
+                       return GfExp[255 - GfLog[a]]
+      Power(a, n):     if n==0: return 1; if a==0: return 0
+                       return GfExp[(GfLog[a] * n) % 255]
+
+   Vandermonde coefficients for repair r, slot s:
+      coefficient = Power(r + 1, s) = (r+1)^s in GF(256)
+
+   This ensures any R repair packets form an independent system for
+   R missing data packets.
+
+
+10.2.  FEC Encode
+
+   Circular send buffer of _groupSize slots.  On each data packet sent:
+
+   1. Buffer payload at _sendBuffer[_sendIndex]; increment counter.
+   2. If not full (_sendIndex < _groupSize): return null.
+   3. Group full.  Determine maxLen across all slots.
+   4. For each repair index r in [0, _repairCount-1]:
+         Allocate repair[lengthTableBytes + maxLen] where
+         lengthTableBytes = _groupSize * 2 (uint16 lengths).
+         For each data slot s with payload p:
+            Write UInt16(p.Length) at offset s*2.
+            coefficient = Power(r+1, s).
+            For each byte j: repair[headerLen+j] ^=
+               Multiply(coefficient, p[j]).
+         Append to output.
+   5. Clear send buffer for next group.
+
+   Length table: 2 bytes per slot (big-endian uint16), validated against
+   MAX_FEC_SLOT_LENGTH (1200 bytes).
+
+
+
+10.3.  FEC Decode and Recovery
+
+   Receiver stores data in _recvGroups[groupBase] and repairs in
+   _recvRepairs[groupBase] (SortedDictionary<int, byte[]> by GroupIndex).
+
+   TryRecoverGroup(groupBase):
+   1. Identify missing slots (group[slot] == null).
+   2. If missingCount == 0: group complete; cleanup.
+   3. If repairs.Count < missingSlots.Count: not enough repair packets.
+   4. Build Vandermonde coefficient matrix over GF(256) for missing slots.
+   5. Subtract known data contributions from each RHS parity vector:
+         rhs[row][j] ^= Multiply(coefficient, knownData[j])
+   6. Run Gaussian elimination with partial pivoting over GF(256).
+   7. If solved: extract recovered payloads from solved RHS using length
+      table from first repair packet.
+   8. Validate lengths against MAX_FEC_SLOT_LENGTH (1200 bytes).
+      Validate sum against _groupSize * MAX_FEC_SLOT_LENGTH.
+   9. Store recovered payloads and deliver to application.
+
+   Memory: retains at most 16 recent groups in both data and repair
+   dictionaries.  Older groups evicted (prune).
+
+
+10.4.  Adaptive FEC Redundancy
+
+   FEC activates when EstimatedLossPercent >= ADAPTIVE_FEC_LOSS_THRESHOLD_
+   PERCENT (2%).  Below 2%, retransmission is cheaper than FEC bandwidth
+   overhead.  Additional triggers: RTT >= 80 ms (retransmit latency too
+   high) or jitter >= 15 ms (to suppress reordering-induced SACK storms).
+
+   When FEC is active, SACK fast retransmit is suppressed for the FEC
+   group's grace period, avoiding simultaneous FEC repair and SACK
+   retransmit for the same loss.
+
+
+10.5.  FEC Group Size and Repair Count
+
+   Configuration: FecGroupSize (default 8, range 2-64), FecRedundancy
+   (default 0.0 = disabled).  Repair count:
+      _repairCount = max(1, ceil(FecGroupSize * FecRedundancy))
+      clamped to [1, FecGroupSize].
+   FEC enabled when FecRedundancy > 0 AND FecGroupSize > 1.
+
+
+11.  Flow Control
+
+   UCP uses a receiver-advertised window for flow control, analogous to
+   TCP's receive window.  Advertised in WindowSize (uint32, bytes) field
+   of ACK and piggybacked ACK.
+
+
+11.1.  Advertised Receive Window
+
+   Default: DEFAULT_RECV_WINDOW_PACKETS = 4096 packets, ~5 MB.
+   Recommended default: 16384 packets (~20 MB) to support 1 Gbps at
+   ~160 ms RTT.
+
+   The sender MUST NOT exceed min(CWND, _remoteWindowBytes) bytes in
+   flight.  WindowSize = RecvWindowPackets * MSS - queuedReceiveBytes.
+
+   Send buffer capacity: DEFAULT_SEND_BUFFER_BYTES = 32 MB, absorbing
+   application writes while BBR drains at pacing rate.
+
+
+12.  Server-Side Scheduling
+
+   UCP supports fair-queue scheduling for per-connection bandwidth
+   isolation at the server.
+
+
+12.1.  Fair-Queue Credit Scheduling
+
+   Credits distributed every FAIR_QUEUE_ROUND_MILLISECONDS (10 ms).
+   Each connection receives credit proportional to its share of server
+   bandwidth.  Credit capped at MAX_BUFFERED_FAIR_QUEUE_ROUNDS (2) worth
+   of unused credit to prevent idle connections from bursting.
+
+   Per-connection: _fairQueueCreditBytes tracks accumulated credit.
+   Each packet consumes min(packetSize, _fairQueueCreditBytes).  When
+   credit exhausted, send loop pauses until more credit arrives (unless
+   urgent retransmit pending).  Send quantum: SEND_QUANTUM_BYTES = MSS
+   (1220 bytes) per round minimum.  Credit consumed only for original
+   transmissions, not control packets or retransmissions.
+
+
+
+13.  Fragmentation
+
+   Messages larger than MAX_PAYLOAD_SIZE (1200 bytes) are fragmented into
+   up to 65535 fragments.  Each DATA packet carries FragmentTotal (total
+   fragments in message) and FragmentIndex (0-based position).  Max
+   message: 1200 * 65535 = 78,642,000 bytes (~75 MB).  The receiver
+   reassembles when all fragments arrive, ordered by sequence number.
+
+
+14.  Quality of Service (QoS) Prioritization
+
+   UCP supports 4 priority levels encoded in bits 4-5 of the Flags byte
+   (mask 0x30, shift 4):
+
+      0 = Background  (lowest)
+      1 = Normal      (default bulk transfer)
+      2 = Interactive (chat, gaming)
+      3 = Urgent      (control-plane, time-critical)
+
+   Higher priority segments are transmitted before lower priority ones
+   during FlushSendQueueAsync.  Priority is assigned per SendAsync call.
+
+
+15.  Protocol Constants
+
+   This section lists all protocol constants with their exact values.
+   Values are from the reference implementation UcpConstants.cs.
+
+
+15.1.  Time Unit Conversions
+
+   MICROS_PER_MILLI           = 1000       (1 ms = 1000 us)
+   MICROS_PER_SECOND          = 1000000    (1 s = 1,000,000 us)
+   NANOS_PER_MICRO            = 1000       (1 us = 1000 ns)
+   BITS_PER_BYTE              = 8.0
+   BITS_PER_MEGABIT           = 1000000.0
+
+
+15.2.  Packet Format Constants
+
+   MSS                        = 1220       (maximum segment size in bytes)
+   COMMON_HEADER_SIZE         = 12         (Type + Flags + ConnId + Timestamp)
+   DATA_HEADER_SIZE           = 20         (12 + SeqNo + FragTotal + FragIdx)
+   DATA_HEADER_SIZE_WITH_ACK  = 36         (20 + AckNo + SackCnt + Win + Echo)
+   ACK_FIXED_SIZE             = 28         (fixed ACK before SACK blocks)
+   NAK_FIXED_SIZE             = 18         (fixed NAK before missing seqs)
+   MAX_PAYLOAD_SIZE           = 1200       (MSS - DATA_HEADER_SIZE)
+   SACK_BLOCK_SIZE            = 8          (4 Byte Start + 4 Byte End)
+   SEQUENCE_NUMBER_SIZE       = 4          (uint32)
+   ACK_NUMBER_SIZE            = 4          (uint32)
+   CONNECTION_ID_SIZE         = 4          (uint32)
+   ACK_TIMESTAMP_FIELD_SIZE   = 6          (uint48)
+   PACKET_TYPE_FIELD_SIZE     = 1          (byte)
+   PACKET_FLAGS_FIELD_SIZE    = 1          (byte)
+   UINT48_MASK                = 0x0000FFFFFFFFFFFFUL
+
+
+15.3.  Window and Buffer Sizes
+
+   DEFAULT_RECV_WINDOW_PACKETS            = 4096
+   DEFAULT_RECV_WINDOW_BYTES              = 4,997,120 (~5 MB)
+   INITIAL_CWND_PACKETS                   = 20
+   DEFAULT_INITIAL_CONGESTION_WINDOW      = 4880 (4 * MSS, legacy floor)
+   DEFAULT_SEND_BUFFER_BYTES              = 33,554,432 (32 MB)
+   DEFAULT_DELAYED_ACK_TIMEOUT_MICROS     = 100
+   DEFAULT_MAX_BANDWIDTH_WASTE_RATIO      = 0.25 (25%)
+   DEFAULT_MAX_BANDWIDTH_LOSS_PERCENT     = 25
+   MIN_MAX_BANDWIDTH_LOSS_PERCENT         = 15
+   MAX_MAX_BANDWIDTH_LOSS_PERCENT         = 35
+   DEFAULT_MIN_PACING_INTERVAL_MICROS     = 0
+   DEFAULT_PACING_BUCKET_DURATION_MICROS  = 10000 (10 ms)
+
+
+
+15.4.  RTO Constants
+
+   MIN_RTO_MICROS                              = 20000 (20 ms floor)
+   DEFAULT_RTO_MICROS                          = 50000 (50 ms default)
+   INITIAL_RTO_MICROS                          = 100000 (100 ms initial)
+   DEFAULT_MAX_RTO_MICROS                      = 15000000 (15 s)
+   MAX_RTO_MICROS                              = 60000000 (60 s ceiling)
+   RTO_BACKOFF_FACTOR                          = 1.2
+   MAX_RETRANSMISSIONS                         = 10
+   RTO_RETRANSMIT_BUDGET_PER_TICK              = 4
+   RTO_ACK_PROGRESS_SUPPRESSION_MICROS         = 2000
+   URGENT_RETRANSMIT_BUDGET_PER_RTT            = 8192
+   URGENT_RETRANSMIT_DISCONNECT_THRESHOLD_PERCENT = 75
+   RTT_VAR_DENOM                               = 4 (beta = 1/4)
+   RTT_SMOOTHING_DENOM                         = 8 (alpha = 1/8)
+   RTT_VAR_PREVIOUS_WEIGHT                     = 3
+   RTT_SMOOTHING_PREVIOUS_WEIGHT               = 7
+   RTO_GAIN_MULTIPLIER                         = 4 (K = 4)
+   RTT_RECOVERY_SAMPLE_MAX_RTO_MULTIPLIER      = 4.0
+   RTO_MAX_BACKOFF_MIN_RTO_MULTIPLIER          = 2
+
+
+15.5.  BBR Congestion Control Constants
+
+   BBR_WINDOW_RTT_ROUNDS                        = 10
+   BBR_RECENT_RATE_SAMPLE_COUNT                 = 10
+   BBR_PROBE_BW_GAIN_COUNT                      = 8
+   BBR_MIN_STARTUP_FULL_BANDWIDTH_ROUNDS        = 3
+   BBR_STARTUP_GROWTH_TARGET                    = 1.25
+   BBR_STARTUP_PACING_GAIN                      = 2.89
+   BBR_STARTUP_CWND_GAIN                        = 2.0
+   BBR_DRAIN_PACING_GAIN                        = 1.0
+   BBR_PROBE_BW_HIGH_GAIN                       = 1.35
+   BBR_PROBE_BW_LOW_GAIN                        = 0.85
+   BBR_PROBE_BW_CWND_GAIN                       = 2.0
+   BBR_PROBE_RTT_PACING_GAIN                    = 0.85
+   BBR_PROBE_RTT_INTERVAL_MICROS                = 30000000 (30 s)
+   BBR_PROBE_RTT_DURATION_MICROS                = 100000 (100 ms)
+   BBR_PROBE_RTT_MAX_DURATION_MULTIPLIER        = 2
+   BBR_PROBE_RTT_EXIT_RTT_MULTIPLIER            = 1.05
+   BBR_LOW_RTT_INCREASE_RATIO                   = 0.10
+   BBR_MODERATE_RTT_INCREASE_RATIO              = 0.20
+   BBR_LOW_LOSS_RATIO                           = 0.01
+   BBR_MODERATE_LOSS_RATIO                      = 0.03
+   BBR_LIGHT_LOSS_RATIO                         = 0.08
+   BBR_MEDIUM_LOSS_RATIO                        = 0.15
+   BBR_MODERATE_PROBE_GAIN                      = 1.50
+   BBR_LIGHT_LOSS_PACING_GAIN                   = 1.10
+   BBR_MEDIUM_LOSS_PACING_GAIN                  = 1.05
+   BBR_HIGH_LOSS_PACING_GAIN                    = 1.00
+   BBR_FAST_RECOVERY_PACING_GAIN                = 1.25
+   BBR_MIN_CONGESTION_PACING_GAIN               = 0.92
+   BBR_CONGESTION_LOSS_REDUCTION                = 0.98
+   BBR_MIN_LOSS_CWND_GAIN                       = 0.95
+   BBR_LOSS_CWND_RECOVERY_STEP                  = 0.08
+   BBR_LOSS_CWND_RECOVERY_STEP_FAST             = 0.15
+   BBR_LOSS_BUDGET_RECOVERY_RATIO               = 0.80
+   BBR_LOSS_EWMA_SAMPLE_WEIGHT                  = 0.25
+   BBR_LOSS_EWMA_RETAINED_WEIGHT                = 0.75
+   BBR_LOSS_EWMA_IDLE_DECAY                    = 0.90
+   BBR_CONGESTION_RATE_DROP_RATIO               = -0.15
+   BBR_CONGESTION_RTT_INCREASE_RATIO            = 0.50
+   BBR_RANDOM_LOSS_MAX_RTT_INCREASE_RATIO       = 0.20
+   BBR_CONGESTION_CLASSIFIER_SCORE_THRESHOLD    = 2
+   BBR_CONGESTION_RATE_DROP_SCORE               = 1
+   BBR_CONGESTION_RTT_GROWTH_SCORE              = 1
+   BBR_CONGESTION_LOSS_SCORE                    = 1
+   BBR_RATE_LOSS_HINT_MAX_RATIO                 = 0.05
+   BBR_STARTUP_ACK_AGGREGATION_RATE_CAP_GAIN    = 4.0
+   BBR_STEADY_ACK_AGGREGATION_RATE_CAP_GAIN     = 1.50
+   BBR_STARTUP_BANDWIDTH_GROWTH_PER_ROUND       = 2.0
+   BBR_STEADY_BANDWIDTH_GROWTH_PER_ROUND        = 1.25
+   BBR_CONGESTION_LOSS_RTT_MULTIPLIER           = 1.10
+   BBR_RANDOM_LOSS_MAX_DEDUPED_EVENTS           = 2
+   BBR_CONGESTION_LOSS_WINDOW_THRESHOLD         = 3
+   BBR_CONGESTION_LOSS_BURST_THRESHOLD          = 3
+   BBR_BANDWIDTH_GROWTH_FALLBACK_INTERVAL_MICROS = 10000
+   BBR_INFLIGHT_LOW_GAIN                        = 1.25
+   BBR_INFLIGHT_HIGH_GAIN                       = 2.00
+   BBR_INFLIGHT_MOBILE_HIGH_GAIN                = 2.00
+   BBR_CONGESTION_LOSS_RATIO                    = 0.10
+   BBR_RANDOM_LOSS_CWND_RTT_CUSHION             = 2.0
+   BBR_DELIVERY_RATE_HISTORY_COUNT              = 16
+   BBR_RTT_HISTORY_COUNT                        = 32
+   BBR_LOSS_BUCKET_MICROS                       = 100000 (100 ms)
+   BBR_LOSS_BUCKET_COUNT                        = 10
+   BBR_MIN_ROUND_DURATION_MICROS                = 1000 (1 ms)
+   BBR_DEFAULT_RATE_WINDOW_MICROS               = 1000000 (1 s)
+   BBR_PROBE_RTT_CONGESTION_LOSS_THRESHOLD      = 5
+
+
+
+15.6.  Network Classifier Constants
+
+   NETWORK_CLASSIFIER_WINDOW_COUNT              = 8
+   NETWORK_CLASSIFIER_WINDOW_DURATION_MICROS     = 200000 (200 ms)
+   NETWORK_CLASSIFIER_LONG_FAT_RTT_MS            = 80
+   NETWORK_CLASSIFIER_MOBILE_LOSS_RATE           = 0.03 (3%)
+   NETWORK_CLASSIFIER_MOBILE_JITTER_MS           = 20
+   NETWORK_CLASSIFIER_LAN_RTT_MS                 = 5
+   NETWORK_CLASSIFIER_LAN_JITTER_MS              = 3
+
+
+15.7.  FEC Constants
+
+   MAX_FEC_SLOT_LENGTH                          = 1200
+   FEC_ADAPTIVE_MIN_LOSS_PERCENT                 = 2.0
+   BENCHMARK_HIGH_RTT_FEC_THRESHOLD_MICROS       = 80000 (80 ms)
+   BENCHMARK_HIGH_JITTER_FEC_THRESHOLD_MS        = 15
+   ADAPTIVE_FEC_LOSS_THRESHOLD_PERCENT            = 2.0
+
+
+15.8.  Loss Detection and NAK Constants
+
+   MAX_NAKS_PER_RTT                             = 1024
+   EARLY_RETRANSMIT_MAX_INFLIGHT_SEGMENTS       = 4
+   TLP_MAX_INFLIGHT_SEGMENTS                    = 2
+   TLP_TIMEOUT_RTT_RATIO                        = 1.5
+   DUPLICATE_ACK_THRESHOLD                      = 3
+   SACK_FAST_RETRANSMIT_THRESHOLD               = 2
+   SACK_FAST_RETRANSMIT_DISTANCE_THRESHOLD      = 48
+   SACK_FAST_RETRANSMIT_MIN_REORDER_GRACE_MICROS = 5000 (5 ms)
+   NAK_MISSING_THRESHOLD                        = 2
+   NAK_REORDER_GRACE_MICROS                     = 2000 (2 ms)
+   NAK_MEDIUM_CONFIDENCE_MISSING_THRESHOLD      = 32
+   NAK_MEDIUM_CONFIDENCE_REORDER_GRACE_MICROS   = 1000 (1 ms)
+   NAK_HIGH_CONFIDENCE_MISSING_THRESHOLD        = 128
+   NAK_HIGH_CONFIDENCE_REORDER_GRACE_MICROS     = 1000 (1 ms)
+   NAK_REPEAT_INTERVAL_MICROS                   = 5000 (5 ms)
+   MAX_NAK_MISSING_SCAN                         = 16384
+   MAX_NAK_SEQUENCES_PER_PACKET                 = 256
+   DEFAULT_ACK_SACK_BLOCK_LIMIT                 = 2
+   IMMEDIATE_ACK_REORDERED_PACKET_THRESHOLD     = 4
+   REORDERED_ACK_MIN_INTERVAL_MICROS            = 250
+
+
+15.9.  Connection Management Constants
+
+   KEEP_ALIVE_INTERVAL_MICROS                   = 1000000 (1 s)
+   DISCONNECT_TIMEOUT_MICROS                    = 4000000 (4 s)
+   TIMER_INTERVAL_MILLISECONDS                  = 1
+   FAIR_QUEUE_ROUND_MILLISECONDS                = 10
+   DEFAULT_SERVER_BANDWIDTH_BYTES_PER_SECOND    = 12500000 (~100 Mbps)
+   DEFAULT_INITIAL_BANDWIDTH_BYTES_PER_SECOND   = 12500000
+   DEFAULT_MAX_PACING_RATE_BYTES_PER_SECOND     = 12500000
+   DEFAULT_MAX_CONGESTION_WINDOW_BYTES          = 67108864 (64 MB)
+   CONNECT_TIMEOUT_MILLISECONDS                 = 5000 (5 s)
+   MAX_RTT_SAMPLES                              = 1024
+   MAX_BUFFERED_FAIR_QUEUE_ROUNDS               = 2
+   MIN_TIMER_WAIT_MILLISECONDS                  = 1
+   MIN_HANDSHAKE_WAIT_MILLISECONDS              = 100
+   CLOSE_WAIT_TIMEOUT_MILLISECONDS              = 1000 (1 s)
+   PAWS_TIMEOUT_MICROS                          = 60000000 (60 s)
+   DEFAULT_PACING_WAIT_MICROS                   = 1000 (1 ms)
+   MAX_ACK_SACK_BLOCKS                          = 149 (computed max)
+
+
+
+15.10.  Wire-Format Type and Flag Values
+
+   UCP_SYN_TYPE_VALUE           = 0x01
+   UCP_SYN_ACK_TYPE_VALUE       = 0x02
+   UCP_ACK_TYPE_VALUE           = 0x03
+   UCP_NAK_TYPE_VALUE           = 0x04
+   UCP_DATA_TYPE_VALUE          = 0x05
+   UCP_FIN_TYPE_VALUE           = 0x06
+   UCP_RST_TYPE_VALUE           = 0x07
+   UCP_FEC_REPAIR_TYPE_VALUE    = 0x08
+   UCP_FLAGS_NONE_VALUE         = 0x00
+   UCP_FLAG_NEED_ACK_VALUE      = 0x01
+   UCP_FLAG_RETRANSMIT_VALUE    = 0x02
+   UCP_FLAG_FIN_ACK_VALUE       = 0x04
+   UCP_FLAG_HAS_ACK_VALUE       = 0x08
+   UCP_FLAG_PRIORITY_MASK       = 0x30
+
+
+16.  Security Considerations
+
+   UCP provides several layers of defense against network attacks.
+
+   Off-Path Injection Defense.  The cryptographically random 32-bit ISN
+   makes blind data injection infeasible (1 in 2^32 probability of
+   guessing a valid in-window sequence number).  Combined with the
+   Connection ID (also random), an off-path attacker must guess two
+   independent 32-bit values simultaneously.
+
+   Replay Protection.  PAWS timestamp validation rejects packets with
+   timestamps more than 60 seconds behind the largest timestamp seen,
+   preventing old duplicate injection after sequence number wrap.  The
+   monotonic cumulative ACK number provides additional replay protection
+   for ACK packets.
+
+   Amplification Resistance.  The three-way handshake prevents server
+   amplification attacks: the server sends only one SYN-ACK (20 bytes)
+   in response to a client SYN (16 bytes), a ratio of 1.25:1.  Data
+   transfer cannot begin until the handshake completes.
+
+   Resource Exhaustion.  Per-connection state is bounded: send buffer
+   (32 MB default), receive buffer (~20 MB default), and FEC receive
+   state (16 groups maximum).  Connections are torn down after 10
+   consecutive RTO timeouts (~2-3 seconds) or 4 seconds of inactivity.
+
+   Integrity.  This specification does not define cryptographic
+   integrity protection.  Deployments requiring integrity SHOULD
+   encapsulate UCP within a secure transport (e.g., DTLS, IPsec) or use
+   the separate secure UCP variant (UCP-S) with built-in AEAD.
+
+
+17.  IANA Considerations
+
+   This document establishes the UCP protocol constants registry with
+   the following initial allocations:
+
+   o  Packet Type values: 0x01 through 0x08 allocated as specified in
+      Section 3.2.  Values 0x00 and 0x09-0xFF are reserved for future
+      allocation.
+   o  Packet Flag bits: bits 0-5 allocated as specified in Section 3.3.
+      Bits 6-7 are reserved and MUST be set to zero.
+   o  Connection ID 0x00000000 is reserved and MUST NOT be assigned to
+      active connections.
+
+   Future allocations require Standards Action or IETF Consensus.
+
+
+18.  References
+
+18.1.  Normative References
+
+   [RFC2119] Bradner, S., "Key words for use in RFCs to Indicate
+             Requirement Levels", BCP 14, RFC 2119, March 1997.
+
+   [RFC5827] Allman, M., Avrachenkov, K., Ayesta, U., Blanton, J., and
+             P. Hurtig, "Early Retransmit for TCP and Stream Control
+             Transmission Protocol (SCTP)", RFC 5827, May 2010.
+
+   [RFC6298] Paxson, V., Allman, M., Chu, J., and M. Sargent,
+             "Computing TCP's Retransmission Timer", RFC 6298,
+             June 2011.
+
+   [RFC7323] Borman, D., Braden, B., Jacobson, V., and R.
+             Scheffenegger, Ed., "TCP Extensions for High Performance",
+             RFC 7323, September 2014.
+
+
+18.2.  Informative References
+
+   [BBRv2]   Cardwell, N., Cheng, Y., Gunn, C., Yeganeh, S., and
+             V. Jacobson, "BBR Congestion Control", IETF 102
+             Proceedings, 2018.
+
+   [QUIC-TRANSPORT] Iyengar, J. and M. Thomson, "QUIC: A UDP-Based
+             Multiplexed and Secure Transport", RFC 9000, May 2021.
+
+   [QUIC-RECOVERY] Iyengar, J. and I. Swett, "QUIC Loss Detection and
+             Congestion Control", RFC 9002, May 2021.
+
+   [RFC2018] Mathis, M., Mahdavi, J., Floyd, S., and A. Romanow,
+             "TCP Selective Acknowledgment Options", RFC 2018,
+             October 1996.
+
+
+
+Appendix A.  Pseudocode for RTO Update
+
+   This appendix presents the RTO update algorithm in C-style pseudocode.
+
+   void RtoEstimator_Update(long sampleMicros)
+   {
+       if (sampleMicros <= 0)
+           return;  // Invalid sample
+
+       if (smoothedRttMicros == 0) {
+           // First sample: initialize directly
+           smoothedRttMicros = sampleMicros;
+           rttVarianceMicros = sampleMicros / 2;
+       } else {
+           // EWMA update per RFC 6298
+           long delta = abs(smoothedRttMicros - sampleMicros);
+
+           // beta = 1/4: RTTVAR = (3*RTTVAR + delta) / 4
+           rttVarianceMicros = ((rttVarianceMicros * 3) + delta) / 4;
+
+           // alpha = 1/8: SRTT = (7*SRTT + sample) / 8
+           smoothedRttMicros =
+               ((smoothedRttMicros * 7) + sampleMicros) / 8;
+       }
+
+       // K = 4: RTO = SRTT + 4 * RTTVAR
+       long candidate = smoothedRttMicros + (4 * rttVarianceMicros);
+
+       // Clamp to configured bounds
+       if (candidate < minRtoMicros)
+           candidate = minRtoMicros;
+       if (candidate > maxRtoMicros)
+           candidate = maxRtoMicros;
+
+       currentRtoMicros = candidate;
+   }
+
+   void RtoEstimator_Backoff()
+   {
+       double backedOff = currentRtoMicros * backoffFactor; // 1.2x
+
+       // Floor: max(current_RTO, 2 * MIN_RTO_MICROS)
+       double minBackoff = max((double)currentRtoMicros,
+                               minRtoMicros * 2.0);
+
+       if (backedOff > minBackoff)
+           backedOff = minBackoff;
+
+       // Hard ceiling
+       if (backedOff > maxRtoMicros)
+           backedOff = maxRtoMicros;
+
+       currentRtoMicros = (long)backedOff;
+   }
+
+
+Appendix B.  Pseudocode for BBR State Machine Dispatch
+
+   This appendix presents the BBR state dispatch on each ACK event.
+
+   void Bbr_OnAck(long now, int deliveredBytes,
+                  long sampleRtt, int flightBytes)
+   {
+       // Step 1: Update MinRtt (sticky floor)
+       if (sampleRtt > 0) {
+           if (minRtt == 0)
+               minRtt = sampleRtt;
+           else if (sampleRtt < minRtt)
+               minRtt = max(sampleRtt,
+                            (long)(minRtt * 0.75));
+       }
+
+       // Step 2: Compute delivery rate
+       long interval = max(1, now - lastAckMicros);
+       double deliveryRate =
+           deliveredBytes * 1000000.0 / (double)interval;
+
+       // Step 3: Feed into max-filter
+       AddRateSample(deliveryRate, now);
+
+       // Step 4: Classify network condition and path
+       AdvanceClassifierWindow(now, deliveredBytes + flightBytes,
+                                sampleRtt, lossRatio);
+       networkPathClass = ClassifyNetworkPath();
+       networkCondition = ClassifyNetworkCondition(now);
+
+       // Step 5: ProbeRTT entry logic
+       if (minRttExpired && mode != ProbeRtt) {
+           if (isMobile) {
+               // Skip ProbeRTT on mobile paths
+               minRttTimestamp = now;
+           } else if (bandwidthStalled || !isLossyFat) {
+               EnterProbeRtt(now);
+           }
+       }
+
+       // Step 6: Round detection
+       if (totalDelivered >= nextRoundDelivered) {
+           nextRoundDelivered = totalDelivered +
+               max(deliveredBytes, flightBytes);
+           roundStart = true;
+       }
+
+       // Step 7: State dispatch
+       switch (mode) {
+       case Startup:
+           if (roundStart)
+               UpdateStartup();
+           break;
+       case Drain:
+           if (flightBytes <= targetCwnd ||
+               elapsed >= max(minRtt, 1000))
+               EnterProbeBw(now);
+           break;
+       case ProbeBw:
+           if (elapsed >= max(minRtt, 1000)) {
+               cycleIndex = (cycleIndex + 1) % 8;
+               if (isMobileOrLossy && !isCongested) {
+                   if (cycleIndex < 7)
+                       pacingGain = CalculatePacingGain(now);
+                   else
+                       pacingGain = min(1.0, probeBwLowGain);
+               } else {
+                   pacingGain = CalculatePacingGain(now);
+               }
+           }
+           break;
+       case ProbeRtt:
+           pacingGain = probeRttPacingGain; // 0.85
+           if (ShouldExitProbeRtt(now, sampleRtt))
+               ExitProbeRtt(now, sampleRtt);
+           break;
+       }
+
+       // Step 8: Fast recovery timeout
+       if (inFastRecovery &&
+           elapsed >= minRtt)
+           inFastRecovery = false;
+
+       // Step 9: Recompute model
+       RecalculateModel(now);
+   }
+
+
+
+Appendix C.  Complete Constant Value Reference
+
+   This appendix provides an organized summary of all protocol constants
+   grouped by category, with their exact values.  All values are sourced
+   from the reference implementation UcpConstants.cs.
+
+   C.1.  Packet Format
+
+   COMMON_HEADER_SIZE                    = 12
+   MSS                                   = 1220
+   DATA_HEADER_SIZE                      = 20
+   DATA_HEADER_SIZE_WITH_ACK             = 36
+   ACK_FIXED_SIZE                        = 28
+   NAK_FIXED_SIZE                        = 18
+   MAX_PAYLOAD_SIZE                      = 1200
+   SACK_BLOCK_SIZE                       = 8
+   MAX_ACK_SACK_BLOCKS                   = 149
+
+   C.2.  Window and Buffer Sizes
+
+   DEFAULT_RECV_WINDOW_PACKETS           = 4096
+   DEFAULT_RECV_WINDOW_BYTES             = 4997120
+   INITIAL_CWND_PACKETS                  = 20
+   DEFAULT_SEND_BUFFER_BYTES             = 33554432
+   DEFAULT_MAX_CONGESTION_WINDOW_BYTES   = 67108864
+
+   C.3.  Timing Constants
+
+   MICROS_PER_MILLI                      = 1000
+   MICROS_PER_SECOND                     = 1000000
+   DEFAULT_DELAYED_ACK_TIMEOUT_MICROS    = 100
+   DEFAULT_PACING_BUCKET_DURATION_MICROS = 10000
+   TIMER_INTERVAL_MILLISECONDS           = 1
+
+   C.4.  RTO Constants
+
+   INITIAL_RTO_MICROS                    = 100000
+   MIN_RTO_MICROS                        = 20000
+   DEFAULT_RTO_MICROS                    = 50000
+   DEFAULT_MAX_RTO_MICROS                = 15000000
+   MAX_RTO_MICROS                        = 60000000
+   RTO_BACKOFF_FACTOR                    = 1.2
+   MAX_RETRANSMISSIONS                   = 10
+   RTO_GAIN_MULTIPLIER                   = 4
+
+   C.5.  Loss Detection
+
+   DUPLICATE_ACK_THRESHOLD               = 3
+   SACK_FAST_RETRANSMIT_THRESHOLD        = 2
+   SACK_FAST_RETRANSMIT_DISTANCE_THRESHOLD = 48
+   NAK_MISSING_THRESHOLD                 = 2
+   NAK_HIGH_CONFIDENCE_MISSING_THRESHOLD = 128
+   NAK_MEDIUM_CONFIDENCE_MISSING_THRESHOLD = 32
+   MAX_NAKS_PER_RTT                      = 1024
+   MAX_NAK_SEQUENCES_PER_PACKET          = 256
+   TLP_MAX_INFLIGHT_SEGMENTS             = 2
+   TLP_TIMEOUT_RTT_RATIO                 = 1.5
+   EARLY_RETRANSMIT_MAX_INFLIGHT_SEGMENTS = 4
+
+   C.6.  BBR Gains
+
+   BBR_STARTUP_PACING_GAIN               = 2.89
+   BBR_STARTUP_CWND_GAIN                 = 2.0
+   BBR_DRAIN_PACING_GAIN                 = 1.0
+   BBR_PROBE_BW_HIGH_GAIN                = 1.35
+   BBR_PROBE_BW_LOW_GAIN                 = 0.85
+   BBR_PROBE_BW_CWND_GAIN                = 2.0
+   BBR_PROBE_RTT_PACING_GAIN             = 0.85
+   BBR_FAST_RECOVERY_PACING_GAIN         = 1.25
+   BBR_MODERATE_PROBE_GAIN               = 1.50
+   BBR_LIGHT_LOSS_PACING_GAIN            = 1.10
+   BBR_MEDIUM_LOSS_PACING_GAIN           = 1.05
+   BBR_HIGH_LOSS_PACING_GAIN             = 1.00
+
+   C.7.  BBR Thresholds
+
+   BBR_STARTUP_GROWTH_TARGET             = 1.25
+   BBR_LOW_RTT_INCREASE_RATIO            = 0.10
+   BBR_MODERATE_RTT_INCREASE_RATIO       = 0.20
+   BBR_CONGESTION_RTT_INCREASE_RATIO     = 0.50
+   BBR_LOW_LOSS_RATIO                    = 0.01
+   BBR_MODERATE_LOSS_RATIO               = 0.03
+   BBR_LIGHT_LOSS_RATIO                  = 0.08
+   BBR_MEDIUM_LOSS_RATIO                 = 0.15
+   BBR_CONGESTION_LOSS_RATIO             = 0.10
+   BBR_CONGESTION_CLASSIFIER_SCORE_THRESH = 2
+
+   C.8.  BBR Timing
+
+   BBR_PROBE_RTT_INTERVAL_MICROS         = 30000000
+   BBR_PROBE_RTT_DURATION_MICROS         = 100000
+   BBR_WINDOW_RTT_ROUNDS                 = 10
+   BBR_MIN_STARTUP_FULL_BANDWIDTH_ROUNDS = 3
+
+   C.9.  Wire-Format Values
+
+   SYN      = 0x01    SYN-ACK = 0x02    ACK    = 0x03
+   NAK      = 0x04    DATA    = 0x05    FIN    = 0x06
+   RST      = 0x07    FEC_REPAIR = 0x08
+   NeedAck  = 0x01    Retransmit = 0x02
+   FinAck   = 0x04    HasAckNumber = 0x08
+
+   C.10.  Connection Management
+
+   CONNECT_TIMEOUT_MILLISECONDS          = 5000
+   DISCONNECT_TIMEOUT_MICROS             = 4000000
+   KEEP_ALIVE_INTERVAL_MICROS            = 1000000
+   PAWS_TIMEOUT_MICROS                   = 60000000
+   CLOSE_WAIT_TIMEOUT_MILLISECONDS       = 1000
+   MIN_HANDSHAKE_WAIT_MILLISECONDS       = 100
+
+   C.11.  Network Classifier
+
+   NETWORK_CLASSIFIER_WINDOW_COUNT       = 8
+   NETWORK_CLASSIFIER_WINDOW_DURATION_MICROS = 200000
+   NETWORK_CLASSIFIER_LAN_RTT_MS         = 5
+   NETWORK_CLASSIFIER_LAN_JITTER_MS      = 3
+   NETWORK_CLASSIFIER_LONG_FAT_RTT_MS    = 80
+   NETWORK_CLASSIFIER_MOBILE_LOSS_RATE   = 0.03
+   NETWORK_CLASSIFIER_MOBILE_JITTER_MS   = 20
+
+
+Acknowledgments
+
+   The UCP protocol was designed and implemented by the PPP PRIVATE
+   NETWORK™ X project team.  The congestion control subsystem draws
+   heavily from the BBRv2 work by Neal Cardwell, Yuchung Cheng,
+   C. Stephen Gunn, Soheil Hassas Yeganeh, and Van Jacobson at Google.
+   The SACK encoding is modeled after QUIC's ACK frame design.  The
+   tiered NAK confidence system and the adaptive FEC were developed
+   specifically for UCP's multi-environment deployment requirements.
+
+
+Authors' Addresses
+
+   PPP PRIVATE NETWORK™ X
+   Telegram: @supersocksr_group

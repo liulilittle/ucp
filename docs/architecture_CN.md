@@ -2,7 +2,7 @@
 
 [English](architecture.md) | [文档索引](index_CN.md)
 
-**协议标识: `ppp+ucp`** — 本文档深度解析 UCP 协议引擎的内部运行时架构，涵盖六层分层设计、每连接 UcpPcb 状态管理、Connection-ID 驱动的 IP 无关会话追踪、SerialQueue 串行执行模型、公平队列服务端调度、PacingController Token Bucket 设计、BBRv2 拥塞控制内核、FEC Reed-Solomon GF(256) 编解码器、入站/出站数据包流经协议栈的完整路径、确定性网络模拟器架构以及测试与验证流程。
+**协议标识: `ppp+ucp`** — 本文档解析 UCP 协议引擎的内部运行时架构，涵盖六层分层设计、每连接 UcpPcb 状态管理、Connection-ID 驱动的 IP 无关会话追踪、SerialQueue 串行执行模型、公平队列服务端调度、PacingController Token Bucket 设计、BBRv2 拥塞控制内核、FEC Reed-Solomon GF(256) 编解码器、入站/出站数据包流经协议栈的完整路径、确定性网络模拟器架构以及测试与验证流程。
 
 ---
 

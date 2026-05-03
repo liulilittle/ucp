@@ -33,3 +33,5 @@
 
 bin/
 obj/
+build/
+build_ninja/

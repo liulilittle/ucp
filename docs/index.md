@@ -11,8 +11,8 @@ UCP's core tenet: **loss classification must precede rate control**. TCP treats 
 | English | 中文 |
 |---|---|
 | [Documentation Index](index.md) | [文档索引](index_CN.md) |
-| [Architecture Deep Dive](architecture.md) | [架构深度解析](architecture_CN.md) |
-| [Protocol Specification](protocol.md) | [协议深度解析](protocol_CN.md) |
+| [Architecture](architecture.md) | [架构](architecture_CN.md) |
+| [Protocol](protocol.md) | [协议](protocol_CN.md) |
 | [API Reference](api.md) | [API 参考](api_CN.md) |
 | [Performance Guide](performance.md) | [性能与报告指南](performance_CN.md) |
 | [Constants Reference](constants.md) | [常量参考](constants_CN.md) |
