@@ -1,6 +1,6 @@
-using System;
-using System.Collections.Generic;
-using System.Threading.Tasks;
+using System; // Provides ArgumentNullException for parameter validation
+using System.Collections.Generic; // Provides Queue<T> for the FIFO work item queue
+using System.Threading.Tasks; // Provides Task, TaskCompletionSource<T> for async patterns
 
 namespace Ucp.Internal
 {
@@ -14,13 +14,13 @@ namespace Ucp.Internal
     internal sealed class SerialQueue
     {
         /// <summary>Synchronization object for queue operations.</summary>
-        private readonly object _sync = new object();
+        private readonly object _sync = new object(); // Lock object protecting the shared _queue and _processing flag
 
         /// <summary>Queue of pending work items, each returning a Task.</summary>
-        private readonly Queue<Func<Task>> _queue = new Queue<Func<Task>>();
+        private readonly Queue<Func<Task>> _queue = new Queue<Func<Task>>(); // FIFO (or priority-inserted) collection of async delegates awaiting execution
 
         /// <summary>Whether the ProcessLoopAsync is currently draining the queue.</summary>
-        private bool _processing;
+        private bool _processing; // Guard flag; only one processing loop may run at a time to guarantee sequential execution
 
         /// <summary>
         /// Posts a synchronous action for sequential execution.
@@ -28,15 +28,15 @@ namespace Ucp.Internal
         /// <param name="action">The action to execute.</param>
         public void Post(Action action)
         {
-            if (action == null)
+            if (action == null) // Validate that a non-null action was provided
             {
-                throw new ArgumentNullException(nameof(action));
+                throw new ArgumentNullException(nameof(action)); // Fail fast with a clear diagnostic
             }
 
-            Enqueue(delegate
+            Enqueue(delegate // Wrap the synchronous action into a Func<Task> so it fits the unified queue signature
             {
-                action();
-                return Task.CompletedTask;
+                action(); // Execute the user's synchronous work on the strand thread
+                return Task.CompletedTask; // Signal completion; required by Func<Task> return type
             });
         }
 
@@ -46,12 +46,12 @@ namespace Ucp.Internal
         /// <param name="action">The async function to execute.</param>
         public void Post(Func<Task> action)
         {
-            if (action == null)
+            if (action == null) // Validate that a non-null delegate was provided
             {
-                throw new ArgumentNullException(nameof(action));
+                throw new ArgumentNullException(nameof(action)); // Fail fast with a clear diagnostic
             }
 
-            Enqueue(action);
+            Enqueue(action); // Enqueue the async delegate directly; no wrapping needed since it already returns Task
         }
 
         /// <summary>
@@ -61,12 +61,12 @@ namespace Ucp.Internal
         /// <param name="action">The async function to execute with priority.</param>
         public void PostPriority(Func<Task> action)
         {
-            if (action == null)
+            if (action == null) // Validate that a non-null delegate was provided
             {
-                throw new ArgumentNullException(nameof(action));
+                throw new ArgumentNullException(nameof(action)); // Fail fast with a clear diagnostic
             }
 
-            Enqueue(action, true);
+            Enqueue(action, true); // Enqueue with priority flag set; inserts at front to skip ahead of normal FIFO items
         }
 
         /// <summary>
@@ -77,27 +77,27 @@ namespace Ucp.Internal
         /// <returns>A Task representing the completion of the action.</returns>
         public Task EnqueueAsync(Action action)
         {
-            if (action == null)
+            if (action == null) // Validate that a non-null action was provided
             {
-                throw new ArgumentNullException(nameof(action));
+                throw new ArgumentNullException(nameof(action)); // Fail fast with a clear diagnostic
             }
 
-            TaskCompletionSource<bool> completion = new TaskCompletionSource<bool>();
-            Enqueue(delegate
+            TaskCompletionSource<bool> completion = new TaskCompletionSource<bool>(); // Create a TCS to bridge strand execution back to the caller's await
+            Enqueue(delegate // Wrap the action into a Func<Task> compatible with the unified queue
             {
                 try
                 {
-                    action();
-                    completion.TrySetResult(true);
+                    action(); // Execute the user's synchronous work on the strand thread
+                    completion.TrySetResult(true); // Signal success to the awaiting caller via the TaskCompletionSource
                 }
                 catch (Exception ex)
                 {
-                    completion.TrySetException(ex);
+                    completion.TrySetException(ex); // Propagate the exception to the awaiting caller via the TCS
                 }
 
-                return Task.CompletedTask;
+                return Task.CompletedTask; // Satisfy the Func<Task> return type; the actual result flows through TCS
             });
-            return completion.Task;
+            return completion.Task; // Return the Task that the caller can await for completion or fault
         }
 
         /// <summary>
@@ -109,26 +109,26 @@ namespace Ucp.Internal
         /// <returns>A Task that completes with the function's result.</returns>
         public Task<T> EnqueueAsync<T>(Func<T> action)
         {
-            if (action == null)
+            if (action == null) // Validate that a non-null function was provided
             {
-                throw new ArgumentNullException(nameof(action));
+                throw new ArgumentNullException(nameof(action)); // Fail fast with a clear diagnostic
             }
 
-            TaskCompletionSource<T> completion = new TaskCompletionSource<T>();
-            Enqueue(delegate
+            TaskCompletionSource<T> completion = new TaskCompletionSource<T>(); // Create a typed TCS to relay both result and exceptions
+            Enqueue(delegate // Wrap the function into a Func<Task> compatible with the unified queue
             {
                 try
                 {
-                    completion.TrySetResult(action());
+                    completion.TrySetResult(action()); // Execute the function and relay its return value to the awaiting caller
                 }
                 catch (Exception ex)
                 {
-                    completion.TrySetException(ex);
+                    completion.TrySetException(ex); // Propagate the exception to the awaiting caller via the TCS
                 }
 
-                return Task.CompletedTask;
+                return Task.CompletedTask; // Satisfy the Func<Task> return type; the actual result flows through TCS
             });
-            return completion.Task;
+            return completion.Task; // Return the typed Task that the caller can await for result or fault
         }
 
         /// <summary>
@@ -140,24 +140,24 @@ namespace Ucp.Internal
         /// <returns>A Task that completes with the async function's result.</returns>
         public Task<T> EnqueueAsync<T>(Func<Task<T>> action)
         {
-            if (action == null)
+            if (action == null) // Validate that a non-null async function was provided
             {
-                throw new ArgumentNullException(nameof(action));
+                throw new ArgumentNullException(nameof(action)); // Fail fast with a clear diagnostic
             }
 
-            TaskCompletionSource<T> completion = new TaskCompletionSource<T>();
-            Enqueue(async delegate
+            TaskCompletionSource<T> completion = new TaskCompletionSource<T>(); // Create a typed TCS to relay the async result to the caller
+            Enqueue(async delegate // Enqueue an async anonymous method that will be invoked by the processing loop
             {
                 try
                 {
-                    completion.TrySetResult(await action().ConfigureAwait(false));
+                    completion.TrySetResult(await action().ConfigureAwait(false)); // Await the user's async function and relay its result; ConfigureAwait(false) avoids capturing the strand context
                 }
                 catch (Exception ex)
                 {
-                    completion.TrySetException(ex);
+                    completion.TrySetException(ex); // Propagate the exception from the async function to the awaiting caller
                 }
             });
-            return completion.Task;
+            return completion.Task; // Return the typed Task that the caller can await for the async result or fault
         }
 
         /// <summary>
@@ -167,7 +167,7 @@ namespace Ucp.Internal
         /// <param name="action">The async work item.</param>
         private void Enqueue(Func<Task> action)
         {
-            Enqueue(action, false);
+            Enqueue(action, false); // Delegate to the priority-aware overload with default FIFO (non-priority) behavior
         }
 
         /// <summary>
@@ -178,40 +178,40 @@ namespace Ucp.Internal
         /// <param name="priority">If true, insert at front; otherwise append.</param>
         private void Enqueue(Func<Task> action, bool priority)
         {
-            bool shouldStart = false;
-            lock (_sync)
+            bool shouldStart = false; // Track whether we need to start a new processing loop after releasing the lock
+            lock (_sync) // Acquire the lock to safely mutate the shared queue and _processing flag
             {
-                if (priority && _queue.Count > 0)
+                if (priority && _queue.Count > 0) // If this item has priority and the queue is non-empty
                 {
                     // Insert at front by moving all existing items after this one.
-                    Queue<Func<Task>> reordered = new Queue<Func<Task>>();
-                    reordered.Enqueue(action);
-                    while (_queue.Count > 0)
+                    Queue<Func<Task>> reordered = new Queue<Func<Task>>(); // Create a temporary queue to rebuild the order
+                    reordered.Enqueue(action); // Put the priority item first in the temporary queue
+                    while (_queue.Count > 0) // Drain all existing items from the original queue
                     {
-                        reordered.Enqueue(_queue.Dequeue());
+                        reordered.Enqueue(_queue.Dequeue()); // Move each existing item after the priority item, preserving FIFO among them
                     }
 
-                    while (reordered.Count > 0)
+                    while (reordered.Count > 0) // Rebuild the original queue from the temporary reordered queue
                     {
-                        _queue.Enqueue(reordered.Dequeue());
+                        _queue.Enqueue(reordered.Dequeue()); // Populate _queue with the correct priority-first ordering
                     }
                 }
                 else
                 {
-                    _queue.Enqueue(action);
+                    _queue.Enqueue(action); // Append the item to the end of the FIFO queue (normal case or empty queue)
                 }
 
-                if (!_processing)
+                if (!_processing) // Check if the processing loop is not currently running
                 {
-                    _processing = true;
-                    shouldStart = true;
+                    _processing = true; // Mark the loop as active so no duplicate loops are created
+                    shouldStart = true; // Signal that we need to start the processing loop after releasing the lock
                 }
             }
 
-            if (shouldStart)
+            if (shouldStart) // If we marked shouldStart while holding the lock
             {
                 // Start the processing loop on a background thread.
-                Task.Run(ProcessLoopAsync);
+                Task.Run(ProcessLoopAsync); // Fire-and-forget the processing loop on a threadpool thread; it drains until queue is empty
             }
         }
 
@@ -223,27 +223,28 @@ namespace Ucp.Internal
         /// </summary>
         private async Task ProcessLoopAsync()
         {
-            while (true)
+            while (true) // Loop indefinitely until the queue is empty; exits via return inside the lock
             {
-                Func<Task> next;
-                lock (_sync)
+                Func<Task> next; // Will hold the next work item to execute after releasing the lock
+                lock (_sync) // Acquire the lock to safely check queue state and dequeue the next item
                 {
-                    if (_queue.Count == 0)
+                    if (_queue.Count == 0) // If the queue has been fully drained
                     {
-                        _processing = false;
-                        return;
+                        _processing = false; // Mark processing as inactive so the next Enqueue can restart the loop
+                        return; // Exit the processing loop; a new loop will be started by the next Enqueue call
                     }
 
-                    next = _queue.Dequeue();
+                    next = _queue.Dequeue(); // Remove and capture the next work item from the front of the FIFO queue
                 }
 
                 try
                 {
-                    await next().ConfigureAwait(false);
+                    await next().ConfigureAwait(false); // Execute the dequeued async work item; ConfigureAwait(false) avoids capturing the strand context
                 }
                 catch
                 {
                     // The concrete exception has already been recorded on the task source.
+                    // Silently swallow here; the caller's TaskCompletionSource was already populated in the Enqueue wrapper.
                 }
             }
         }

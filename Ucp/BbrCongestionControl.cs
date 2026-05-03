@@ -340,7 +340,7 @@ namespace Ucp
         ///       for all parameters (gains, limits, thresholds).
         /// </summary>
         public BbrCongestionControl()
-            : this(new UcpConfiguration())
+            : this(new UcpConfiguration()) // Delegate to the parameterized constructor with default config as baseline.
         {
         }
 
@@ -364,19 +364,19 @@ namespace Ucp
         /// <param name="config">Protocol configuration for BBR parameters.</param>
         public BbrCongestionControl(UcpConfiguration config)
         {
-            _config = config ?? new UcpConfiguration();
-            Mode = BbrMode.Startup;
-            PacingGain = _config.StartupPacingGain;
-            CwndGain = _config.StartupCwndGain;
-            _maxBandwidthLossPercent = _config.EffectiveMaxBandwidthLossPercent;
-            BtlBwBytesPerSecond = _config.InitialBandwidthBytesPerSecond;
-            if (_config.MaxPacingRateBytesPerSecond > 0 && BtlBwBytesPerSecond > _config.MaxPacingRateBytesPerSecond)
+            _config = config ?? new UcpConfiguration(); // Store config reference; fall back to default if null to ensure we always have valid settings.
+            Mode = BbrMode.Startup; // Start in Startup mode to rapidly discover the bottleneck bandwidth via exponential probing.
+            PacingGain = _config.StartupPacingGain; // Set initial pacing gain (typically 2.89×, derived from 2/ln(2), for exponential startup ramp-up).
+            CwndGain = _config.StartupCwndGain; // Set initial CWND gain (typically 2.89×) to match the pacing gain for aggressive probing.
+            _maxBandwidthLossPercent = _config.EffectiveMaxBandwidthLossPercent; // Load the maximum tolerable loss percentage from config (e.g. 5% for loss-control decisions).
+            BtlBwBytesPerSecond = _config.InitialBandwidthBytesPerSecond; // Initialize BtlBw to the configured target bottleneck rate as the starting estimate.
+            if (_config.MaxPacingRateBytesPerSecond > 0 && BtlBwBytesPerSecond > _config.MaxPacingRateBytesPerSecond) // A hard rate cap is configured and the initial BtlBw exceeds it.
             {
                 BtlBwBytesPerSecond = _config.MaxPacingRateBytesPerSecond; // Clamp to max.
             }
 
-            MinRttMicros = 0;
-            RecalculateModel(UcpTime.NowMicroseconds());
+            MinRttMicros = 0; // No RTT samples collected yet; MinRtt starts at zero until the first ACK arrives.
+            RecalculateModel(UcpTime.NowMicroseconds()); // Compute the initial pacing rate and CWND from the starting BtlBw and MinRtt estimates.
         }
 
         /// <summary>
@@ -396,24 +396,24 @@ namespace Ucp
             // a single lucky fast measurement (e.g. during ProbeRTT drain)
             // from collapsing the CWND model, while still allowing MinRtt
             // to track improving path conditions.
-            bool minRttExpired = MinRttMicros > 0 && nowMicros - _minRttTimestampMicros >= _config.ProbeRttIntervalMicros;
-            if (sampleRttMicros > 0)
+            bool minRttExpired = MinRttMicros > 0 && nowMicros - _minRttTimestampMicros >= _config.ProbeRttIntervalMicros; // Determine if MinRtt has gone stale (exceeded the configured ProbeRTT refresh interval).
+            if (sampleRttMicros > 0) // Only process valid (non-zero) RTT samples — some ACKs carry no RTT measurement.
             {
-                _currentRttMicros = sampleRttMicros;
-                if (MinRttMicros == 0 || sampleRttMicros < MinRttMicros)
+                _currentRttMicros = sampleRttMicros; // Record the most recent RTT sample for round-tracking and diagnostic purposes.
+                if (MinRttMicros == 0 || sampleRttMicros < MinRttMicros) // First-ever RTT sample OR a new candidate minimum that beats the current floor.
                 {
                     // Sticky min-RTT: only drop at most 25% per sample to prevent
                     // a single lucky fast measurement from collapsing CWND.
-                    if (MinRttMicros > 0)
+                    if (MinRttMicros > 0) // Not the first sample — use the sticky floor to prevent excessive reduction.
                     {
-                        MinRttMicros = Math.Max(sampleRttMicros, (long)(MinRttMicros * 0.75d));
+                        MinRttMicros = Math.Max(sampleRttMicros, (long)(MinRttMicros * 0.75d)); // Allow at most 25% reduction per sample to prevent CWND collapse from one lucky fast measurement.
                     }
                     else
                     {
-                        MinRttMicros = sampleRttMicros;
+                        MinRttMicros = sampleRttMicros; // First-ever RTT sample: use it directly as the initial MinRtt baseline.
                     }
                     
-                    _minRttTimestampMicros = nowMicros;
+                    _minRttTimestampMicros = nowMicros; // Record the time of this MinRtt update to track freshness for the ProbeRTT interval timer.
                     minRttExpired = false; // Resets the expiry clock.
                 }
             }
@@ -423,23 +423,23 @@ namespace Ucp
             // We use the actual wall-clock interval rather than the RTT
             // sample because ACK compression can make RTT samples misleading.
             long intervalMicros;
-            if (_lastAckMicros == 0)
+            if (_lastAckMicros == 0) // First ACK ever received — no previous timestamp exists to compute a real interval.
             {
-                intervalMicros = sampleRttMicros > 0 ? sampleRttMicros : 1;
+                intervalMicros = sampleRttMicros > 0 ? sampleRttMicros : 1; // Use the RTT sample itself as a fallback interval, or 1us to avoid division by zero.
             }
             else
             {
-                intervalMicros = Math.Max(1, nowMicros - _lastAckMicros);
+                intervalMicros = Math.Max(1, nowMicros - _lastAckMicros); // Compute wall-clock interval since the last ACK, with a 1us minimum to avoid divide-by-zero.
             }
 
-            _lastAckMicros = nowMicros;
+            _lastAckMicros = nowMicros; // Update the last-ACK timestamp for the next interval computation on the next ACK.
 
             // ---- Step 3: Feed delivery-rate samples into the max-filter ----
-            if (deliveredBytes > 0)
+            if (deliveredBytes > 0) // Only process ACKs that actually acknowledge new data — pure window updates may carry zero bytes.
             {
-                _totalDeliveredBytes += deliveredBytes;
-                double deliveryRate = deliveredBytes * UcpConstants.MICROS_PER_SECOND / (double)intervalMicros;
-                if (PacingRateBytesPerSecond > 0)
+                _totalDeliveredBytes += deliveredBytes; // Accumulate total delivered bytes (since connection start) for round boundary detection.
+                double deliveryRate = deliveredBytes * UcpConstants.MICROS_PER_SECOND / (double)intervalMicros; // Compute the instantaneous delivery rate in bytes per second.
+                if (PacingRateBytesPerSecond > 0) // Only apply the ACK aggregation cap when we have a valid pacing rate baseline to compare against.
                 {
                     // Cap the delivery rate to prevent ACK aggregation from inflating estimates.
                     // ACK aggregation (multiple ACKs arriving in a tight burst after a gap)
@@ -447,58 +447,58 @@ namespace Ucp
                     // representative of the path.  In Startup we allow a higher cap (2.5×)
                     // to avoid under-clamping during rapid ramp-up; in steady state the
                     // cap is tighter (1.3×).
-                    double aggregationCapGain = Mode == BbrMode.Startup ? UcpConstants.BBR_STARTUP_ACK_AGGREGATION_RATE_CAP_GAIN : UcpConstants.BBR_STEADY_ACK_AGGREGATION_RATE_CAP_GAIN;
-                    deliveryRate = Math.Min(deliveryRate, PacingRateBytesPerSecond * aggregationCapGain);
+                    double aggregationCapGain = Mode == BbrMode.Startup ? UcpConstants.BBR_STARTUP_ACK_AGGREGATION_RATE_CAP_GAIN : UcpConstants.BBR_STEADY_ACK_AGGREGATION_RATE_CAP_GAIN; // Select the cap gain: looser 2.5x in Startup (to allow rapid ramp-up), tighter 1.3x in steady state (to prevent overshoot).
+                    deliveryRate = Math.Min(deliveryRate, PacingRateBytesPerSecond * aggregationCapGain); // Clamp the delivery rate to at most the pacing rate multiplied by the aggregation cap gain.
                 }
 
-                _deliveryRateBytesPerSecond = deliveryRate;
+                _deliveryRateBytesPerSecond = deliveryRate; // Store the most recent delivery rate for diagnostics and loss-percentage calculations.
                 AddRateSample(deliveryRate, nowMicros);       // Max-filter for BtlBw.
                 AddDeliveryRateSample(deliveryRate);           // Trend history for congestion detection.
-                if (_lossCwndGain < 1d && Mode != BbrMode.ProbeRtt)
+                if (_lossCwndGain < 1d && Mode != BbrMode.ProbeRtt) // CWND loss reduction is active (gain < 1.0) and we're not in the ProbeRTT drain phase (which handles recovery differently).
                 {
                     // Gradually recover CWND gain after loss reduction.
                     // Accelerated recovery on mobile/unstable paths where
                     // loss is rarely real congestion.
                     double recoveryStep = (CurrentNetworkClass == NetworkClass.MobileUnstable
                                             || _networkCondition == NetworkCondition.RandomLoss)
-                        ? UcpConstants.BBR_LOSS_CWND_RECOVERY_STEP_FAST
-                        : UcpConstants.BBR_LOSS_CWND_RECOVERY_STEP;
-                    _lossCwndGain = Math.Min(1d, _lossCwndGain + recoveryStep);
+                        ? UcpConstants.BBR_LOSS_CWND_RECOVERY_STEP_FAST // Fast recovery step for mobile/random-loss paths where loss is typically noise.
+                        : UcpConstants.BBR_LOSS_CWND_RECOVERY_STEP; // Standard (slower) recovery step for all other path types.
+                    _lossCwndGain = Math.Min(1d, _lossCwndGain + recoveryStep); // Increment CWND gain by one recovery step toward 1.0 (full recovery), never exceeding 1.0.
 
                     // On mobile paths, don't let CWND stay depressed for
                     // more than 3 ACKs after any loss event.
                     if (CurrentNetworkClass == NetworkClass.MobileUnstable
-                        && _lossCwndGain < 0.98d)
+                        && _lossCwndGain < 0.98d) // CWND gain is still significantly below full on a mobile path — loss was likely non-congestion.
                     {
                         // Accelerate back to near-full.
-                        _lossCwndGain = Math.Min(1d, _lossCwndGain + recoveryStep * 2d);
+                        _lossCwndGain = Math.Min(1d, _lossCwndGain + recoveryStep * 2d); // Apply a double recovery step to rapidly restore throughput on mobile links.
                     }
                 }
             }
 
-            if (sampleRttMicros > 0)
+            if (sampleRttMicros > 0) // A valid RTT sample was included with this ACK — store it for jitter and percentile analysis.
             {
-                AddRttSample(sampleRttMicros);
+                AddRttSample(sampleRttMicros); // Feed the RTT sample into the history buffer (capped at 500ms to filter RTO stalls).
             }
 
             // ---- Step 4: Classify network condition and path type ----
             // The local condition (Idle/LightLoad/Congested/RandomLoss) drives
             // immediate pacing and loss decisions.  The path class (LAN, Mobile,
             // LossyFat, etc.) drives long-term gain policies.
-            AdvanceClassifierWindow(nowMicros, deliveredBytes + flightBytes, sampleRttMicros, GetRecentLossRatio(nowMicros));
-            CurrentNetworkClass = ClassifyNetworkPath();
+            AdvanceClassifierWindow(nowMicros, deliveredBytes + flightBytes, sampleRttMicros, GetRecentLossRatio(nowMicros)); // Accumulate bytes, RTT, and loss data into the classifier window for path-type classification.
+            CurrentNetworkClass = ClassifyNetworkPath(); // Classify the end-to-end network path (LAN, Mobile, LossyFat, VPN, etc.) from multi-second aggregated statistics.
 
-            _networkCondition = ClassifyNetworkCondition(nowMicros);
-            if (_networkCondition == NetworkCondition.Congested)
+            _networkCondition = ClassifyNetworkCondition(nowMicros); // Classify the instantaneous local network condition (Idle, LightLoad, Congested, or RandomLoss) from recent trends.
+            if (_networkCondition == NetworkCondition.Congested) // The network is congested — the path's capacity may have changed.
             {
                 // Congestion detected: reset the soft BtlBw floor so it
                 // does not hold onto a rate that the path can no longer
                 // support.
-                _maxBtlBwInNonCongestedWindow = 0;
+                _maxBtlBwInNonCongestedWindow = 0; // Invalidate the non-congested BtlBw soft floor since congestion indicates the path cannot sustain its previous rate.
             }
 
-            UpdateEstimatedLossPercent(nowMicros);
-            UpdateInflightBounds();
+            UpdateEstimatedLossPercent(nowMicros); // Update the EWMA-smoothed loss percentage estimate from the current loss data.
+            UpdateInflightBounds(); // Recompute the upper and lower inflight guardrails (CWND ceilings/floors) based on current BDP and path class.
 
             // ---- Step 5: ProbeRTT entry logic ----
             // ProbeRTT is the periodic deep-drain to refresh MinRtt.  Normal
@@ -511,27 +511,27 @@ namespace Ucp
             //      disrupting a bandwidth discovery in progress.
             //   c) Bandwidth growth stalled + other paths: enter ProbeRTT as
             //      there is nothing to lose by draining the pipe.
-            if (minRttExpired && Mode != BbrMode.ProbeRtt)
+            if (minRttExpired && Mode != BbrMode.ProbeRtt) // MinRtt has gone stale AND we're not currently in the middle of a ProbeRTT cycle.
             {
-                bool bandwidthGrowthStalled = _fullBandwidthRounds >= UcpConstants.RTO_MAX_BACKOFF_MIN_RTO_MULTIPLIER;
-                bool isLossyFat = CurrentNetworkClass == NetworkClass.LossyLongFat;
-                bool isMobile = CurrentNetworkClass == NetworkClass.MobileUnstable;
+                bool bandwidthGrowthStalled = _fullBandwidthRounds >= UcpConstants.RTO_MAX_BACKOFF_MIN_RTO_MULTIPLIER; // Check if bandwidth discovery has stalled for a sufficient number of rounds.
+                bool isLossyFat = CurrentNetworkClass == NetworkClass.LossyLongFat; // Determine if the current path is classified as lossy long-fat (satellite/long-haul).
+                bool isMobile = CurrentNetworkClass == NetworkClass.MobileUnstable; // Determine if the current path is classified as mobile/unstable (LTE/5G/WiFi).
 
                 // Skip ProbeRTT on mobile paths — jitter dominates RTT and
                 // P10/P30 tracking already provides a robust min RTT proxy.
                 // Entering ProbeRTT just creates an unnecessary throughput cliff.
-                if (isMobile)
+                if (isMobile) // Mobile path detected — skip ProbeRTT entirely to avoid a throughput penalty on a path dominated by non-queuing jitter.
                 {
                     // Just refresh the min-RTT timestamp to keep it fresh.
-                    _minRttTimestampMicros = nowMicros;
+                    _minRttTimestampMicros = nowMicros; // Reset the MinRtt timestamp so the ProbeRTT interval timer restarts without actually entering the probe.
                 }
-                else if (bandwidthGrowthStalled || !isLossyFat)
+                else if (bandwidthGrowthStalled || !isLossyFat) // Bandwidth growth has stalled (always safe to probe) OR path is not lossy-long-fat (probe won't disrupt bandwidth discovery).
                 {
-                    EnterProbeRtt(nowMicros);
+                    EnterProbeRtt(nowMicros); // Enter the ProbeRTT deep-drain phase to collect a fresh minimum RTT measurement.
                 }
                 else
                 {
-                    TraceLog(string.Concat("SkipProbeRtt btlBw=", BtlBwBytesPerSecond, " fullBwRounds=", _fullBandwidthRounds, " preservedOnLossyFat"));
+                    TraceLog(string.Concat("SkipProbeRtt btlBw=", BtlBwBytesPerSecond, " fullBwRounds=", _fullBandwidthRounds, " preservedOnLossyFat")); // Log the decision to skip ProbeRTT on a lossy fat path that still has active bandwidth growth.
                 }
             }
 
@@ -541,15 +541,15 @@ namespace Ucp
             // length is approximately one BDP worth of data, which on a
             // well-paced connection equals one RTT.  Round boundaries
             // trigger Startup exit checks and ProbeBW gain-cycle advances.
-            bool roundStart = false;
-            if (_nextRoundDeliveredBytes == 0)
+            bool roundStart = false; // Default: no round boundary detected unless proven otherwise below.
+            if (_nextRoundDeliveredBytes == 0) // First ACK — the round-delivered threshold has not been initialized yet.
             {
-                _nextRoundDeliveredBytes = _totalDeliveredBytes + Math.Max(deliveredBytes, flightBytes);
+                _nextRoundDeliveredBytes = _totalDeliveredBytes + Math.Max(deliveredBytes, flightBytes); // Initialize the next round boundary at approximately one BDP's worth of data ahead.
             }
-            else if (_totalDeliveredBytes >= _nextRoundDeliveredBytes)
+            else if (_totalDeliveredBytes >= _nextRoundDeliveredBytes) // Cumulative delivered bytes have crossed the round boundary — a new round begins.
             {
-                _nextRoundDeliveredBytes = _totalDeliveredBytes + Math.Max(deliveredBytes, flightBytes);
-                roundStart = deliveredBytes > 0;
+                _nextRoundDeliveredBytes = _totalDeliveredBytes + Math.Max(deliveredBytes, flightBytes); // Advance the round boundary by another BDP's worth of data for the next round.
+                roundStart = deliveredBytes > 0; // Mark the round start (only meaningful if actual data bytes were delivered this ACK).
             }
 
             // ---- Step 7: State-machine dispatch ----
@@ -559,82 +559,82 @@ namespace Ucp
             // Pacing at 2.89× BtlBw, CWND at 2.89× BDP.  At each round
             // boundary, check whether BtlBw grew by ≥ 1.25×.  If it stalls
             // for N rounds, transition to Drain.
-            if (Mode == BbrMode.Startup)
+            if (Mode == BbrMode.Startup) // We are in Startup mode — evaluate bandwidth growth at each round boundary.
             {
-                if (roundStart)
+                if (roundStart) // A round boundary has been reached during Startup.
                 {
-                    UpdateStartup();
+                    UpdateStartup(); // Run the Startup bandwidth-growth check and potentially transition to Drain if growth has stalled.
                 }
             }
             // --- DRAIN: queue-draining transition ---
             // Pacing at DrainPacingGain (typically 0.75–0.90× depending on
             // loss conditions).  Exit when in-flight bytes drop to the BDP
             // target or the minimum duration has elapsed.
-            else if (Mode == BbrMode.Drain)
+            else if (Mode == BbrMode.Drain) // We are in Drain mode — waiting for the standing queue to be flushed.
             {
                 // Exit drain when in-flight drops to the target or the minimum duration elapsed.
-                if (flightBytes <= GetTargetCwndBytes() || nowMicros - _modeEnteredMicros >= Math.Max(MinRttMicros, UcpConstants.BBR_MIN_ROUND_DURATION_MICROS))
+                if (flightBytes <= GetTargetCwndBytes() || nowMicros - _modeEnteredMicros >= Math.Max(MinRttMicros, UcpConstants.BBR_MIN_ROUND_DURATION_MICROS)) // In-flight has drained to the CWND target OR the minimum drain duration has elapsed.
                 {
-                    EnterProbeBw(nowMicros);
+                    EnterProbeBw(nowMicros); // Transition to ProbeBW steady-state cycling — the pipe is now clean.
                 }
             }
             // --- PROBEBW: steady-state gain cycling ---
             // Cycle through the 8-phase gain sequence once per round.
             // Mobile/lossy paths spend 7/8 of the time in high-gain
             // phases to compensate for non-congestion throughput loss.
-            else if (Mode == BbrMode.ProbeBw)
+            else if (Mode == BbrMode.ProbeBw) // We are in ProbeBW mode — advance the gain cycle and adjust for path class.
             {
                 // Advance the gain cycle index when the round duration elapses.
-                if (nowMicros - _modeEnteredMicros >= Math.Max(MinRttMicros, UcpConstants.BBR_MIN_ROUND_DURATION_MICROS))
+                if (nowMicros - _modeEnteredMicros >= Math.Max(MinRttMicros, UcpConstants.BBR_MIN_ROUND_DURATION_MICROS)) // A full round has elapsed since the current gain-phase began — time to cycle.
                 {
-                    _probeBwCycleIndex = (_probeBwCycleIndex + 1) % UcpConstants.BBR_PROBE_BW_GAIN_COUNT;
-                    _modeEnteredMicros = nowMicros;
+                    _probeBwCycleIndex = (_probeBwCycleIndex + 1) % UcpConstants.BBR_PROBE_BW_GAIN_COUNT; // Advance to the next phase in the 8-phase gain cycle (wrapping from 7 back to 0).
+                    _modeEnteredMicros = nowMicros; // Record the timestamp when this new gain-phase began for the next round-duration check.
                 }
 
                 // On mobile/lossy non-congested paths, stay in the high-gain
                 // phase longer (7/8 instead of 4/8) to maintain throughput.
                 if ((CurrentNetworkClass == NetworkClass.MobileUnstable
                      || CurrentNetworkClass == NetworkClass.LossyLongFat)
-                    && _networkCondition != NetworkCondition.Congested)
+                    && _networkCondition != NetworkCondition.Congested) // Path is mobile or lossy-fat AND not currently congested — use extended high-gain policy.
                 {
                     // Only use low-gain phase 1/8 of the time.
-                    if (_probeBwCycleIndex < UcpConstants.BBR_PROBE_BW_GAIN_COUNT - 1)
+                    if (_probeBwCycleIndex < UcpConstants.BBR_PROBE_BW_GAIN_COUNT - 1) // Not in the final (drain) phase of the cycle — use the normal adaptive pacing gain.
                     {
-                        PacingGain = CalculatePacingGain(nowMicros);
+                        PacingGain = CalculatePacingGain(nowMicros); // Compute the adaptive pacing gain for the current cycle phase and path conditions.
                     }
                     else
                     {
-                        PacingGain = Math.Min(1.0d, _config.ProbeBwLowGain);
+                        PacingGain = Math.Min(1.0d, _config.ProbeBwLowGain); // In the drain phase: use the configured low gain, capped at 1.0x so we never exceed the bottleneck rate.
                     }
                 }
                 else
                 {
-                    PacingGain = CalculatePacingGain(nowMicros);
+                    PacingGain = CalculatePacingGain(nowMicros); // Standard path or congested — use the normal adaptive pacing gain for the current cycle index.
                 }
             }
             // --- PROBERTT: deep-drain to measure true base RTT ---
             // CWND reduced to 4×MSS, pacing at 0.5× BtlBw.  Exit when
             // a near-minimum RTT sample confirms the base RTT or the
             // safety timeout fires.  On non-congested paths, exit faster.
-            else if (Mode == BbrMode.ProbeRtt)
+            else if (Mode == BbrMode.ProbeRtt) // We are in ProbeRTT mode — maintain the low pacing gain and check for exit conditions.
             {
-                PacingGain = UcpConstants.BBR_PROBE_RTT_PACING_GAIN;
-                if (ShouldExitProbeRtt(nowMicros, sampleRttMicros))
+                PacingGain = UcpConstants.BBR_PROBE_RTT_PACING_GAIN; // Enforce the ProbeRTT low pacing gain (0.50×) to drain the pipe and measure the true base RTT.
+                if (ShouldExitProbeRtt(nowMicros, sampleRttMicros)) // Check exit conditions: fresh near-minimum RTT sample observed OR safety timeout expired.
                 {
-                    ExitProbeRtt(nowMicros, sampleRttMicros);
+                    ExitProbeRtt(nowMicros, sampleRttMicros); // Exit ProbeRTT: adopt the new MinRtt if valid, then transition back to ProbeBW.
                 }
             }
 
             // ---- Step 8: Fast recovery timeout ----
             // Fast recovery (elevated pacing for non-congestion loss) lasts
             // at most one RTT.  After that, normal pacing resumes.
-            if (_fastRecoveryEnteredMicros > 0 && MinRttMicros > 0 && nowMicros - _fastRecoveryEnteredMicros >= MinRttMicros)
+            if (_fastRecoveryEnteredMicros > 0 && MinRttMicros > 0 && nowMicros - _fastRecoveryEnteredMicros >= MinRttMicros) // Fast recovery is active and one full RTT has elapsed since it was entered.
             {
                 _fastRecoveryEnteredMicros = 0; // Exit fast recovery after one RTT.
             }
 
             // ---- Step 9: Recompute pacing rate and CWND ----
-            RecalculateModel(nowMicros);
+            RecalculateModel(nowMicros); // Run the final model recomputation: derive pacing rate (BtlBw × PacingGain) and CWND (BDP × CwndGain) from all updated estimates.
         }
 
         /// <summary>
@@ -657,11 +657,11 @@ namespace Ucp
         /// <param name="isRetransmit">Whether this packet is a retransmission.</param>
         public void OnPacketSent(long nowMicros, bool isRetransmit)
         {
-            AdvanceLossBuckets(nowMicros);
-            _sentBuckets[_lossBucketIndex]++;
-            if (isRetransmit)
+            AdvanceLossBuckets(nowMicros); // Age out expired loss buckets and advance the ring pointer to the current time slot.
+            _sentBuckets[_lossBucketIndex]++; // Increment the sent-packet counter for the current bucket — every packet (original or retransmit) counts toward the total.
+            if (isRetransmit) // This packet is a retransmission (RTO, fast retransmit, or SACK-triggered retransmit).
             {
-                _retransmitBuckets[_lossBucketIndex]++;
+                _retransmitBuckets[_lossBucketIndex]++; // Increment the retransmit counter — this directly feeds the loss ratio (retransmits / sent).
             }
         }
 
@@ -690,20 +690,20 @@ namespace Ucp
         /// <param name="isCongestion">Whether the loss was classified as congestion.</param>
         public void OnFastRetransmit(long nowMicros, bool isCongestion)
         {
-            if (_config.EnableDebugLog)
+            if (_config.EnableDebugLog) // Debug logging is enabled in the configuration — emit a diagnostic trace to aid troubleshooting.
             {
-                Trace.WriteLine("[UCP BBR] FastRetransmit congestion=" + isCongestion);
+                Trace.WriteLine("[UCP BBR] FastRetransmit congestion=" + isCongestion); // Log the fast retransmit event along with its congestion classification.
             }
 
-            if (!isCongestion)
+            if (!isCongestion) // The loss was NOT classified as congestion by the caller — treat as random/burst loss.
             {
                 // Non-congestion loss: enter fast recovery with elevated pacing gain.
-                _fastRecoveryEnteredMicros = nowMicros;
-                PacingGain = UcpConstants.BBR_FAST_RECOVERY_PACING_GAIN;
-                RecalculateModel(nowMicros);
+                _fastRecoveryEnteredMicros = nowMicros; // Mark the start of the fast recovery period (lasts at most one RTT).
+                PacingGain = UcpConstants.BBR_FAST_RECOVERY_PACING_GAIN; // Elevate pacing gain to 1.15× to rapidly refill the loss hole without creating new loss.
+                RecalculateModel(nowMicros); // Recompute pacing rate and CWND with the elevated fast-recovery pacing gain.
             }
 
-            OnPacketLoss(nowMicros, GetRecentLossRatio(nowMicros), isCongestion);
+            OnPacketLoss(nowMicros, GetRecentLossRatio(nowMicros), isCongestion); // Always forward to the general loss handler for EWMA loss-tracking and condition re-classification.
         }
 
         /// <summary>
@@ -734,54 +734,85 @@ namespace Ucp
         /// <param name="isCongestion">Whether the loss was externally classified as congestion.</param>
         public void OnPacketLoss(long nowMicros, double lossRate, bool isCongestion)
         {
-            if (nowMicros <= 0)
+            if (nowMicros <= 0) // Timestamp was not provided (zero/negative) — use the current real time as a fallback.
             {
-                nowMicros = UcpTime.NowMicroseconds();
+                nowMicros = UcpTime.NowMicroseconds(); // Get the current high-resolution timestamp to ensure valid timing for all subsequent decisions.
             }
 
             // Merge externally-provided loss rate with the internal sliding-window
             // ratio.  Take the max — if either says loss is high, we should be
             // conservative.
-            double recentLossRate = GetRecentLossRatio(nowMicros);
-            lossRate = Math.Max(lossRate, recentLossRate);
+            double recentLossRate = GetRecentLossRatio(nowMicros); // Get the internally-tracked loss ratio from the sliding per-bucket sent/retransmit counters.
+            lossRate = Math.Max(lossRate, recentLossRate); // Be conservative: use the higher of the externally-provided and internally-computed loss rates.
 
             // Re-evaluate condition with the freshest data.
-            _networkCondition = ClassifyNetworkCondition(nowMicros);
-            UpdateEstimatedLossPercent(nowMicros, lossRate * 100d);
+            _networkCondition = ClassifyNetworkCondition(nowMicros); // Re-run the three-tier congestion classifier with the most recent delivery-rate and RTT data.
+            UpdateEstimatedLossPercent(nowMicros, lossRate * 100d); // Update the EWMA-smoothed loss percentage estimate with the new loss data (converted from ratio to percent).
 
-            bool treatAsCongestion = ShouldTreatLossAsCongestion(nowMicros, isCongestion);
+            bool treatAsCongestion = ShouldTreatLossAsCongestion(nowMicros, isCongestion); // Determine whether this loss event warrants multiplicative CWND reduction vs fast recovery only.
 
-            if (treatAsCongestion)
+            if (treatAsCongestion) // This loss is confirmed as congestion — apply aggressive multiplicative reduction.
             {
                 // Congestion loss: apply multiplicative CWND reduction.
                 // _lossCwndGain starts at 1.0 and drops to 0.70 on first
                 // congestion event, 0.49 on second, etc.  It recovers
                 // gradually on subsequent ACKs (see OnAck).
                 _lossCwndGain = Math.Max(UcpConstants.BBR_MIN_LOSS_CWND_GAIN,
-                    _lossCwndGain * UcpConstants.BBR_CONGESTION_LOSS_REDUCTION);
+                    _lossCwndGain * UcpConstants.BBR_CONGESTION_LOSS_REDUCTION); // Multiply current CWND gain by 0.70 for multiplicative reduction, with a hard floor to prevent total starvation.
 
                 // On congestion, enter ProbeRTT to get a fresh MinRtt.
                 // The congestion queue may have inflated RTT, so we need
                 // a new baseline before resuming normal operation.
-                if (Mode != BbrMode.ProbeRtt && Mode != BbrMode.Startup)
+                if (Mode != BbrMode.ProbeRtt && Mode != BbrMode.Startup) // Only enter ProbeRTT if we're not already probing and not in the initial ramp-up (Startup handles itself).
                 {
-                    EnterProbeRtt(nowMicros);
+                    EnterProbeRtt(nowMicros); // Enter ProbeRTT deep-drain to refresh the MinRtt estimate after the congestion queue has subsided.
                 }
             }
             else
             {
                 // Random/non-congestion loss: fast recovery with elevated pacing.
                 // Never reduce CWND for random loss.
-                _fastRecoveryEnteredMicros = nowMicros;
-                if (Mode == BbrMode.ProbeBw)
+                _fastRecoveryEnteredMicros = nowMicros; // Start the fast recovery timer for non-congestion loss (one RTT of elevated pacing).
+                if (Mode == BbrMode.ProbeBw) // We are in steady-state ProbeBW — ensure the pacing gain stays at or above the normal calculated level.
                 {
                     // Ensure pacing gain is at least the calculated probe gain.
                     // Don't let a random loss drop us below the normal probe level.
-                    PacingGain = Math.Max(PacingGain, CalculatePacingGain(nowMicros));
+                    PacingGain = Math.Max(PacingGain, CalculatePacingGain(nowMicros)); // Take the higher of current and calculated pacing gains — never let random loss reduce pacing.
                 }
             }
 
-            RecalculateModel(nowMicros);
+            RecalculateModel(nowMicros); // Recompute pacing rate and CWND with the updated loss parameters, reflecting any gain changes.
+        }
+
+        /// <summary>
+        /// Called when the underlying network path changes (e.g., NAT rebinding,
+        /// mobile handover between WiFi and cellular). Resets path-specific
+        /// estimates while preserving the congestion window and pacing rate
+        /// as a starting point for the new path.
+        /// </summary>
+        /// <param name="nowMicros">Current timestamp in microseconds.</param>
+        public void OnPathChange(long nowMicros)
+        {
+            // Preserve BtlBw and pacing rate as starting point for the new path.
+            // Reset: MinRtt (path delay changed), RTT history (stale samples),
+            // classifier windows (path characteristics changed),
+            // bandwidth growth window (different bottleneck).
+            _minRttTimestampMicros = 0; // Reset min-RTT timestamp so the next RTT sample becomes the new baseline for the new path.
+            MinRttMicros = 0; // Reset minimum RTT — the new path has a different propagation delay that must be re-measured.
+            Array.Clear(_rttHistoryMicros, 0, _rttHistoryMicros.Length); // Clear all stale RTT samples collected from the old path to prevent them from corrupting new estimates.
+            _rttHistoryCount = 0; // Reset RTT history sample count so the new path starts with a fresh buffer.
+            _rttHistoryIndex = 0; // Reset RTT history write position to the start of the circular buffer.
+            _bandwidthGrowthWindowMicros = 0; // Reset bandwidth growth window — the new path has different bottleneck characteristics.
+            _bandwidthGrowthWindowStartRate = 0; // Reset growth window starting rate so the first sample on the new path establishes a fresh baseline.
+            _classifierWindowCount = 0; // Reset classifier window count — old path statistics are stale and must not influence path classification.
+            _classifierWindowIndex = 0; // Reset classifier write position to the start of the circular buffer.
+            _classifierWindowStartMicros = 0; // Reset classifier window start timestamp so a new window begins on the next ACK.
+            _fullBandwidthRounds = 0; // Reset startup full-bandwidth round counter — the new path needs fresh bandwidth discovery.
+            _fullBandwidthEstimate = 0; // Reset full-bandwidth estimate so bandwidth growth is re-evaluated from scratch on the new path.
+            // Stay in current mode but reset round tracking so the first ACK starts a fresh round.
+            _nextRoundDeliveredBytes = 0; // Reset round boundary tracking so the next ACK initializes a new round on the new path.
+            RecalculateModel(nowMicros); // Recompute cwnd and pacing rate with the reset parameter state as the starting point for the new path.
+            TraceLog(string.Concat("PathChange btlBw=", BtlBwBytesPerSecond, " cwnd=", CongestionWindowBytes)); // Log the path change event with key state for diagnostics.
         }
 
         /// <summary>
@@ -810,17 +841,17 @@ namespace Ucp
         /// </summary>
         private void UpdateStartup()
         {
-            double current = BtlBwBytesPerSecond;
-            if (_fullBandwidthEstimate <= 0)
+            double current = BtlBwBytesPerSecond; // Snapshot the current BtlBw estimate for comparison against the tracked full-bandwidth best.
+            if (_fullBandwidthEstimate <= 0) // First round of Startup — no previous best exists to compare against.
             {
-                _fullBandwidthEstimate = current;
-                return;
+                _fullBandwidthEstimate = current; // Initialize the full-bandwidth estimate to the current BtlBw as the baseline.
+                return; // Nothing more to do on the first round — exit early.
             }
 
             // Growth ≥ 1.25× → still ramping up; reset stall counter.
-            if (current >= _fullBandwidthEstimate * UcpConstants.BbrStartupGrowthTarget)
+            if (current >= _fullBandwidthEstimate * UcpConstants.BbrStartupGrowthTarget) // BtlBw grew by at least the growth target (1.25×) since the tracked best — bandwidth is still being discovered.
             {
-                _fullBandwidthEstimate = current;
+                _fullBandwidthEstimate = current; // Update the tracked best BtlBw to the new higher value.
                 _fullBandwidthRounds = 0; // Growth achieved; reset stall counter.
             }
             else
@@ -833,16 +864,16 @@ namespace Ucp
             // If the user specified a MaxPacingRate and we've hit 90% of it,
             // there is no point in staying in Startup — the configured cap
             // is the limit, not the physical path.
-            int requiredStallRounds = UcpConstants.MinBbrStartupFullBandwidthRounds;
+            int requiredStallRounds = UcpConstants.MinBbrStartupFullBandwidthRounds; // Default number of consecutive stall rounds required to exit Startup (typically 3).
             if (_config.MaxPacingRateBytesPerSecond > 0
-                && BtlBwBytesPerSecond >= _config.MaxPacingRateBytesPerSecond * 0.90d)
+                && BtlBwBytesPerSecond >= _config.MaxPacingRateBytesPerSecond * 0.90d) // A user-configured rate cap exists AND we've reached 90% of it — fast exit is appropriate.
             {
                 requiredStallRounds = 1; // Fast exit: already at target.
             }
 
-            if (_fullBandwidthRounds >= requiredStallRounds)
+            if (_fullBandwidthRounds >= requiredStallRounds) // Bandwidth has stalled for the required number of rounds — the pipe is full and Startup should end.
             {
-                EnterDrain(_lastAckMicros);
+                EnterDrain(_lastAckMicros); // Transition to Drain mode to flush the standing queue accumulated during Startup's aggressive probing.
             }
         }
 
@@ -861,7 +892,7 @@ namespace Ucp
         ///          the pipe CAN deliver at that rate).
         ///       2. RTO gaps and transient loss dips do NOT depress the estimate.
         ///       3. The filter forgets stale samples only when they age out of
-        ///          the time window (typically 6–10 RTTs).
+        ///          the time window (typically 6-10 RTTs).
         ///
         /// HOW:  1. Store the new rate in a circular buffer with timestamp.
         ///       2. Scan all samples within the RTT window range, pick the max.
@@ -875,63 +906,63 @@ namespace Ucp
         private void AddRateSample(double deliveryRate, long nowMicros)
         {
             // Push new sample into the circular buffer.
-            _recentRates[_recentRateIndex] = deliveryRate;
-            _recentRateTimestamps[_recentRateIndex] = nowMicros;
-            _recentRateIndex = (_recentRateIndex + 1) % _recentRates.Length;
-            if (_recentRateCount < _recentRates.Length)
+            _recentRates[_recentRateIndex] = deliveryRate; // Store the delivery rate value at the current circular buffer write position.
+            _recentRateTimestamps[_recentRateIndex] = nowMicros; // Store the corresponding timestamp for age-based sample expiry during the max-filter scan.
+            _recentRateIndex = (_recentRateIndex + 1) % _recentRates.Length; // Advance the write position (wrapping around to 0 when reaching the end of the buffer).
+            if (_recentRateCount < _recentRates.Length) // The buffer has not yet filled up (first pass through) — increment the valid sample count.
             {
-                _recentRateCount++;
+                _recentRateCount++; // Increase the count of valid entries available for the max-filter scan.
             }
 
             // Max-filter: scan all recent samples within the time window
             // and pick the maximum.  The window is typically ~6 RTTs wide.
-            double maxRate = 0;
-            long rttWindowMicros = MinRttMicros > 0 ? MinRttMicros * Math.Max(1, _config.BbrWindowRtRounds) : UcpConstants.BBR_DEFAULT_RATE_WINDOW_MICROS;
-            for (int i = 0; i < _recentRateCount; i++)
+            double maxRate = 0; // Initialize the maximum rate accumulator to zero before the scan.
+            long rttWindowMicros = MinRttMicros > 0 ? MinRttMicros * Math.Max(1, _config.BbrWindowRtRounds) : UcpConstants.BBR_DEFAULT_RATE_WINDOW_MICROS; // Compute the sliding window duration: MinRtt multiplied by the configured number of RTT rounds, or a fixed default if no MinRtt Yet.
+            for (int i = 0; i < _recentRateCount; i++) // Iterate through all valid entries in the circular rate buffer.
             {
                 // Expire samples older than the window.
-                if (nowMicros - _recentRateTimestamps[i] > Math.Max(rttWindowMicros, 1))
+                if (nowMicros - _recentRateTimestamps[i] > Math.Max(rttWindowMicros, 1)) // The sample's age exceeds the sliding window — it is stale and must be ignored.
                 {
                     continue; // Sample is outside the window.
                 }
 
-                if (_recentRates[i] > maxRate)
+                if (_recentRates[i] > maxRate) // This sample's rate is higher than the current running maximum.
                 {
-                    maxRate = _recentRates[i];
+                    maxRate = _recentRates[i]; // Update the running maximum with this higher value.
                 }
             }
 
-            if (maxRate > 0)
+            if (maxRate > 0) // At least one valid (in-window) sample was found — a new BtlBw candidate exists.
             {
                 // Clamp growth: limit how fast BtlBw can increase per round.
                 // This prevents a single bursty measurement from over-shooting.
-                maxRate = ClampBandwidthGrowth(maxRate, nowMicros);
-                if (_config.MaxPacingRateBytesPerSecond > 0 && maxRate > _config.MaxPacingRateBytesPerSecond)
+                maxRate = ClampBandwidthGrowth(maxRate, nowMicros); // Apply the per-round growth clamp to prevent unrealistic bandwidth jumps from a single ACK burst.
+                if (_config.MaxPacingRateBytesPerSecond > 0 && maxRate > _config.MaxPacingRateBytesPerSecond) // A hard user-configured rate cap exists and the candidate rate exceeds it.
                 {
-                    maxRate = _config.MaxPacingRateBytesPerSecond;
+                    maxRate = _config.MaxPacingRateBytesPerSecond; // Clamp to the configured maximum — never exceed the user-specified rate limit.
                 }
 
                 // Track maximum BtlBw seen during non-congested intervals.
                 // This serves as a soft floor: when the network is not
                 // congested, we know the path can support at least this rate.
-                if (_networkCondition != NetworkCondition.Congested)
+                if (_networkCondition != NetworkCondition.Congested) // The path is not congested — this delivery rate is a valid indicator of true path capacity.
                 {
-                    if (maxRate > _maxBtlBwInNonCongestedWindow)
+                    if (maxRate > _maxBtlBwInNonCongestedWindow) // The new candidate exceeds the previously tracked non-congested maximum BtlBw.
                     {
-                        _maxBtlBwInNonCongestedWindow = maxRate;
+                        _maxBtlBwInNonCongestedWindow = maxRate; // Update the non-congested maximum — this strengthens the soft floor for future rate depressions.
                     }
                 }
 
-                BtlBwBytesPerSecond = maxRate;
+                BtlBwBytesPerSecond = maxRate; // Set the official bottleneck bandwidth estimate to the max-filter scan result.
 
                 // Hard floor: BtlBw never drops below the configured initial
                 // bandwidth (which is the target bottleneck rate).
-                if (BtlBwBytesPerSecond < _config.InitialBandwidthBytesPerSecond)
+                if (BtlBwBytesPerSecond < _config.InitialBandwidthBytesPerSecond) // BtlBw fell below the configured initial bandwidth floor.
                 {
-                    BtlBwBytesPerSecond = _config.InitialBandwidthBytesPerSecond;
-                    if (_config.MaxPacingRateBytesPerSecond > 0 && BtlBwBytesPerSecond > _config.MaxPacingRateBytesPerSecond)
+                    BtlBwBytesPerSecond = _config.InitialBandwidthBytesPerSecond; // Restore BtlBw to the hard floor — the path is expected to support at least this rate.
+                    if (_config.MaxPacingRateBytesPerSecond > 0 && BtlBwBytesPerSecond > _config.MaxPacingRateBytesPerSecond) // The hard floor itself exceeds the configured rate cap — re-apply the cap.
                     {
-                        BtlBwBytesPerSecond = _config.MaxPacingRateBytesPerSecond;
+                        BtlBwBytesPerSecond = _config.MaxPacingRateBytesPerSecond; // Clamp to the rate cap on top of the hard floor.
                     }
                 }
 
@@ -944,9 +975,9 @@ namespace Ucp
                 if (_networkCondition != NetworkCondition.Congested
                     && _maxBtlBwInNonCongestedWindow > 0
                     && GetRecentLossRatio(nowMicros) < 0.05d
-                    && BtlBwBytesPerSecond < _maxBtlBwInNonCongestedWindow * 0.90d)
+                    && BtlBwBytesPerSecond < _maxBtlBwInNonCongestedWindow * 0.90d) // Not congested, soft floor exists, loss is under 5%, and BtlBw fell below 90% of the non-congested peak.
                 {
-                    BtlBwBytesPerSecond = _maxBtlBwInNonCongestedWindow * 0.90d;
+                    BtlBwBytesPerSecond = _maxBtlBwInNonCongestedWindow * 0.90d; // Restore BtlBw to 90% of the best non-congested rate — prevent a transient gap from permanently depressing the estimate.
                 }
             }
         }
@@ -974,25 +1005,25 @@ namespace Ucp
         /// <returns>Clamped bandwidth value.</returns>
         private double ClampBandwidthGrowth(double candidateRate, long nowMicros)
         {
-            if (candidateRate <= BtlBwBytesPerSecond || BtlBwBytesPerSecond <= 0)
+            if (candidateRate <= BtlBwBytesPerSecond || BtlBwBytesPerSecond <= 0) // The candidate rate does not exceed the current estimate, or no current estimate exists — no clamping is needed.
             {
                 return candidateRate; // No increase, no clamping needed.
             }
 
-            long growthIntervalMicros = MinRttMicros > 0 ? MinRttMicros : UcpConstants.BBR_BANDWIDTH_GROWTH_FALLBACK_INTERVAL_MICROS;
-            if (_bandwidthGrowthWindowMicros == 0 || nowMicros - _bandwidthGrowthWindowMicros >= growthIntervalMicros)
+            long growthIntervalMicros = MinRttMicros > 0 ? MinRttMicros : UcpConstants.BBR_BANDWIDTH_GROWTH_FALLBACK_INTERVAL_MICROS; // Determine the growth window duration: use the measured MinRtt, or a fixed fallback if not yet available.
+            if (_bandwidthGrowthWindowMicros == 0 || nowMicros - _bandwidthGrowthWindowMicros >= growthIntervalMicros) // No growth window is active yet, or the current window has expired — start a new window.
             {
                 // Start a new growth window.
-                _bandwidthGrowthWindowMicros = nowMicros;
-                _bandwidthGrowthWindowStartRate = BtlBwBytesPerSecond;
+                _bandwidthGrowthWindowMicros = nowMicros; // Record the start time of this new bandwidth growth window.
+                _bandwidthGrowthWindowStartRate = BtlBwBytesPerSecond; // Snapshot the current BtlBw as the baseline rate for this window's growth cap.
             }
 
             // Growth cap: Startup allows more aggressive growth (4× per round)
             // because BtlBw is expected to double each round during ramp-up.
             // Steady state caps at 1.25× to prevent overshoot.
-            double growthGain = Mode == BbrMode.Startup ? UcpConstants.BBR_STARTUP_BANDWIDTH_GROWTH_PER_ROUND : UcpConstants.BBR_STEADY_BANDWIDTH_GROWTH_PER_ROUND;
-            double growthCap = Math.Max(BtlBwBytesPerSecond, _bandwidthGrowthWindowStartRate * growthGain);
-            return Math.Min(candidateRate, growthCap);
+            double growthGain = Mode == BbrMode.Startup ? UcpConstants.BBR_STARTUP_BANDWIDTH_GROWTH_PER_ROUND : UcpConstants.BBR_STEADY_BANDWIDTH_GROWTH_PER_ROUND; // Select the per-round growth multiplier: aggressive 4× in Startup (rapid discovery), conservative 1.25× in steady state (prevent overshoot).
+            double growthCap = Math.Max(BtlBwBytesPerSecond, _bandwidthGrowthWindowStartRate * growthGain); // Compute the maximum allowed rate: the starting rate multiplied by the growth gain, floored at the current BtlBw to avoid regressing.
+            return Math.Min(candidateRate, growthCap); // Clamp the candidate rate to at most the computed growth cap.
         }
 
         /// <summary>
@@ -1010,11 +1041,11 @@ namespace Ucp
         /// <param name="deliveryRate">Delivery rate in bytes per second.</param>
         private void AddDeliveryRateSample(double deliveryRate)
         {
-            _deliveryRateHistory[_deliveryRateHistoryIndex] = deliveryRate;
-            _deliveryRateHistoryIndex = (_deliveryRateHistoryIndex + 1) % _deliveryRateHistory.Length;
-            if (_deliveryRateHistoryCount < _deliveryRateHistory.Length)
+            _deliveryRateHistory[_deliveryRateHistoryIndex] = deliveryRate; // Store the delivery rate at the current write position in the trend-history circular buffer.
+            _deliveryRateHistoryIndex = (_deliveryRateHistoryIndex + 1) % _deliveryRateHistory.Length; // Advance the write position by one (wrapping around at the end of the buffer).
+            if (_deliveryRateHistoryCount < _deliveryRateHistory.Length) // The buffer has not yet wrapped — increase the valid entry count.
             {
-                _deliveryRateHistoryCount++;
+                _deliveryRateHistoryCount++; // Increment the count of valid samples available for oldest-vs-newest trend comparison.
             }
         }
 
@@ -1031,28 +1062,28 @@ namespace Ucp
         ///       Including those in the percentile computation would push
         ///       P10 far above the actual propagation delay.  A 500ms hard
         ///       cap discards these pathological stalls while preserving
-        ///       normal queuing delay (typically 1–200ms).
+        ///       normal queuing delay (typically 1-200ms).
         /// </summary>
         /// <param name="sampleRttMicros">RTT sample in microseconds.</param>
         private void AddRttSample(long sampleRttMicros)
         {
-            if (sampleRttMicros <= 0)
+            if (sampleRttMicros <= 0) // Invalid RTT sample (zero or negative) — nothing to store.
             {
-                return;
+                return; // Skip silently — bogus samples would corrupt the history buffer.
             }
 
             // Hard cap at 500ms: any larger value is a protocol stall
             // (RTO timeout) and would corrupt the percentile estimate.
-            if (sampleRttMicros > 500_000L)
+            if (sampleRttMicros > 500_000L) // RTT exceeds 500ms (indicative of an RTO stall rather than normal queuing delay).
             {
-                return;
+                return; // Discard the sample to prevent it from inflating percentile calculations with pathological values.
             }
 
-            _rttHistoryMicros[_rttHistoryIndex] = sampleRttMicros;
-            _rttHistoryIndex = (_rttHistoryIndex + 1) % _rttHistoryMicros.Length;
-            if (_rttHistoryCount < _rttHistoryMicros.Length)
+            _rttHistoryMicros[_rttHistoryIndex] = sampleRttMicros; // Store the valid RTT sample at the current write position in the history buffer.
+            _rttHistoryIndex = (_rttHistoryIndex + 1) % _rttHistoryMicros.Length; // Advance the write position by one (wrapping around at the buffer end).
+            if (_rttHistoryCount < _rttHistoryMicros.Length) // The buffer has not yet wrapped — increase the valid sample count.
             {
-                _rttHistoryCount++;
+                _rttHistoryCount++; // Increment the count of valid RTT samples for percentile and average calculations.
             }
         }
 
@@ -1078,44 +1109,44 @@ namespace Ucp
         /// <returns>Target congestion window in bytes.</returns>
         private int GetTargetCwndBytes()
         {
-            if (BtlBwBytesPerSecond <= 0 || MinRttMicros <= 0)
+            if (BtlBwBytesPerSecond <= 0 || MinRttMicros <= 0) // Either BtlBw or MinRtt is unavailable — cannot compute a meaningful BDP.
             {
-                return _config.InitialCongestionWindowBytes;
+                return _config.InitialCongestionWindowBytes; // Return the configured initial CWND as a safe starting point (typically 10-20 MSS).
             }
 
-            long modelRttMicros = GetCwndModelRttMicros();
+            long modelRttMicros = GetCwndModelRttMicros(); // Get the model RTT (P10-based propagation-delay estimate with MinRtt as floor).
 
             // Sanity cap: modelRtt must not exceed 1 second to prevent
             // runaway CWND during pathological stalls.
-            if (modelRttMicros > 500_000L || modelRttMicros <= 0)
+            if (modelRttMicros > 500_000L || modelRttMicros <= 0) // Model RTT is above 500ms or invalid — cap it to prevent CWND explosion.
             {
-                modelRttMicros = 500_000L;
+                modelRttMicros = 500_000L; // Cap model RTT at 500ms — any stall longer than this is not representative of normal path conditions.
             }
 
             // BDP = bandwidth × delay.  This is the amount of data "in the
             // pipe" at the bottleneck rate over the propagation delay.
-            double bdp = BtlBwBytesPerSecond * (modelRttMicros / (double)UcpConstants.MICROS_PER_SECOND);
-            double effectiveCwndGain = GetEffectiveCwndGain();
-            int cwnd = (int)Math.Ceiling(bdp * effectiveCwndGain);
-            if (cwnd < _config.InitialCongestionWindowBytes && Mode == BbrMode.Startup)
+            double bdp = BtlBwBytesPerSecond * (modelRttMicros / (double)UcpConstants.MICROS_PER_SECOND); // Compute BDP in bytes: bandwidth (bytes/sec) × propagation delay (seconds).
+            double effectiveCwndGain = GetEffectiveCwndGain(); // Get the effective CWND gain (adjusted for waste budget and path-class multipliers).
+            int cwnd = (int)Math.Ceiling(bdp * effectiveCwndGain); // Compute the target CWND: BDP × effective gain, rounded up to the nearest integer byte.
+            if (cwnd < _config.InitialCongestionWindowBytes && Mode == BbrMode.Startup) // CWND fell below the initial floor during Startup — keep at least the initial value to allow ramp-up.
             {
-                cwnd = _config.InitialCongestionWindowBytes;
+                cwnd = _config.InitialCongestionWindowBytes; // Restore CWND to the configured initial floor to ensure reliable startup probing.
             }
 
-            if (_config.MaxCongestionWindowBytes > 0 && cwnd > _config.MaxCongestionWindowBytes)
+            if (_config.MaxCongestionWindowBytes > 0 && cwnd > _config.MaxCongestionWindowBytes) // A hard maximum CWND is configured and the computed CWND exceeds it.
             {
-                cwnd = _config.MaxCongestionWindowBytes;
+                cwnd = _config.MaxCongestionWindowBytes; // Clamp CWND to the configured upper bound to prevent unbounded growth (e.g. on high-BDP paths).
             }
 
             // Apply loss-driven CWND reduction.  When congestion loss occurs,
             // _lossCwndGain drops below 1.0, multiplicatively reducing the
             // window.  It then recovers gradually on subsequent ACKs.
-            if (_lossCwndGain < 1d)
+            if (_lossCwndGain < 1d) // Loss reduction is active — the CWND needs to be scaled down multiplicatively.
             {
-                cwnd = (int)Math.Ceiling(cwnd * _lossCwndGain);
-                if (cwnd < _config.InitialCongestionWindowBytes)
+                cwnd = (int)Math.Ceiling(cwnd * _lossCwndGain); // Apply the loss-driven multiplicative reduction: cwnd = cwnd × _lossCwndGain.
+                if (cwnd < _config.InitialCongestionWindowBytes) // The reduced CWND has fallen below the absolute minimum floor.
                 {
-                    cwnd = _config.InitialCongestionWindowBytes;
+                    cwnd = _config.InitialCongestionWindowBytes; // Restore CWND to the initial floor to prevent complete starvation during loss events.
                 }
             }
 
@@ -1124,17 +1155,17 @@ namespace Ucp
             //   creating excessive standing queues even with high CwndGain.
             // _inflightLowBytes = lower bound (floor); prevents CWND from
             //   starving the connection on low-BDP paths.
-            if (_inflightHighBytes > 0)
+            if (_inflightHighBytes > 0) // An upper inflight guardrail has been computed — apply the ceiling.
             {
-                cwnd = Math.Min(cwnd, (int)Math.Ceiling(_inflightHighBytes));
+                cwnd = Math.Min(cwnd, (int)Math.Ceiling(_inflightHighBytes)); // Clamp CWND to at most the upper inflight guardrail (typically ~2-3× BDP depending on path class).
             }
 
-            if (_inflightLowBytes > 0)
+            if (_inflightLowBytes > 0) // A lower inflight guardrail has been computed — apply the floor.
             {
-                cwnd = Math.Max(cwnd, (int)Math.Ceiling(_inflightLowBytes));
+                cwnd = Math.Max(cwnd, (int)Math.Ceiling(_inflightLowBytes)); // Clamp CWND to at least the lower inflight guardrail to prevent under-utilization.
             }
 
-            return cwnd;
+            return cwnd; // Return the fully clamped target congestion window in bytes.
         }
 
         /// <summary>
@@ -1162,38 +1193,38 @@ namespace Ucp
         /// <param name="nowMicros">Current timestamp in microseconds.</param>
         private void RecalculateModel(long nowMicros)
         {
-            if (BtlBwBytesPerSecond <= 0)
+            if (BtlBwBytesPerSecond <= 0) // BtlBw is invalid (zero or negative) — restore it to a safe default.
             {
-                BtlBwBytesPerSecond = _config.InitialBandwidthBytesPerSecond;
+                BtlBwBytesPerSecond = _config.InitialBandwidthBytesPerSecond; // Set BtlBw to the configured initial bandwidth as a safe fallback.
             }
 
-            if (_config.MaxPacingRateBytesPerSecond > 0 && BtlBwBytesPerSecond > _config.MaxPacingRateBytesPerSecond)
+            if (_config.MaxPacingRateBytesPerSecond > 0 && BtlBwBytesPerSecond > _config.MaxPacingRateBytesPerSecond) // A user-configured rate cap exists and the current BtlBw exceeds it.
             {
-                BtlBwBytesPerSecond = _config.MaxPacingRateBytesPerSecond;
+                BtlBwBytesPerSecond = _config.MaxPacingRateBytesPerSecond; // Clamp BtlBw to the configured maximum — never let the estimate exceed the user's limit.
             }
 
             // ProbeRTT always paces at the low gain to drain the pipe.
-            if (Mode == BbrMode.ProbeRtt)
+            if (Mode == BbrMode.ProbeRtt) // We are in the ProbeRTT deep-drain phase — enforce the low pacing gain unconditionally.
             {
-                PacingGain = UcpConstants.BBR_PROBE_RTT_PACING_GAIN;
+                PacingGain = UcpConstants.BBR_PROBE_RTT_PACING_GAIN; // Override pacing gain to the ProbeRTT low value (0.50×) to drain the standing queue.
             }
 
             // Loss-control: when loss is well within budget, gradually
             // increase pacing gain back toward the high gain (recovery).
-            if (_config.LossControlEnable)
+            if (_config.LossControlEnable) // The loss-control feature is enabled in the configuration.
             {
-                if (EstimatedLossPercent <= _maxBandwidthLossPercent * UcpConstants.BBR_LOSS_BUDGET_RECOVERY_RATIO)
+                if (EstimatedLossPercent <= _maxBandwidthLossPercent * UcpConstants.BBR_LOSS_BUDGET_RECOVERY_RATIO) // Current loss is well within the bandwidth loss budget — safe to increase pacing gain.
                 {
-                    PacingGain = Math.Min(_config.ProbeBwHighGain, PacingGain + UcpConstants.BBR_LOSS_CWND_RECOVERY_STEP);
+                    PacingGain = Math.Min(_config.ProbeBwHighGain, PacingGain + UcpConstants.BBR_LOSS_CWND_RECOVERY_STEP); // Slowly increment pacing gain by one recovery step toward the high probe gain, capped at the config limit.
                 }
             }
 
-            PacingRateBytesPerSecond = BtlBwBytesPerSecond * PacingGain;
+            PacingRateBytesPerSecond = BtlBwBytesPerSecond * PacingGain; // Compute the pacing rate as BtlBw multiplied by the current pacing gain.
             if (_config.MaxPacingRateBytesPerSecond > 0
                 && PacingRateBytesPerSecond > _config.MaxPacingRateBytesPerSecond
-                && EstimatedLossPercent < 3d)
+                && EstimatedLossPercent < 3d) // Pacing rate exceeds the configured cap BUT loss is under 3% — clamp rather than penalizing.
             {
-                PacingRateBytesPerSecond = _config.MaxPacingRateBytesPerSecond;
+                PacingRateBytesPerSecond = _config.MaxPacingRateBytesPerSecond; // Clamp the pacing rate to the user-configured maximum.
             }
 
             // Unconditional cap for non-mobile non-lossy-fat paths:
@@ -1201,35 +1232,35 @@ namespace Ucp
             // to prevent excessive queueing on clean paths.
             if (_config.MaxPacingRateBytesPerSecond > 0
                 && CurrentNetworkClass != NetworkClass.MobileUnstable
-                && CurrentNetworkClass != NetworkClass.LossyLongFat)
+                && CurrentNetworkClass != NetworkClass.LossyLongFat) // A rate cap is configured and the path is a standard (non-mobile, non-lossy) type.
             {
-                double maxPacing = _config.MaxPacingRateBytesPerSecond * 1.50d;
-                if (PacingRateBytesPerSecond > maxPacing)
+                double maxPacing = _config.MaxPacingRateBytesPerSecond * 1.50d; // Compute the 1.50× safety cap relative to the configured maximum pacing rate.
+                if (PacingRateBytesPerSecond > maxPacing) // The current pacing rate exceeds the 1.50× safety cap.
                 {
-                    PacingRateBytesPerSecond = maxPacing;
+                    PacingRateBytesPerSecond = maxPacing; // Clamp the pacing rate to 1.50× of the configured max — prevent excessive queuing on clean paths.
                 }
             }
 
             // CWND is computed from the BDP model.  A flat ceiling at
             // 200ms worth of BtlBw prevents pathological CWND growth
             // during Startup while allowing sufficient BDP for all paths.
-            CongestionWindowBytes = GetTargetCwndBytes();
-            if (BtlBwBytesPerSecond > 0)
+            CongestionWindowBytes = GetTargetCwndBytes(); // Compute the target CWND from the BDP model (BtlBw × modelRtt × CwndGain) with all guardrails applied.
+            if (BtlBwBytesPerSecond > 0) // BtlBw is valid — apply the time-based absolute ceiling.
             {
-                int timeCeiling = (int)(BtlBwBytesPerSecond * 0.200d);
-                if (CongestionWindowBytes > timeCeiling)
+                int timeCeiling = (int)(BtlBwBytesPerSecond * 0.200d); // Compute 200ms worth of data at the current BtlBw rate as the absolute CWND ceiling.
+                if (CongestionWindowBytes > timeCeiling) // The BDP-model CWND exceeds the 200ms time-based ceiling.
                 {
-                    CongestionWindowBytes = timeCeiling;
+                    CongestionWindowBytes = timeCeiling; // Clamp CWND to the 200ms ceiling — prevents pathological CWND growth during Startup or high-gain phases.
                 }
             }
 
             // Absolute minimum: 2× MSS prevents complete stalling.
-            if (CongestionWindowBytes < _config.Mss * 2)
+            if (CongestionWindowBytes < _config.Mss * 2) // CWND has fallen below 2× MSS — the connection is at risk of stalling.
             {
-                CongestionWindowBytes = _config.Mss * 2;
+                CongestionWindowBytes = _config.Mss * 2; // Enforce the absolute minimum CWND of 2× MSS to ensure the connection can always send at least two segments.
             }
 
-            _modeEnteredMicros = _modeEnteredMicros == 0 ? nowMicros : _modeEnteredMicros;
+            _modeEnteredMicros = _modeEnteredMicros == 0 ? nowMicros : _modeEnteredMicros; // Initialize the mode-entered timestamp on the first invocation if not already set by a mode-transition call.
         }
 
         /// <summary>
@@ -1239,7 +1270,7 @@ namespace Ucp
         ///       flushes the standing queue by pacing below the bottleneck
         ///       rate.  Drain pacing gain is adaptive: 1.00× on clean paths
         ///       (just coast), config-specified on lossy paths (typically
-        ///       0.75–0.90× to actively drain).
+        ///       0.75-0.90× to actively drain).
         ///
         /// WHY:  During Startup we pace at 2.89× BtlBw, which creates a
         ///       standing queue approximately 1.89× BDP deep.  If we jumped
@@ -1252,9 +1283,9 @@ namespace Ucp
         /// <param name="nowMicros">Current timestamp in microseconds.</param>
         private void EnterDrain(long nowMicros)
         {
-            Mode = BbrMode.Drain;
-            PacingGain = GetDrainPacingGain(nowMicros);
-            _modeEnteredMicros = nowMicros;
+            Mode = BbrMode.Drain; // Transition the state machine to Drain mode to flush the standing queue.
+            PacingGain = GetDrainPacingGain(nowMicros); // Compute the adaptive drain pacing gain (1.00× on clean paths, lower on lossy paths).
+            _modeEnteredMicros = nowMicros; // Record the entry timestamp for drain-duration exit checks.
         }
 
         /// <summary>
@@ -1275,15 +1306,15 @@ namespace Ucp
         /// <param name="nowMicros">Current timestamp in microseconds.</param>
         private void EnterProbeBw(long nowMicros)
         {
-            Mode = BbrMode.ProbeBw;
-            _probeBwCycleIndex = 0;
+            Mode = BbrMode.ProbeBw; // Transition the state machine to the steady-state ProbeBW cycling mode.
+            _probeBwCycleIndex = 0; // Reset the 8-phase gain cycle to the first phase (index 0).
 
             // CWND gain at 2.0x BDP for all paths provides sufficient headroom
             // for retransmissions without causing bufferbloat.
             CwndGain = _config.ProbeBwCwndGain; // 2.0x BDP.
 
-            PacingGain = CalculatePacingGain(nowMicros);
-            _modeEnteredMicros = nowMicros;
+            PacingGain = CalculatePacingGain(nowMicros); // Compute the initial ProbeBW pacing gain based on current network condition and path class.
+            _modeEnteredMicros = nowMicros; // Record the entry timestamp for tracking the duration of each gain-cycle phase.
         }
 
         /// <summary>
@@ -1293,7 +1324,7 @@ namespace Ucp
         ///       pacing (no active draining) because the Startup standing
         ///       queue will drain naturally as we stop over-pacing.
         ///       On lossy paths, use the configured DrainPacingGain
-        ///       (typically 0.75–0.90×) to actively reduce the queue.
+        ///       (typically 0.75-0.90×) to actively reduce the queue.
         ///
         /// WHY:  Active draining below 1.00× costs throughput but is necessary
         ///       when the path is already showing loss.  Draining the queue
@@ -1303,13 +1334,13 @@ namespace Ucp
         /// <returns>Pacing gain for the drain phase.</returns>
         private double GetDrainPacingGain(long nowMicros)
         {
-            double recentLossRatio = GetRecentLossRatio(nowMicros);
-            if (recentLossRatio <= 0 && EstimatedLossPercent <= 0)
+            double recentLossRatio = GetRecentLossRatio(nowMicros); // Get the recent loss ratio from the sliding bucket windows.
+            if (recentLossRatio <= 0 && EstimatedLossPercent <= 0) // Both recent and smoothed loss are zero — the path is completely clean.
             {
                 return 1d; // Clean drain: use minimal drain gain.
             }
 
-            return _config.DrainPacingGain;
+            return _config.DrainPacingGain; // Loss is present — return the configured drain pacing gain for active queue draining (typically 0.75-0.90×).
         }
 
         /// <summary>
@@ -1335,11 +1366,11 @@ namespace Ucp
         /// <param name="nowMicros">Current timestamp in microseconds.</param>
         private void EnterProbeRtt(long nowMicros)
         {
-            Mode = BbrMode.ProbeRtt;
-            PacingGain = UcpConstants.BBR_PROBE_RTT_PACING_GAIN;
-            _probeRttEnteredMicros = nowMicros;
-            _modeEnteredMicros = nowMicros;
-            TraceLog(string.Concat("EnterProbeRtt cwnd=", CongestionWindowBytes, " btlBw=", BtlBwBytesPerSecond, " minRtt=", MinRttMicros, " fullBwRounds=", _fullBandwidthRounds, " lossPct=", (EstimatedLossPercent * 100d).ToString("F1"), " netClass=", CurrentNetworkClass));
+            Mode = BbrMode.ProbeRtt; // Transition to the ProbeRTT deep-drain mode to measure the true base RTT.
+            PacingGain = UcpConstants.BBR_PROBE_RTT_PACING_GAIN; // Set pacing gain to the ProbeRTT low value (0.50×) to drain the pipe.
+            _probeRttEnteredMicros = nowMicros; // Record the entry timestamp for ProbeRTT exit-condition evaluation (duration checks).
+            _modeEnteredMicros = nowMicros; // Standard mode-entry timestamp (used by other methods for duration tracking).
+            TraceLog(string.Concat("EnterProbeRtt cwnd=", CongestionWindowBytes, " btlBw=", BtlBwBytesPerSecond, " minRtt=", MinRttMicros, " fullBwRounds=", _fullBandwidthRounds, " lossPct=", (EstimatedLossPercent * 100d).ToString("F1"), " netClass=", CurrentNetworkClass)); // Log the ProbeRTT entry with full diagnostic context for offline analysis.
         }
 
         /// <summary>
@@ -1368,14 +1399,14 @@ namespace Ucp
             // Adopt the sample as new MinRtt if it's within 1.25× of the
             // current MinRtt.  This prevents a single noisy probe from
             // inflating the MinRtt estimate.
-            if (sampleRttMicros > 0 && (MinRttMicros == 0 || sampleRttMicros <= (long)(MinRttMicros * UcpConstants.BBR_PROBE_RTT_EXIT_RTT_MULTIPLIER)))
+            if (sampleRttMicros > 0 && (MinRttMicros == 0 || sampleRttMicros <= (long)(MinRttMicros * UcpConstants.BBR_PROBE_RTT_EXIT_RTT_MULTIPLIER))) // A valid RTT sample exists AND it is within 1.25× of the current MinRtt (probe succeeded in finding the true base RTT).
             {
                 MinRttMicros = sampleRttMicros; // Update min RTT if close enough.
             }
 
-            _minRttTimestampMicros = nowMicros;
-            TraceLog(string.Concat("ExitProbeRtt cwnd=", CongestionWindowBytes, " btlBw=", BtlBwBytesPerSecond, " minRtt=", MinRttMicros, " sampleRtt=", sampleRttMicros, " elapsedUs=", (nowMicros - _probeRttEnteredMicros)));
-            EnterProbeBw(nowMicros);
+            _minRttTimestampMicros = nowMicros; // Reset the MinRtt timestamp to restart the ProbeRTT interval timer — delays the next probe cycle.
+            TraceLog(string.Concat("ExitProbeRtt cwnd=", CongestionWindowBytes, " btlBw=", BtlBwBytesPerSecond, " minRtt=", MinRttMicros, " sampleRtt=", sampleRttMicros, " elapsedUs=", (nowMicros - _probeRttEnteredMicros))); // Log the ProbeRTT exit with diagnostic context including elapsed time.
+            EnterProbeBw(nowMicros); // Transition back to ProbeBW steady-state cycling with the refreshed MinRtt estimate.
         }
 
         /// <summary>
@@ -1403,38 +1434,38 @@ namespace Ucp
         /// </summary>
         private bool ShouldExitProbeRtt(long nowMicros, long sampleRttMicros)
         {
-            long elapsedMicros = nowMicros - _probeRttEnteredMicros;
-            long minDuration = _config.ProbeRttDurationMicros;
+            long elapsedMicros = nowMicros - _probeRttEnteredMicros; // Compute how long we have been in ProbeRTT (microseconds since entry).
+            long minDuration = _config.ProbeRttDurationMicros; // Get the configured minimum ProbeRTT duration (~200ms by default).
 
             // On non-congested paths, allow earlier exit.
             // No standing queue means the true base RTT is already visible.
-            if (_networkCondition != NetworkCondition.Congested)
+            if (_networkCondition != NetworkCondition.Congested) // The path is not congested — RTT is likely already near the true propagation minimum.
             {
-                minDuration = Math.Max(minDuration / 2, 30000L);
+                minDuration = Math.Max(minDuration / 2, 30000L); // Halve the minimum ProbeRTT duration, but never below 30ms as an absolute safety floor.
             }
 
             // Haven't been in ProbeRTT long enough yet.
-            if (elapsedMicros < minDuration)
+            if (elapsedMicros < minDuration) // The minimum required ProbeRTT duration has not yet elapsed — must wait longer.
             {
                 return false; // Minimum duration not yet met.
             }
 
             // Exit condition 1: fresh sample close to current MinRtt.
             // The probe succeeded — we measured a true base RTT.
-            bool hasFreshMinRttSample = sampleRttMicros > 0 && MinRttMicros > 0 && sampleRttMicros <= (long)(MinRttMicros * UcpConstants.BBR_PROBE_RTT_EXIT_RTT_MULTIPLIER);
+            bool hasFreshMinRttSample = sampleRttMicros > 0 && MinRttMicros > 0 && sampleRttMicros <= (long)(MinRttMicros * UcpConstants.BBR_PROBE_RTT_EXIT_RTT_MULTIPLIER); // A valid RTT sample was observed that is within 1.25× of the current MinRtt — the probe achieved its goal.
 
             // Exit condition 2: safety timeout (3× normal duration).
             // Prevents indefinite starvation on paths where the pipe
             // never drains (e.g. competing cross-traffic).
-            bool exceededSafetyDuration = elapsedMicros >= _config.ProbeRttDurationMicros * UcpConstants.BBR_PROBE_RTT_MAX_DURATION_MULTIPLIER;
-            return hasFreshMinRttSample || exceededSafetyDuration;
+            bool exceededSafetyDuration = elapsedMicros >= _config.ProbeRttDurationMicros * UcpConstants.BBR_PROBE_RTT_MAX_DURATION_MULTIPLIER; // ProbeRTT has been running for 3× the normal duration — safety timeout has fired.
+            return hasFreshMinRttSample || exceededSafetyDuration; // Exit ProbeRTT if either the probe succeeded (good RTT sample observed) or the safety timeout expired (prevent indefinite starvation).
         }
 
         /// <summary>
         /// Calculates the pacing gain based on probe cycle phase, network condition,
         /// loss ratio, RTT increase, and network class.
         ///
-        /// WHAT: Returns the pacing gain multiplier (0.50–1.35) based on a
+        /// WHAT: Returns the pacing gain multiplier (0.50-1.35) based on a
         ///       decision tree that considers:
         ///       - Current network condition (congested, random loss, light load)
         ///       - Network path class (LAN, Mobile, LossyFat, VPN, etc.)
@@ -1445,7 +1476,7 @@ namespace Ucp
         /// WHY:  Adaptive pacing gain is the key differentiator from stock BBR.
         ///       Stock BBR uses a fixed 8-phase cycle with gains [1.25, 0.75,
         ///       1.0, 1.0, 1.0, 1.0, 1.0, 1.0].  This adaptive variant:
-        ///       - Reduces gain to 0.50–1.00 on congested links (back off)
+        ///       - Reduces gain to 0.50-1.00 on congested links (back off)
         ///       - Keeps 1.35× gain on mobile/lossy paths (compensate for
         ///         non-congestion throughput loss)
         ///       - Adjusts gain based on RTT increase trend (early congestion
@@ -1465,16 +1496,16 @@ namespace Ucp
         /// <returns>Pacing gain multiplier.</returns>
         private double CalculatePacingGain(long nowMicros)
         {
-            double lossRatio = GetRecentLossRatio(nowMicros);
-            double rttIncrease = GetAverageRttIncreaseRatio();
+            double lossRatio = GetRecentLossRatio(nowMicros); // Get the recent loss ratio (retransmits / sent) from the sliding bucket windows.
+            double rttIncrease = GetAverageRttIncreaseRatio(); // Get how much the average RTT exceeds MinRtt: (avg - min) / min.
 
             // ---- Loss-control overrides ----
             // When loss exceeds the configured bandwidth loss budget (e.g. 5%)
             // AND the network condition is classified as congested, drop to
             // the high-loss pacing gain (0.70×) to relieve the bottleneck.
-            if (_config.LossControlEnable && _networkCondition == NetworkCondition.Congested && EstimatedLossPercent > _maxBandwidthLossPercent)
+            if (_config.LossControlEnable && _networkCondition == NetworkCondition.Congested && EstimatedLossPercent > _maxBandwidthLossPercent) // Loss-control is active, path is congested, and loss has blown past the bandwidth loss budget.
             {
-                return UcpConstants.BBR_HIGH_LOSS_PACING_GAIN;
+                return UcpConstants.BBR_HIGH_LOSS_PACING_GAIN; // Return the aggressive back-off pacing gain (0.70×) to relieve the congested bottleneck.
             }
 
             // ---- Fast recovery ----
@@ -1482,23 +1513,23 @@ namespace Ucp
             // elevated gain (1.15×) for one RTT to refill the pipe without
             // creating new loss.  This is NOT aggressive probing — just
             // ensuring throughput doesn't collapse due to head-of-line blocking.
-            if (_fastRecoveryEnteredMicros > 0 && MinRttMicros > 0 && nowMicros - _fastRecoveryEnteredMicros < MinRttMicros)
+            if (_fastRecoveryEnteredMicros > 0 && MinRttMicros > 0 && nowMicros - _fastRecoveryEnteredMicros < MinRttMicros) // Fast recovery is active and has not yet exceeded one RTT since entry.
             {
-                return UcpConstants.BBR_FAST_RECOVERY_PACING_GAIN;
+                return UcpConstants.BBR_FAST_RECOVERY_PACING_GAIN; // Return the elevated fast-recovery pacing gain (1.15×) to refill the loss hole.
             }
 
             // ---- Congested path ----
             // Pacing gain depends on whether loss is within budget.
             // Within budget → 1.00× (maintain, don't probe).
             // Over budget → 0.50× (aggressive drain to relieve queue).
-            if (_networkCondition == NetworkCondition.Congested)
+            if (_networkCondition == NetworkCondition.Congested) // The network condition classifier confirms the path is currently congested.
             {
-                if (EstimatedLossPercent <= _maxBandwidthLossPercent)
+                if (EstimatedLossPercent <= _maxBandwidthLossPercent) // Loss is still within the tolerable bandwidth loss budget — no need for aggressive back-off.
                 {
-                    return 1d;
+                    return 1d; // Pace at exactly the bottleneck rate — maintain current throughput without probing higher.
                 }
 
-                return UcpConstants.BBR_PROBE_RTT_PACING_GAIN;
+                return UcpConstants.BBR_PROBE_RTT_PACING_GAIN; // Loss exceeds the budget — return the ProbeRTT low gain (0.50×) to aggressively drain the bottleneck queue.
             }
 
             // ---- Mobile/Unstable paths ----
@@ -1506,16 +1537,16 @@ namespace Ucp
             // scheduling jitter that look like congestion but aren't.  Maintain
             // higher gain when RTT is stable; reduce gradually as RTT inflates
             // (which is a genuine congestion signal even on mobile).
-            if (CurrentNetworkClass == NetworkClass.MobileUnstable)
+            if (CurrentNetworkClass == NetworkClass.MobileUnstable) // The path is classified as mobile/unstable (high jitter, burst loss, LTE/5G/WiFi).
             {
                 // RTT barely above MinRtt → path is clean; probe aggressively.
-                if (rttIncrease < UcpConstants.BBR_LOW_RTT_INCREASE_RATIO)
+                if (rttIncrease < UcpConstants.BBR_LOW_RTT_INCREASE_RATIO) // RTT is stable (barely above MinRtt) — the jitter is link-layer noise, not queuing.
                 {
                     return _config.ProbeBwHighGain; // 1.35x when RTT is stable.
                 }
 
                 // Moderate RTT inflation → still probe but less aggressively.
-                if (rttIncrease < UcpConstants.BBR_MODERATE_RTT_INCREASE_RATIO)
+                if (rttIncrease < UcpConstants.BBR_MODERATE_RTT_INCREASE_RATIO) // RTT is moderately elevated — possible early congestion signal even on mobile.
                 {
                     return UcpConstants.BBR_LIGHT_LOSS_PACING_GAIN; // 1.10x with moderate RTT rise.
                 }
@@ -1528,40 +1559,40 @@ namespace Ucp
             // Satellite/long-haul links have steady background loss from
             // physical-layer noise.  RTT increase is a more reliable congestion
             // signal than loss ratio on these paths.
-            if (CurrentNetworkClass == NetworkClass.LossyLongFat)
+            if (CurrentNetworkClass == NetworkClass.LossyLongFat) // The path is classified as lossy long-fat (satellite, long-haul undersea cable with steady background loss).
             {
-                if (rttIncrease < UcpConstants.BBR_MODERATE_RTT_INCREASE_RATIO)
+                if (rttIncrease < UcpConstants.BBR_MODERATE_RTT_INCREASE_RATIO) // RTT is relatively stable — the background loss is from physical noise, not queuing.
                 {
-                    return UcpConstants.BBR_MODERATE_PROBE_GAIN;
+                    return UcpConstants.BBR_MODERATE_PROBE_GAIN; // Return the moderate probe gain (1.10×) to compensate for steady background throughput loss.
                 }
 
-                return 1d;
+                return 1d; // RTT is rising significantly — this is genuine congestion; pace at 1.00× to avoid making it worse.
             }
 
             // ---- Random loss (non-congestion, stable RTT) ----
             // Loss exists but RTT is flat → noise/corruption, not congestion.
             // Maintain elevated gain unless RTT starts rising.
-            if (_networkCondition == NetworkCondition.RandomLoss)
+            if (_networkCondition == NetworkCondition.RandomLoss) // Loss is present but the condition classifier says it's random (RTT was stable when loss appeared).
             {
-                if (rttIncrease < UcpConstants.BBR_LOW_RTT_INCREASE_RATIO)
+                if (rttIncrease < UcpConstants.BBR_LOW_RTT_INCREASE_RATIO) // RTT is completely stable — the path can handle the current rate despite the random loss.
                 {
-                    return Math.Max(1d, _config.ProbeBwHighGain);
+                    return Math.Max(1d, _config.ProbeBwHighGain); // Return at minimum 1.00×, ideally the full high probe gain (1.35×) since the loss is not from congestion.
                 }
 
-                if (rttIncrease < UcpConstants.BBR_MODERATE_RTT_INCREASE_RATIO)
+                if (rttIncrease < UcpConstants.BBR_MODERATE_RTT_INCREASE_RATIO) // RTT is moderately rising — possible onset of congestion on top of the existing random loss.
                 {
-                    return Math.Max(1d, UcpConstants.BBR_MODERATE_PROBE_GAIN);
+                    return Math.Max(1d, UcpConstants.BBR_MODERATE_PROBE_GAIN); // Return at minimum 1.00×, with a moderate probe gain (1.10×) for cautious recovery.
                 }
 
-                return 1d;
+                return 1d; // RTT is rising significantly — treat as genuine congestion; pace conservatively at 1.00×.
             }
 
             // ---- Low-latency LAN ----
             // Fast, clean paths with negligible queuing.  Always use high gain
             // because there is no risk of bufferbloat — the BDP is tiny.
-            if (CurrentNetworkClass == NetworkClass.LowLatencyLAN)
+            if (CurrentNetworkClass == NetworkClass.LowLatencyLAN) // The path is a low-latency LAN (sub-5ms RTT, minimal jitter, negligible loss).
             {
-                return _config.ProbeBwHighGain;
+                return _config.ProbeBwHighGain; // Always use the aggressive high probe gain (1.35×) — zero queuing risk on a LAN.
             }
 
             // ---- Default/generic path: tiered by loss and RTT ----
@@ -1570,31 +1601,31 @@ namespace Ucp
             // that haven't been caught by the specific classifiers above.
 
             // Low loss + stable RTT → aggressive probing is safe.
-            if (lossRatio < UcpConstants.BBR_LOW_LOSS_RATIO && rttIncrease < UcpConstants.BBR_LOW_RTT_INCREASE_RATIO)
+            if (lossRatio < UcpConstants.BBR_LOW_LOSS_RATIO && rttIncrease < UcpConstants.BBR_LOW_RTT_INCREASE_RATIO) // Both loss and RTT increase are low — the path is healthy and can tolerate aggressive probing.
             {
-                return Math.Max(1d, _config.ProbeBwHighGain);
+                return Math.Max(1d, _config.ProbeBwHighGain); // Return at minimum 1.00×, ideally the full high probe gain (1.35×) for aggressive bandwidth discovery.
             }
 
             // Moderate loss and RTT → moderate probe gain.
-            if (lossRatio < UcpConstants.BBR_MODERATE_LOSS_RATIO && rttIncrease < UcpConstants.BBR_MODERATE_RTT_INCREASE_RATIO)
+            if (lossRatio < UcpConstants.BBR_MODERATE_LOSS_RATIO && rttIncrease < UcpConstants.BBR_MODERATE_RTT_INCREASE_RATIO) // Both loss and RTT are moderate — cautious probing is appropriate.
             {
-                return Math.Max(1d, UcpConstants.BBR_MODERATE_PROBE_GAIN);
+                return Math.Max(1d, UcpConstants.BBR_MODERATE_PROBE_GAIN); // Return at minimum 1.00×, with a moderate probe gain (1.10×) for balanced bandwidth probing.
             }
 
             // Light loss only → near-1.00× with slight upward bias.
-            if (lossRatio < UcpConstants.BBR_LIGHT_LOSS_RATIO)
+            if (lossRatio < UcpConstants.BBR_LIGHT_LOSS_RATIO) // Loss is light (below the light-loss threshold) — a slight upward bias is still safe.
             {
-                return Math.Max(1d, UcpConstants.BBR_LIGHT_LOSS_PACING_GAIN);
+                return Math.Max(1d, UcpConstants.BBR_LIGHT_LOSS_PACING_GAIN); // Return at minimum 1.00×, with a slight upward bias for light-loss conditions.
             }
 
             // Medium loss → modest back-off.
-            if (lossRatio < UcpConstants.BBR_MEDIUM_LOSS_RATIO)
+            if (lossRatio < UcpConstants.BBR_MEDIUM_LOSS_RATIO) // Loss is at a medium level — dial back probing modestly to avoid compounding the loss.
             {
-                return Math.Max(1d, UcpConstants.BBR_MEDIUM_LOSS_PACING_GAIN);
+                return Math.Max(1d, UcpConstants.BBR_MEDIUM_LOSS_PACING_GAIN); // Return at minimum 1.00×, with a modest back-off for medium loss conditions.
             }
 
             // High loss → strong back-off.
-            return Math.Max(1d, UcpConstants.BBR_HIGH_LOSS_PACING_GAIN);
+            return Math.Max(1d, UcpConstants.BBR_HIGH_LOSS_PACING_GAIN); // Loss is high — use the strong back-off pacing gain (0.70×) to relieve the path.
         }
 
         /// <summary>
@@ -1606,7 +1637,7 @@ namespace Ucp
         /// <param name="nowMicros">Current timestamp.</param>
         private void UpdateEstimatedLossPercent(long nowMicros)
         {
-            UpdateEstimatedLossPercent(nowMicros, CalculateLossPercent(nowMicros));
+            UpdateEstimatedLossPercent(nowMicros, CalculateLossPercent(nowMicros)); // Delegate to the two-parameter EWMA update with a freshly computed loss percentage.
         }
 
         /// <summary>
@@ -1635,21 +1666,21 @@ namespace Ucp
         /// <param name="candidateLossPercent">Candidate loss percentage (0..100).</param>
         private void UpdateEstimatedLossPercent(long nowMicros, double candidateLossPercent)
         {
-            double boundedCandidate = Math.Max(0d, Math.Min(100d, candidateLossPercent));
-            if (boundedCandidate <= 0d && GetRecentLossRatio(nowMicros) <= 0d)
+            double boundedCandidate = Math.Max(0d, Math.Min(100d, candidateLossPercent)); // Clamp the candidate loss percentage to the valid range [0, 100] to prevent nonsensical values.
+            if (boundedCandidate <= 0d && GetRecentLossRatio(nowMicros) <= 0d) // No current loss candidate and no recent loss in the sliding window — the loss event has fully passed.
             {
                 EstimatedLossPercent *= UcpConstants.BBR_LOSS_EWMA_IDLE_DECAY; // Idle decay.
-                return;
+                return; // Exit early — there is no new loss signal to incorporate into the EWMA.
             }
 
-            if (EstimatedLossPercent <= 0d)
+            if (EstimatedLossPercent <= 0d) // This is the first time we are setting the EWMA loss estimate (or it has fully decayed to zero).
             {
                 EstimatedLossPercent = boundedCandidate; // First estimate: set directly.
-                return;
+                return; // Exit early — no previous value exists for EWMA blending.
             }
 
             // EWMA: 75% retained + 25% new sample.
-            EstimatedLossPercent = (EstimatedLossPercent * UcpConstants.BBR_LOSS_EWMA_RETAINED_WEIGHT) + (boundedCandidate * UcpConstants.BBR_LOSS_EWMA_SAMPLE_WEIGHT);
+            EstimatedLossPercent = (EstimatedLossPercent * UcpConstants.BBR_LOSS_EWMA_RETAINED_WEIGHT) + (boundedCandidate * UcpConstants.BBR_LOSS_EWMA_SAMPLE_WEIGHT); // Blend the new sample (25% weight) with the previous estimate (75% weight) for a smooth, responsive estimate.
         }
 
         /// <summary>
@@ -1677,30 +1708,30 @@ namespace Ucp
         /// <returns>Loss percentage (0..100).</returns>
         private double CalculateLossPercent(long nowMicros)
         {
-            double targetRate = BtlBwBytesPerSecond > 0 ? BtlBwBytesPerSecond : _config.InitialBandwidthBytesPerSecond;
-            if (targetRate <= 0)
+            double targetRate = BtlBwBytesPerSecond > 0 ? BtlBwBytesPerSecond : _config.InitialBandwidthBytesPerSecond; // Determine the target delivery rate: current BtlBw if valid, otherwise the configured initial bandwidth.
+            if (targetRate <= 0) // No valid target rate is available — cannot compute a meaningful loss percentage.
             {
-                return 0d;
+                return 0d; // Return zero — there is no basis for computing a loss percentage.
             }
 
-            double retransmissionLoss = GetRecentLossRatio(nowMicros);
+            double retransmissionLoss = GetRecentLossRatio(nowMicros); // Get the recent retransmission-based loss ratio from the sliding bucket windows.
 
             // Only consider rate shortfall when congestion is confirmed.
             // Outside of congestion, a low delivery rate just means the
             // sender had nothing to send (application-limited), not that
             // the path is saturated.
-            if (_networkCondition != NetworkCondition.Congested || _deliveryRateBytesPerSecond <= 0 || Mode == BbrMode.Startup)
+            if (_networkCondition != NetworkCondition.Congested || _deliveryRateBytesPerSecond <= 0 || Mode == BbrMode.Startup) // Path is not congested, no recent delivery rate, or still in Startup — rate shortfall is not a congestion signal.
             {
-                return retransmissionLoss * 100d;
+                return retransmissionLoss * 100d; // Return the straightforward retransmission-based loss percentage (ratio × 100).
             }
 
             // When congested, also consider delivery-rate shortfall.
-            // actualRate / targetRate gives utilization (0.0–1.0).
+            // actualRate / targetRate gives utilization (0.0-1.0).
             // 1 - utilization = shortfall fraction.
-            double actualRate = _deliveryRateBytesPerSecond;
-            double lossFromRate = Math.Max(0d, 1d - (actualRate / targetRate));
-            double rateLossHint = Math.Min(lossFromRate, retransmissionLoss + UcpConstants.BBR_RATE_LOSS_HINT_MAX_RATIO);
-            return Math.Max(rateLossHint, retransmissionLoss) * 100d;
+            double actualRate = _deliveryRateBytesPerSecond; // Snapshot the most recent delivery rate for the shortfall calculation.
+            double lossFromRate = Math.Max(0d, 1d - (actualRate / targetRate)); // Compute the rate shortfall fraction: how far below target the actual delivery is (1.0 - utilization).
+            double rateLossHint = Math.Min(lossFromRate, retransmissionLoss + UcpConstants.BBR_RATE_LOSS_HINT_MAX_RATIO); // Cap the rate-based loss hint: it can be at most the retransmission ratio plus a configurable margin, to prevent over-stating loss from application-limited gaps.
+            return Math.Max(rateLossHint, retransmissionLoss) * 100d; // Return the higher of the two loss signals (rate shortfall or retransmission), converted to a percentage.
         }
 
         /// <summary>
@@ -1735,67 +1766,67 @@ namespace Ucp
         /// <returns>The classified network condition.</returns>
         private NetworkCondition ClassifyNetworkCondition(long nowMicros)
         {
-            if (_deliveryRateHistoryCount < 2)
+            if (_deliveryRateHistoryCount < 2) // Less than 2 delivery-rate samples in the trend buffer — cannot compute a meaningful rate change.
             {
                 return NetworkCondition.Idle; // Not enough data.
             }
 
             // Compute delivery-rate trend: oldest vs newest sample.
             // A declining rate suggests the bottleneck is saturated.
-            int newestIndex = (_deliveryRateHistoryIndex + _deliveryRateHistory.Length - 1) % _deliveryRateHistory.Length;
-            int oldestIndex = (_deliveryRateHistoryIndex + _deliveryRateHistory.Length - _deliveryRateHistoryCount) % _deliveryRateHistory.Length;
-            double oldestRate = _deliveryRateHistory[oldestIndex];
-            double newestRate = _deliveryRateHistory[newestIndex];
-            double deliveryRateChange = oldestRate <= 0 ? 0d : (newestRate - oldestRate) / oldestRate;
-            double lossRatio = GetRecentLossRatio(nowMicros);
-            double rttIncrease = GetAverageRttIncreaseRatio();
-            int congestionScore = 0;
+            int newestIndex = (_deliveryRateHistoryIndex + _deliveryRateHistory.Length - 1) % _deliveryRateHistory.Length; // Compute the circular buffer index of the newest (most recently written) sample.
+            int oldestIndex = (_deliveryRateHistoryIndex + _deliveryRateHistory.Length - _deliveryRateHistoryCount) % _deliveryRateHistory.Length; // Compute the circular buffer index of the oldest (first valid) sample.
+            double oldestRate = _deliveryRateHistory[oldestIndex]; // Retrieve the oldest delivery rate sample for the trend baseline.
+            double newestRate = _deliveryRateHistory[newestIndex]; // Retrieve the newest delivery rate sample for the trend endpoint.
+            double deliveryRateChange = oldestRate <= 0 ? 0d : (newestRate - oldestRate) / oldestRate; // Compute the relative delivery-rate change: positive means increasing throughput, negative means declining (congestion signal).
+            double lossRatio = GetRecentLossRatio(nowMicros); // Get the recent packet loss ratio for the scoring rules.
+            double rttIncrease = GetAverageRttIncreaseRatio(); // Get the RTT increase ratio (avg - min) / min for the scoring rules.
+            int congestionScore = 0; // Initialize the cumulative congestion score — starts at zero, each rule adds points.
 
             // ---- Tier 1: Delivery-rate drop + RTT rise ----
             // The strongest congestion signal.  When the bottleneck queue is
             // building, delivery rate flattens or drops while RTT rises.
-            if (deliveryRateChange <= UcpConstants.BBR_CONGESTION_RATE_DROP_RATIO && rttIncrease >= UcpConstants.BBR_CONGESTION_RTT_INCREASE_RATIO)
+            if (deliveryRateChange <= UcpConstants.BBR_CONGESTION_RATE_DROP_RATIO && rttIncrease >= UcpConstants.BBR_CONGESTION_RTT_INCREASE_RATIO) // Delivery rate is declining AND RTT is rising — the strongest combined congestion signal.
             {
-                congestionScore += UcpConstants.BBR_CONGESTION_RATE_DROP_SCORE;
+                congestionScore += UcpConstants.BBR_CONGESTION_RATE_DROP_SCORE; // Add the highest-weight score (typically +2) for the rate-drop + RTT-rise combination.
             }
 
             // ---- Tier 2: RTT growth alone ----
             // RTT rising is an early-warning signal.  Even before loss appears,
             // growing queues indicate impending congestion.
-            if (rttIncrease >= UcpConstants.BBR_CONGESTION_RTT_INCREASE_RATIO)
+            if (rttIncrease >= UcpConstants.BBR_CONGESTION_RTT_INCREASE_RATIO) // RTT has risen above the congestion threshold — queues are building at the bottleneck.
             {
-                congestionScore += UcpConstants.BBR_CONGESTION_RTT_GROWTH_SCORE;
+                congestionScore += UcpConstants.BBR_CONGESTION_RTT_GROWTH_SCORE; // Add the RTT-growth score (typically +1) for early-warning queue buildup detection.
             }
 
             // ---- Tier 3: Loss ratio + RTT rise ----
             // Loss is only treated as congestion evidence when accompanied by
             // RTT rise.  Loss with flat RTT is random/corruption.
-            if (lossRatio >= UcpConstants.BBR_CONGESTION_LOSS_RATIO && rttIncrease >= UcpConstants.BBR_CONGESTION_RTT_INCREASE_RATIO)
+            if (lossRatio >= UcpConstants.BBR_CONGESTION_LOSS_RATIO && rttIncrease >= UcpConstants.BBR_CONGESTION_RTT_INCREASE_RATIO) // Loss ratio exceeds the threshold AND RTT is rising — loss confirms the congestion signal.
             {
-                congestionScore += UcpConstants.BBR_CONGESTION_LOSS_SCORE;
+                congestionScore += UcpConstants.BBR_CONGESTION_LOSS_SCORE; // Add the loss-confirmed score (typically +1) — loss is corroborating evidence for congestion.
             }
 
             // Score ≥ threshold → congestion confirmed.
-            if (congestionScore >= UcpConstants.BBR_CONGESTION_CLASSIFIER_SCORE_THRESHOLD)
+            if (congestionScore >= UcpConstants.BBR_CONGESTION_CLASSIFIER_SCORE_THRESHOLD) // The cumulative congestion score meets or exceeds the classifier threshold (typically 4).
             {
-                return NetworkCondition.Congested;
+                return NetworkCondition.Congested; // Congestion confirmed — apply multiplicative CWND reduction and conservative pacing.
             }
 
             // Loss present but RTT is flat → random/corruption loss.
             // The path can handle the current rate; loss is not from queuing.
-            if (lossRatio > 0 && rttIncrease <= UcpConstants.BBR_RANDOM_LOSS_MAX_RTT_INCREASE_RATIO)
+            if (lossRatio > 0 && rttIncrease <= UcpConstants.BBR_RANDOM_LOSS_MAX_RTT_INCREASE_RATIO) // Loss exists but RTT is flat (not rising) — this is random/corruption loss, not queuing.
             {
-                return NetworkCondition.RandomLoss;
+                return NetworkCondition.RandomLoss; // Classify as random loss — use fast recovery (elevated pacing) without CWND reduction.
             }
 
             // Negligible loss → light load.
-            if (lossRatio < UcpConstants.BBR_LOW_LOSS_RATIO)
+            if (lossRatio < UcpConstants.BBR_LOW_LOSS_RATIO) // Loss ratio is below the low-loss threshold — the path is essentially clean.
             {
-                return NetworkCondition.LightLoad;
+                return NetworkCondition.LightLoad; // Classify as light load — aggressive probing is safe on a lightly loaded path.
             }
 
             // Default: not enough signal to classify.
-            return NetworkCondition.Idle;
+            return NetworkCondition.Idle; // Insufficient data or ambiguous signals — return Idle as the safe default (no action taken).
         }
 
         /// <summary>
@@ -1828,23 +1859,23 @@ namespace Ucp
             // If the external event source already says "not congestion"
             // (e.g. a SACK-triggered fast retransmit on a lossless path),
             // we never treat it as congestion — no further check needed.
-            if (!isCongestionSignal)
+            if (!isCongestionSignal) // External source explicitly flags this as non-congestion — trust the signal and skip all further classification.
             {
-                return false;
+                return false; // Treat as non-congestion loss (random) — fast recovery only, no CWND reduction.
             }
 
             // Classifier confirms congestion → immediate reduction.
-            if (_networkCondition == NetworkCondition.Congested)
+            if (_networkCondition == NetworkCondition.Congested) // The internal three-tier classifier independently confirms the path is congested — both signals align.
             {
-                return true;
+                return true; // Treat as congestion — both external (RTO/NAK) and internal (classifier) signals agree on congestion.
             }
 
             // Classifier is uncertain, but the loss event says congestion.
             // Require BOTH elevated RTT AND elevated loss to confirm.
             // Either alone is too weak for a multiplicative reduction.
-            double rttIncrease = GetAverageRttIncreaseRatio();
-            double lossRatio = GetRecentLossRatio(nowMicros);
-            return rttIncrease >= UcpConstants.BBR_CONGESTION_RTT_INCREASE_RATIO && lossRatio >= UcpConstants.BBR_CONGESTION_LOSS_RATIO;
+            double rttIncrease = GetAverageRttIncreaseRatio(); // Get the average RTT increase ratio for cross-verification with the external signal.
+            double lossRatio = GetRecentLossRatio(nowMicros); // Get the recent loss ratio for cross-verification with the external signal.
+            return rttIncrease >= UcpConstants.BBR_CONGESTION_RTT_INCREASE_RATIO && lossRatio >= UcpConstants.BBR_CONGESTION_LOSS_RATIO; // Both RTT AND loss must be elevated to confirm congestion; either alone is insufficient for multiplicative reduction.
         }
 
         /// <summary>
@@ -1878,14 +1909,14 @@ namespace Ucp
             // More robust than raw MinRtt against single lucky fast samples,
             // and provides sufficient retransmission headroom on jittery paths.
             // The hard CWND ceiling (using MinRtt directly) prevents bufferbloat.
-            long p10Rtt = GetP10RttMicros();
-            long modelRttMicros = p10Rtt > 0 ? Math.Max(MinRttMicros, p10Rtt) : MinRttMicros;
-            if (modelRttMicros <= 0)
+            long p10Rtt = GetP10RttMicros(); // Compute the 10th-percentile RTT from the history buffer (robust to occasional fast samples).
+            long modelRttMicros = p10Rtt > 0 ? Math.Max(MinRttMicros, p10Rtt) : MinRttMicros; // Use max(MinRtt, P10-RTT) as the model RTT; fall back to raw MinRtt if P10 is not yet available (fewer than 4 samples).
+            if (modelRttMicros <= 0) // No valid model RTT could be determined — no RTT samples have been collected yet.
             {
-                return 0;
+                return 0; // Return zero to signal that CWND computation cannot proceed — use initial CWND instead.
             }
 
-            return modelRttMicros;
+            return modelRttMicros; // Return the model RTT (robust, percentile-based) for BDP calculation in GetTargetCwndBytes.
         }
 
         /// <summary>
@@ -1906,19 +1937,19 @@ namespace Ucp
         /// <returns>RTT increase ratio (e.g. 0.20 = 20% above min RTT).</returns>
         private double GetAverageRttIncreaseRatio()
         {
-            if (_rttHistoryCount == 0 || MinRttMicros <= 0)
+            if (_rttHistoryCount == 0 || MinRttMicros <= 0) // No RTT history samples OR MinRtt has never been set — cannot compute the ratio.
             {
-                return 0d;
+                return 0d; // Return zero — no RTT increase data is available.
             }
 
-            long total = 0;
-            for (int i = 0; i < _rttHistoryCount; i++)
+            long total = 0; // Initialize the running sum accumulator for the arithmetic mean.
+            for (int i = 0; i < _rttHistoryCount; i++) // Iterate through all valid RTT samples in the history buffer.
             {
-                total += _rttHistoryMicros[i];
+                total += _rttHistoryMicros[i]; // Accumulate each RTT sample into the running sum.
             }
 
-            double averageRtt = total / (double)_rttHistoryCount;
-            return Math.Max(0d, (averageRtt - MinRttMicros) / MinRttMicros);
+            double averageRtt = total / (double)_rttHistoryCount; // Compute the simple arithmetic mean of all RTT samples: sum / count.
+            return Math.Max(0d, (averageRtt - MinRttMicros) / MinRttMicros); // Return the relative increase ratio: (avg - min) / min, clamped to prevent negative values (avg should never be below min due to the sticky floor).
         }
 
         /// <summary>
@@ -1936,7 +1967,7 @@ namespace Ucp
         /// </summary>
         private long GetP10RttMicros()
         {
-            return GetPercentileRtt(0.10d);
+            return GetPercentileRtt(0.10d); // Delegate to the generic percentile function with the 10th percentile (P10).
         }
 
         /// <summary>
@@ -1953,7 +1984,7 @@ namespace Ucp
         /// </summary>
         private long GetP25RttMicros()
         {
-            return GetPercentileRtt(0.25d);
+            return GetPercentileRtt(0.25d); // Delegate to the generic percentile function with the 25th percentile (P25).
         }
 
         /// <summary>
@@ -1966,13 +1997,13 @@ namespace Ucp
         ///       to absorb this without under-filling.
         ///
         /// WHY:  LTE/5G scheduling cycles and HARQ retransmissions create
-        ///       RTT spikes that can be 2–10× the base RTT.  These are not
+        ///       RTT spikes that can be 2-10× the base RTT.  These are not
         ///       congestion signals — they are link-layer artifacts.  Using
         ///       a higher percentile prevents CWND starvation.
         /// </summary>
         private long GetP30RttMicros()
         {
-            return GetPercentileRtt(0.30d);
+            return GetPercentileRtt(0.30d); // Delegate to the generic percentile function with the 30th percentile (P30).
         }
 
         /// <summary>
@@ -1997,19 +2028,19 @@ namespace Ucp
         private long GetPercentileRtt(double percentile)
         {
             // Not enough samples for a meaningful percentile.
-            if (_rttHistoryCount < 4)
+            if (_rttHistoryCount < 4) // Fewer than 4 RTT samples — percentile computation is unreliable with too few data points.
             {
                 return MinRttMicros; // Not enough samples, fall back to min.
             }
 
             // Copy valid entries to a temporary array for sorting.
-            long[] sorted = new long[_rttHistoryCount];
-            Array.Copy(_rttHistoryMicros, sorted, _rttHistoryCount);
-            Array.Sort(sorted);
+            long[] sorted = new long[_rttHistoryCount]; // Allocate a temporary array sized exactly to the number of valid samples.
+            Array.Copy(_rttHistoryMicros, sorted, _rttHistoryCount); // Copy the valid portion of the circular buffer into the contiguous temporary array.
+            Array.Sort(sorted); // Sort the temporary array in ascending order — the lowest values come first, highest last.
 
             // Return approximately the requested percentile.
-            int index = Math.Max(0, Math.Min(_rttHistoryCount - 1, (int)(_rttHistoryCount * percentile)));
-            return sorted[index];
+            int index = Math.Max(0, Math.Min(_rttHistoryCount - 1, (int)(_rttHistoryCount * percentile))); // Compute the index: count × percentile fraction, clamped to the valid range [0, count-1].
+            return sorted[index]; // Return the RTT value at the computed percentile position in the sorted array.
         }
 
         /// <summary>
@@ -2032,18 +2063,18 @@ namespace Ucp
         /// </summary>
         private void UpdateInflightBounds()
         {
-            if (BtlBwBytesPerSecond <= 0 || MinRttMicros <= 0)
+            if (BtlBwBytesPerSecond <= 0 || MinRttMicros <= 0) // Missing critical estimates — BDP cannot be computed for guardrail derivation.
             {
-                _inflightHighBytes = 0;
-                _inflightLowBytes = 0;
-                return;
+                _inflightHighBytes = 0; // Reset the upper guardrail to zero (meaning no ceiling is applied during clamping).
+                _inflightLowBytes = 0; // Reset the lower guardrail to zero (meaning no floor is applied during clamping).
+                return; // Exit early — guardrails cannot be established without valid BtlBw and MinRtt.
             }
 
-            double bdpBytes = BtlBwBytesPerSecond * (MinRttMicros / (double)UcpConstants.MICROS_PER_SECOND);
+            double bdpBytes = BtlBwBytesPerSecond * (MinRttMicros / (double)UcpConstants.MICROS_PER_SECOND); // Compute the bandwidth-delay product in bytes using raw MinRtt for guardrail simplicity.
 
             // Lower guardrail: at minimum the initial CWND, otherwise a
             // fraction of BDP.  Prevents CWND starvation on low-BDP paths.
-            _inflightLowBytes = Math.Max(_config.InitialCongestionWindowBytes, bdpBytes * UcpConstants.BBR_INFLIGHT_LOW_GAIN);
+            _inflightLowBytes = Math.Max(_config.InitialCongestionWindowBytes, bdpBytes * UcpConstants.BBR_INFLIGHT_LOW_GAIN); // Set the lower bound: the higher of the configured initial CWND or a small fraction of BDP.
 
             // Upper guardrail: mobile/lossy paths get higher headroom because
             // their loss is often non-congestion and retransmissions need
@@ -2051,9 +2082,9 @@ namespace Ucp
             double highGain = (_networkCondition != NetworkCondition.Congested
                                 && (CurrentNetworkClass == NetworkClass.MobileUnstable
                                     || CurrentNetworkClass == NetworkClass.LossyLongFat))
-                ? UcpConstants.BBR_INFLIGHT_MOBILE_HIGH_GAIN
-                : UcpConstants.BBR_INFLIGHT_HIGH_GAIN;
-            _inflightHighBytes = Math.Max(_inflightLowBytes, bdpBytes * highGain);
+                ? UcpConstants.BBR_INFLIGHT_MOBILE_HIGH_GAIN // Non-congested mobile/lossy path — allow more inflight headroom for non-congestion retransmissions.
+                : UcpConstants.BBR_INFLIGHT_HIGH_GAIN; // All other path types — use the standard (conservative) inflight high gain.
+            _inflightHighBytes = Math.Max(_inflightLowBytes, bdpBytes * highGain); // Set the upper bound: the higher of the lower guardrail or BDP multiplied by the path-class-appropriate high gain.
         }
 
         /// <summary>
@@ -2076,17 +2107,17 @@ namespace Ucp
         /// <returns>Loss ratio (0.0 to 1.0).</returns>
         private double GetRecentLossRatio(long nowMicros)
         {
-            AdvanceLossBuckets(nowMicros);
+            AdvanceLossBuckets(nowMicros); // Age out expired loss buckets before computing the ratio to ensure data freshness.
 
-            long sent = 0;
-            long retransmits = 0;
-            for (int i = 0; i < UcpConstants.BBR_LOSS_BUCKET_COUNT; i++)
+            long sent = 0; // Initialize the total-sent accumulator to zero.
+            long retransmits = 0; // Initialize the total-retransmit accumulator to zero.
+            for (int i = 0; i < UcpConstants.BBR_LOSS_BUCKET_COUNT; i++) // Iterate through all buckets in the sliding window.
             {
-                sent += _sentBuckets[i];
-                retransmits += _retransmitBuckets[i];
+                sent += _sentBuckets[i]; // Accumulate the sent-packet count from this bucket into the running total.
+                retransmits += _retransmitBuckets[i]; // Accumulate the retransmit count from this bucket into the running total.
             }
 
-            return sent == 0 ? 0d : retransmits / (double)sent;
+            return sent == 0 ? 0d : retransmits / (double)sent; // Compute the loss ratio: retransmits / total-sent; return zero if no packets were sent to avoid divide-by-zero.
         }
 
         /// <summary>
@@ -2110,48 +2141,48 @@ namespace Ucp
         /// <param name="nowMicros">Current timestamp.</param>
         private void AdvanceLossBuckets(long nowMicros)
         {
-            if (nowMicros <= 0)
+            if (nowMicros <= 0) // Timestamp is invalid (zero or negative) — use the current real time as a fallback.
             {
-                nowMicros = UcpTime.NowMicroseconds();
+                nowMicros = UcpTime.NowMicroseconds(); // Get the current high-resolution timestamp to ensure correct bucket slot alignment.
             }
 
             // Align to bucket boundaries for consistent slotting.
-            long alignedNow = nowMicros - (nowMicros % UcpConstants.BBR_LOSS_BUCKET_MICROS);
-            if (_lossBucketStartMicros == 0 || nowMicros < _lossBucketStartMicros)
+            long alignedNow = nowMicros - (nowMicros % UcpConstants.BBR_LOSS_BUCKET_MICROS); // Round down the timestamp to the nearest bucket boundary for deterministic time-slot allocation.
+            if (_lossBucketStartMicros == 0 || nowMicros < _lossBucketStartMicros) // First call ever (no window started) OR clock went backwards (system time adjustment).
             {
                 // First call or clock reset: clear all buckets.
-                Array.Clear(_sentBuckets, 0, _sentBuckets.Length);
-                Array.Clear(_retransmitBuckets, 0, _retransmitBuckets.Length);
-                _lossBucketIndex = 0;
-                _lossBucketStartMicros = alignedNow;
-                return;
+                Array.Clear(_sentBuckets, 0, _sentBuckets.Length); // Zero out all sent-packet bucket counters to start fresh.
+                Array.Clear(_retransmitBuckets, 0, _retransmitBuckets.Length); // Zero out all retransmit bucket counters to start fresh.
+                _lossBucketIndex = 0; // Reset the ring buffer write position to the first bucket.
+                _lossBucketStartMicros = alignedNow; // Set the window start time to the current aligned timestamp.
+                return; // Done — all buckets are cleared and a new window begins now.
             }
 
-            long steps = (nowMicros - _lossBucketStartMicros) / UcpConstants.BBR_LOSS_BUCKET_MICROS;
-            if (steps <= 0)
+            long steps = (nowMicros - _lossBucketStartMicros) / UcpConstants.BBR_LOSS_BUCKET_MICROS; // Calculate how many full bucket durations have elapsed since the window start.
+            if (steps <= 0) // No full bucket boundaries have been crossed — nothing to advance.
             {
                 return; // No advancement needed.
             }
 
-            if (steps >= UcpConstants.BBR_LOSS_BUCKET_COUNT)
+            if (steps >= UcpConstants.BBR_LOSS_BUCKET_COUNT) // The elapsed time exceeds the total window span — all buckets are stale.
             {
                 // Large time jump: clear all buckets.
-                Array.Clear(_sentBuckets, 0, _sentBuckets.Length);
-                Array.Clear(_retransmitBuckets, 0, _retransmitBuckets.Length);
-                _lossBucketIndex = 0;
-                _lossBucketStartMicros = alignedNow;
-                return;
+                Array.Clear(_sentBuckets, 0, _sentBuckets.Length); // Clear all sent counters since the entire window is now expired.
+                Array.Clear(_retransmitBuckets, 0, _retransmitBuckets.Length); // Clear all retransmit counters since the entire window is now expired.
+                _lossBucketIndex = 0; // Reset the ring buffer write position to the first bucket.
+                _lossBucketStartMicros = alignedNow; // Reset the window start to the current aligned timestamp.
+                return; // Done — all stale data is discarded, new window starts now.
             }
 
             // Advance by clearing intermediate buckets.
-            for (long i = 0; i < steps; i++)
+            for (long i = 0; i < steps; i++) // Iterate through each elapsed bucket step to clear the now-expired time slots.
             {
-                _lossBucketIndex = (_lossBucketIndex + 1) % UcpConstants.BBR_LOSS_BUCKET_COUNT;
-                _sentBuckets[_lossBucketIndex] = 0;
-                _retransmitBuckets[_lossBucketIndex] = 0;
+                _lossBucketIndex = (_lossBucketIndex + 1) % UcpConstants.BBR_LOSS_BUCKET_COUNT; // Advance the ring buffer index to the next slot (wrapping around at the buffer end).
+                _sentBuckets[_lossBucketIndex] = 0; // Clear the sent counter at the new (now-active) slot — old data must not carry over.
+                _retransmitBuckets[_lossBucketIndex] = 0; // Clear the retransmit counter at the new (now-active) slot — old data must not carry over.
             }
 
-            _lossBucketStartMicros += steps * UcpConstants.BBR_LOSS_BUCKET_MICROS;
+            _lossBucketStartMicros += steps * UcpConstants.BBR_LOSS_BUCKET_MICROS; // Advance the window start time by exactly the number of buckets that were cleared.
         }
 
         /// <summary>
@@ -2180,30 +2211,30 @@ namespace Ucp
             // headroom.  Their CWND is already bounded by the fixed
             // ceiling, so skip the waste-budget cap here.
             if (CurrentNetworkClass == NetworkClass.MobileUnstable
-                || CurrentNetworkClass == NetworkClass.LossyLongFat)
+                || CurrentNetworkClass == NetworkClass.LossyLongFat) // Path is mobile or lossy-fat — these need extra CWND for non-congestion retransmission headroom.
             {
-                return CwndGain;
+                return CwndGain; // Return the CWND gain unchanged (no waste-budget cap) to maintain retransmission headroom.
             }
 
             // Startup needs high CWND for rapid bandwidth discovery.
             // The waste-budget cap would prevent the ramp-up.
-            if (Mode == BbrMode.Startup)
+            if (Mode == BbrMode.Startup) // We are in Startup mode — the waste budget would artificially limit bandwidth discovery.
             {
-                return CwndGain;
+                return CwndGain; // Return the CWND gain unchanged (no waste-budget cap) to allow exponential Startup ramp-up.
             }
 
             // Waste budget: how much extra inflight (beyond BDP) we tolerate.
             // e.g. 0.50 means we allow up to 1.50× BDP total inflight.
-            double wasteBudget = Math.Max(0.50d, _config.MaxBandwidthWastePercent);
-            double maxWasteGain = 1d + wasteBudget;
-            double limit = maxWasteGain * _config.ProbeBwCwndGain;
-            if (PacingGain <= 0 || PacingGain * CwndGain <= limit)
+            double wasteBudget = Math.Max(0.50d, _config.MaxBandwidthWastePercent); // Determine the waste budget: use configured value, but never below 0.50 (50%) to maintain some headroom.
+            double maxWasteGain = 1d + wasteBudget; // Compute the total permissible inflight multiplier: 1.0 (base BDP) + wasteBudget.
+            double limit = maxWasteGain * _config.ProbeBwCwndGain; // Compute the absolute gain ceiling: waste-budget cap multiplied by the base ProbeBW CWND gain.
+            if (PacingGain <= 0 || PacingGain * CwndGain <= limit) // Pacing gain is invalid (can't compute) OR the total inflight is already within the waste budget.
             {
-                return CwndGain;
+                return CwndGain; // No cap needed — the total inflight (CwndGain × PacingGain) is within the waste budget.
             }
 
             // Cap CwndGain so that total inflight multiplier ≤ wasteBudget + 1.
-            return Math.Max(1d, limit / PacingGain);
+            return Math.Max(1d, limit / PacingGain); // Derive a capped CWND gain: limit / pacing gain, floored at 1.0 so CWND never drops below BDP.
         }
 
         /// <summary>
@@ -2219,9 +2250,9 @@ namespace Ucp
         /// <param name="message">The message to log.</param>
         private void TraceLog(string message)
         {
-            if (_config.EnableDebugLog)
+            if (_config.EnableDebugLog) // Debug logging is enabled in the configuration — the message passes the gate.
             {
-                Trace.WriteLine("[UCP BBR] " + message);
+                Trace.WriteLine("[UCP BBR] " + message); // Emit the message to the System.Diagnostics.Trace output with a recognizable prefix for filtering.
             }
         }
 
@@ -2251,51 +2282,51 @@ namespace Ucp
         /// <param name="lossRateSnapshot">Current loss rate snapshot.</param>
         private void AdvanceClassifierWindow(long nowMicros, int sentOrAckedBytes, long sampleRttMicros, double lossRateSnapshot)
         {
-            if (_classifierWindowStartMicros == 0)
+            if (_classifierWindowStartMicros == 0) // This is the first classifier window — initialize the start timestamp.
             {
-                _classifierWindowStartMicros = nowMicros;
+                _classifierWindowStartMicros = nowMicros; // Set the window start to the current timestamp for duration tracking.
             }
 
-            _classifierWindowSentBytes += Math.Max(0, sentOrAckedBytes);
-            if (sampleRttMicros > 0)
+            _classifierWindowSentBytes += Math.Max(0, sentOrAckedBytes); // Accumulate sent/acked bytes into the current window (clamp negative values to zero for safety).
+            if (sampleRttMicros > 0) // A valid RTT sample was provided with this call — update the RTT statistics.
             {
-                _classifierWindowRttSumMicros += sampleRttMicros;
-                _classifierWindowRttCount++;
-                if (_classifierWindowMinRttMicros == 0 || sampleRttMicros < _classifierWindowMinRttMicros)
+                _classifierWindowRttSumMicros += sampleRttMicros; // Add this RTT sample to the running sum for average computation.
+                _classifierWindowRttCount++; // Increment the sample count for the denominator of the average.
+                if (_classifierWindowMinRttMicros == 0 || sampleRttMicros < _classifierWindowMinRttMicros) // First RTT sample in this window OR a new minimum was observed.
                 {
-                    _classifierWindowMinRttMicros = sampleRttMicros;
+                    _classifierWindowMinRttMicros = sampleRttMicros; // Update the window's minimum RTT with this lower value.
                 }
 
-                if (sampleRttMicros > _classifierWindowMaxRttMicros)
+                if (sampleRttMicros > _classifierWindowMaxRttMicros) // This RTT sample exceeds the current window maximum.
                 {
-                    _classifierWindowMaxRttMicros = sampleRttMicros;
+                    _classifierWindowMaxRttMicros = sampleRttMicros; // Update the window's maximum RTT with this higher value.
                 }
             }
 
-            if (nowMicros - _classifierWindowStartMicros >= UcpConstants.NETWORK_CLASSIFIER_WINDOW_DURATION_MICROS)
+            if (nowMicros - _classifierWindowStartMicros >= UcpConstants.NETWORK_CLASSIFIER_WINDOW_DURATION_MICROS) // The classifier window duration has elapsed — finalize and store this window.
             {
                 // Finalize the current window.
-                ref ClassifierWindow window = ref _classifierWindows[_classifierWindowIndex];
-                window.AvgRttMicros = _classifierWindowRttCount > 0 ? _classifierWindowRttSumMicros / (double)_classifierWindowRttCount : 0d;
-                window.JitterMicros = _classifierWindowMinRttMicros > 0 && _classifierWindowMaxRttMicros > 0 ? (_classifierWindowMaxRttMicros - _classifierWindowMinRttMicros) : 0d;
-                window.LossRate = lossRateSnapshot;
+                ref ClassifierWindow window = ref _classifierWindows[_classifierWindowIndex]; // Get a reference to the current slot in the classifier window circular buffer.
+                window.AvgRttMicros = _classifierWindowRttCount > 0 ? _classifierWindowRttSumMicros / (double)_classifierWindowRttCount : 0d; // Compute the average RTT: sum / count, or zero if no samples were collected.
+                window.JitterMicros = _classifierWindowMinRttMicros > 0 && _classifierWindowMaxRttMicros > 0 ? (_classifierWindowMaxRttMicros - _classifierWindowMinRttMicros) : 0d; // Compute the RTT jitter: max - min, or zero if either value is missing.
+                window.LossRate = lossRateSnapshot; // Store the current loss rate snapshot in this classifier window.
                 // Convert the microsecond window to bytes/second before comparing
                 // against BtlBw; otherwise high-bandwidth paths look artificially idle.
-                double windowBytesPerSecond = _classifierWindowSentBytes * UcpConstants.MICROS_PER_SECOND / (double)Math.Max(1, nowMicros - _classifierWindowStartMicros);
-                window.ThroughputRatio = BtlBwBytesPerSecond > 0 ? Math.Min(1d, windowBytesPerSecond / BtlBwBytesPerSecond) : 0d;
-                _classifierWindowIndex = (_classifierWindowIndex + 1) % UcpConstants.NETWORK_CLASSIFIER_WINDOW_COUNT;
-                if (_classifierWindowCount < UcpConstants.NETWORK_CLASSIFIER_WINDOW_COUNT)
+                double windowBytesPerSecond = _classifierWindowSentBytes * UcpConstants.MICROS_PER_SECOND / (double)Math.Max(1, nowMicros - _classifierWindowStartMicros); // Compute the throughput in bytes/sec over the classifier window duration.
+                window.ThroughputRatio = BtlBwBytesPerSecond > 0 ? Math.Min(1d, windowBytesPerSecond / BtlBwBytesPerSecond) : 0d; // Compute the throughput ratio: actual / BtlBw, capped at 1.0 so utilization can never exceed 100%.
+                _classifierWindowIndex = (_classifierWindowIndex + 1) % UcpConstants.NETWORK_CLASSIFIER_WINDOW_COUNT; // Advance the circular buffer write position by one (wrapping around at the end).
+                if (_classifierWindowCount < UcpConstants.NETWORK_CLASSIFIER_WINDOW_COUNT) // The buffer has not yet filled up — increase the valid window count.
                 {
-                    _classifierWindowCount++;
+                    _classifierWindowCount++; // Increment the count of finalized classifier windows available for path classification.
                 }
 
                 // Reset accumulators for the next window.
-                _classifierWindowStartMicros = nowMicros;
-                _classifierWindowSentBytes = 0;
-                _classifierWindowMinRttMicros = 0;
-                _classifierWindowMaxRttMicros = 0;
-                _classifierWindowRttSumMicros = 0;
-                _classifierWindowRttCount = 0;
+                _classifierWindowStartMicros = nowMicros; // Start a new classifier window at the current timestamp.
+                _classifierWindowSentBytes = 0; // Reset sent bytes counter for the new window.
+                _classifierWindowMinRttMicros = 0; // Reset min RTT tracker for the new window.
+                _classifierWindowMaxRttMicros = 0; // Reset max RTT tracker for the new window.
+                _classifierWindowRttSumMicros = 0; // Reset RTT sum accumulator for the new window.
+                _classifierWindowRttCount = 0; // Reset RTT sample counter for the new window.
             }
         }
 
@@ -2334,59 +2365,59 @@ namespace Ucp
             // Need at least 2 windows (~4 seconds of data) to make a reliable
             // classification.  A single window could be dominated by a
             // transient event.
-            if (_classifierWindowCount < 2)
+            if (_classifierWindowCount < 2) // Fewer than 2 finalized classifier windows — not enough data for reliable classification.
             {
                 return NetworkClass.Default; // Not enough data yet.
             }
 
             // Average all windows.
-            double avgRtt = 0d;
-            double avgLoss = 0d;
-            double avgJitter = 0d;
-            double minThroughput = 1d;
-            for (int i = 0; i < _classifierWindowCount; i++)
+            double avgRtt = 0d; // Initialize the running average RTT accumulator.
+            double avgLoss = 0d; // Initialize the running average loss accumulator.
+            double avgJitter = 0d; // Initialize the running average jitter accumulator.
+            double minThroughput = 1d; // Initialize the minimum throughput tracker (start high, reduce when lower values are found).
+            for (int i = 0; i < _classifierWindowCount; i++) // Iterate through all finalized classifier windows.
             {
-                avgRtt += _classifierWindows[i].AvgRttMicros;
-                avgLoss += _classifierWindows[i].LossRate;
-                avgJitter += _classifierWindows[i].JitterMicros;
-                if (_classifierWindows[i].ThroughputRatio > 0 && _classifierWindows[i].ThroughputRatio < minThroughput)
+                avgRtt += _classifierWindows[i].AvgRttMicros; // Accumulate this window's average RTT into the running sum.
+                avgLoss += _classifierWindows[i].LossRate; // Accumulate this window's loss rate into the running sum.
+                avgJitter += _classifierWindows[i].JitterMicros; // Accumulate this window's jitter into the running sum.
+                if (_classifierWindows[i].ThroughputRatio > 0 && _classifierWindows[i].ThroughputRatio < minThroughput) // This window has a valid throughput ratio that is lower than the current minimum.
                 {
-                    minThroughput = _classifierWindows[i].ThroughputRatio;
+                    minThroughput = _classifierWindows[i].ThroughputRatio; // Update the minimum throughput tracker to this lower value.
                 }
             }
 
-            avgRtt /= _classifierWindowCount;
-            avgLoss /= _classifierWindowCount;
-            avgJitter /= _classifierWindowCount;
+            avgRtt /= _classifierWindowCount; // Compute the arithmetic mean RTT across all windows.
+            avgLoss /= _classifierWindowCount; // Compute the arithmetic mean loss rate across all windows.
+            avgJitter /= _classifierWindowCount; // Compute the arithmetic mean jitter across all windows.
 
-            double avgRttMs = avgRtt / UcpConstants.MICROS_PER_MILLI;
-            double avgJitterMs = avgJitter / UcpConstants.MICROS_PER_MILLI;
+            double avgRttMs = avgRtt / UcpConstants.MICROS_PER_MILLI; // Convert the average RTT from microseconds to milliseconds for readable threshold comparison.
+            double avgJitterMs = avgJitter / UcpConstants.MICROS_PER_MILLI; // Convert the average jitter from microseconds to milliseconds for readable threshold comparison.
 
             // Rule 1: Low-latency LAN
             // Sub-5ms RTT, negligible loss (&lt;0.1%), low jitter (&lt;2ms).
             // These paths have essentially zero queuing delay; the BDP is
             // tiny so aggressive probing causes no harm.
-            if (avgRttMs < UcpConstants.NETWORK_CLASSIFIER_LAN_RTT_MS && avgLoss < 0.001d && avgJitterMs < UcpConstants.NETWORK_CLASSIFIER_LAN_JITTER_MS)
+            if (avgRttMs < UcpConstants.NETWORK_CLASSIFIER_LAN_RTT_MS && avgLoss < 0.001d && avgJitterMs < UcpConstants.NETWORK_CLASSIFIER_LAN_JITTER_MS) // RTT < 5ms, loss < 0.1%, jitter < 2ms — this is a classic LAN.
             {
-                return NetworkClass.LowLatencyLAN;
+                return NetworkClass.LowLatencyLAN; // Classify as low-latency LAN — use aggressive pacing (1.35×) on this clean high-speed path.
             }
 
             // Rule 2: Mobile/Unstable
             // High loss ratio AND high jitter together is the signature of
             // a wireless link (LTE/5G/WiFi).  Radio-layer retransmissions
             // and scheduling create burst loss + jitter spikes.
-            if (avgLoss > UcpConstants.NETWORK_CLASSIFIER_MOBILE_LOSS_RATE && avgJitterMs > UcpConstants.NETWORK_CLASSIFIER_MOBILE_JITTER_MS)
+            if (avgLoss > UcpConstants.NETWORK_CLASSIFIER_MOBILE_LOSS_RATE && avgJitterMs > UcpConstants.NETWORK_CLASSIFIER_MOBILE_JITTER_MS) // Loss rate exceeds the mobile threshold AND jitter exceeds the mobile threshold — this is a wireless/mobile path.
             {
-                return NetworkClass.MobileUnstable;
+                return NetworkClass.MobileUnstable; // Classify as mobile/unstable — use extended high-gain cycles and fast recovery for non-congestion radio loss.
             }
 
             // Rule 3: Lossy Long-Fat
             // High RTT (e.g. &gt;200ms satellite) combined with steady loss
             // &gt;1%.  The loss is typically from physical-layer noise on
             // long-haul links, not congestion.
-            if (avgRttMs > UcpConstants.NETWORK_CLASSIFIER_LONG_FAT_RTT_MS && avgLoss > 0.01d)
+            if (avgRttMs > UcpConstants.NETWORK_CLASSIFIER_LONG_FAT_RTT_MS && avgLoss > 0.01d) // RTT exceeds the long-fat threshold AND loss is above 1% — this is a satellite/long-haul path.
             {
-                return NetworkClass.LossyLongFat;
+                return NetworkClass.LossyLongFat; // Classify as lossy long-fat — use RTT-trend-based gain decisions and higher inflight guardrails.
             }
 
             // Rule 4: Congested Bottleneck
@@ -2395,9 +2426,9 @@ namespace Ucp
             // together suggest a bottleneck queue is building.
             // Note: comparing _classifierWindows[0].AvgRttMicros against
             // the overall avgRtt checks for a rising RTT trend.
-            if (minThroughput < 0.7d && avgRttMs > _classifierWindows[0].AvgRttMicros / UcpConstants.MICROS_PER_MILLI * 1.1d)
+            if (minThroughput < 0.7d && avgRttMs > _classifierWindows[0].AvgRttMicros / UcpConstants.MICROS_PER_MILLI * 1.1d) // Throughput is below 70% of BtlBw AND the latest window's RTT exceeds 110% of the average (RTT is rising).
             {
-                return NetworkClass.CongestedBottleneck;
+                return NetworkClass.CongestedBottleneck; // Classify as congested bottleneck — use conservative pacing gains and tight CWND limits.
             }
 
             // Rule 5: Symmetric VPN
@@ -2405,15 +2436,15 @@ namespace Ucp
             // VPN tunnels add ~30-60ms of overhead; the path is symmetric
             // (both directions traverse the same tunnel).  CWND should be
             // capped conservatively to avoid tunnel buffer stuffing.
-            if (avgRttMs > 60d)
+            if (avgRttMs > 60d) // Average RTT exceeds 60ms — this is likely a VPN tunnel or long-distance routed path.
             {
-                return NetworkClass.SymmetricVPN;
+                return NetworkClass.SymmetricVPN; // Classify as symmetric VPN — cap CWND conservatively to avoid tunnel bufferbloat.
             }
 
             // Rule 6: Default
             // None of the above patterns matched.  Use generic pacing and
             // CWND policies — conservative but not overly so.
-            return NetworkClass.Default;
+            return NetworkClass.Default; // No specific pattern matched — return the generic default classification.
         }
     }
 }

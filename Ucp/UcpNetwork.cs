@@ -1,9 +1,9 @@
-using System;
-using System.Collections.Generic;
-using System.Net;
-using System.Threading;
-using Ucp.Internal;
-using Ucp.Transport;
+using System;                       // Brings in core types (Exception, IDisposable, etc.)
+using System.Collections.Generic;    // Brings in Dictionary, List, SortedDictionary
+using System.Net;                    // Brings in IPEndPoint, EndPoint
+using System.Threading;              // Brings in Interlocked, Volatile, Thread
+using Ucp.Internal;                  // Internal protocol types: UcpPcb, UcpTime, UcpConstants, etc.
+using Ucp.Transport;                 // Transport abstractions: IBindableTransport, IUcpObject
 
 namespace Ucp
 {
@@ -18,21 +18,21 @@ namespace Ucp
     ///
     /// The default UDP implementation is <see cref="UcpDatagramNetwork"/>.
     /// </summary>
-    public abstract class UcpNetwork : IDisposable
+    public abstract class UcpNetwork : IDisposable // Abstract so derived classes provide socket I/O; IDisposable for deterministic cleanup
     {
         /// <summary>
         /// Represents a single timer registration with a callback and expiration time.
         /// </summary>
-        private sealed class TimerRegistration
+        private sealed class TimerRegistration // sealed — no subclasses needed; stored in dictionaries
         {
             /// <summary>Unique timer identifier.</summary>
-            public uint Id;
+            public uint Id; // Monotonically-increasing ID assigned from _nextTimerId
 
             /// <summary>Absolute expiration time in microseconds.</summary>
-            public long ExpireMicros;
+            public long ExpireMicros; // Compared against CurrentTimeUs in DoEvents to decide firing
 
             /// <summary>Wrapped callback that handles cancellation checks.</summary>
-            public Action Callback;
+            public Action Callback; // Wraps the user callback with a cancellation guard (see AddTimer)
         }
 
         /// <summary>
@@ -40,60 +40,61 @@ namespace Ucp
         /// the transport interface. Implements IBindableTransport and IUcpObject
         /// so the protocol stack can be used transparently.
         /// </summary>
-        private sealed class NetworkTransportAdapter : IBindableTransport, IUcpObject
+        private sealed class NetworkTransportAdapter : IBindableTransport, IUcpObject // Adapter pattern: wraps UcpNetwork as a transport for the protocol stack
         {
             /// <summary>Reference to the owning UcpNetwork.</summary>
-            private readonly UcpNetwork network;
+            private readonly UcpNetwork network; // Back-reference so Start/Stop/Send delegate to the owning network
 
             /// <summary>
             /// Creates a transport adapter linked to the given network.
             /// </summary>
             public NetworkTransportAdapter(UcpNetwork network)
             {
-                this.network = network;
+                this.network = network; // Store the owning network for delegation throughout adapter lifetime
             }
 
-            public event Action<byte[], IPEndPoint> OnDatagram;
+            public event Action<byte[], IPEndPoint> OnDatagram; // Raised when Input's fallback path receives a datagram for server/connection accept
 
             /// <summary>Gets the network's local endpoint.</summary>
             public EndPoint LocalEndPoint
             {
-                get { return network.LocalEndPoint; }
+                get { return network.LocalEndPoint; } // Delegate to the owning network (derived class provides real endpoint)
             }
 
             /// <summary>Connection ID is always 0 for the network-level transport.</summary>
             public uint ConnectionId
             {
-                get { return 0; }
+                get { return 0; } // Network-level adapter is not a connection; always returns 0
             }
 
             /// <summary>Returns the owning UcpNetwork.</summary>
             public UcpNetwork Network
             {
-                get { return network; }
+                get { return network; } // Expose back-reference so UcpServer/UcpConnection can access network-wide state
             }
 
             /// <summary>Delegates start to the network.</summary>
             public void Start(int port)
             {
-                network.Start(port);
+                network.Start(port); // Forward to the owning network's socket-bind logic
             }
 
             /// <summary>Delegates stop to the network.</summary>
             public void Stop()
             {
-                network.Stop();
+                network.Stop(); // Forward to the owning network's socket-close logic
             }
 
             /// <summary>Delegates send to the network's Output method.</summary>
             public void Send(byte[] data, IPEndPoint remote)
             {
-                network.Output(data, remote, this);
+                network.Output(data, remote, this); // Pass 'this' as sender so derived Output can trace the source
             }
 
             /// <summary>No-op dispose for the adapter.</summary>
             public void Dispose()
             {
+                // Adapter owns no unmanaged resources; nothing to release
             }
 
             /// <summary>
@@ -103,52 +104,52 @@ namespace Ucp
             /// <param name="remote">The source endpoint.</param>
             public void Raise(byte[] datagram, IPEndPoint remote)
             {
-                Action<byte[], IPEndPoint> handler = OnDatagram;
-                if (handler != null)
+                Action<byte[], IPEndPoint> handler = OnDatagram; // Snapshot delegate to avoid NullReferenceException if unsubscribed between check and invoke
+                if (handler != null) // Only invoke if there are subscribers (e.g. server/connection accept handlers)
                 {
-                    handler(datagram, remote);
+                    handler(datagram, remote); // Deliver the datagram into the protocol stack for processing
                 }
             }
         }
 
         /// <summary>Synchronization lock for the timer heap.</summary>
-        private readonly object _timerSync = new object();
+        private readonly object _timerSync = new object(); // Dedicated lock object for _timerHeap and _activeTimers (never lock(this))
 
         /// <summary>Synchronization lock for the PCB registry.</summary>
-        private readonly object _pcbSync = new object();
+        private readonly object _pcbSync = new object(); // Dedicated lock object for _activePcbs and _pcbsByConnectionId
 
         /// <summary>Timer heap sorted by expiration time, mapping to callback lists.</summary>
-        private readonly SortedDictionary<long, List<Action>> _timerHeap = new SortedDictionary<long, List<Action>>();
+        private readonly SortedDictionary<long, List<Action>> _timerHeap = new SortedDictionary<long, List<Action>>(); // Min-heap: earliest-expiring timers at lowest key; multiple callbacks per key
 
         /// <summary>Active timer registrations keyed by timer ID for cancellation.</summary>
-        private readonly Dictionary<uint, TimerRegistration> _activeTimers = new Dictionary<uint, TimerRegistration>();
+        private readonly Dictionary<uint, TimerRegistration> _activeTimers = new Dictionary<uint, TimerRegistration>(); // Fast O(1) lookup by timer ID for CancelTimer
 
         /// <summary>PCB lookup by connection ID for fast packet routing.</summary>
-        private readonly Dictionary<uint, UcpPcb> _pcbsByConnectionId = new Dictionary<uint, UcpPcb>();
+        private readonly Dictionary<uint, UcpPcb> _pcbsByConnectionId = new Dictionary<uint, UcpPcb>(); // O(1) routing of incoming packets to the owning PCB
 
         /// <summary>List of all active PCBs for DoEvents tick processing.</summary>
-        private readonly List<UcpPcb> _activePcbs = new List<UcpPcb>();
+        private readonly List<UcpPcb> _activePcbs = new List<UcpPcb>(); // Iterated each DoEvents to call OnTick on every PCB
 
         /// <summary>Internal transport adapter used by connections created via this network.</summary>
-        private readonly NetworkTransportAdapter _transportAdapter;
+        private readonly NetworkTransportAdapter _transportAdapter; // Single shared adapter; created in constructor, used by connection/server factories
 
         /// <summary>Auto-incrementing counter for unique timer IDs.</summary>
-        private int _nextTimerId;
+        private int _nextTimerId; // Incremented atomically via Interlocked.Increment; starts at 0
 
         /// <summary>Cached current time in microseconds for protocol use.</summary>
-        private long _currentTimeUs;
+        private long _currentTimeUs; // Updated at most once per millisecond by UpdateCachedClock; read via Volatile
 
         /// <summary>Cached current time in milliseconds for throttling updates.</summary>
-        private long _currentTimeMs;
+        private long _currentTimeMs; // Used by UpdateCachedClock to decide whether a full clock refresh is needed
 
         /// <summary>Whether this network has been disposed.</summary>
-        private bool _disposed;
+        private bool _disposed; // Set to true in Dispose; checked in Input and DoEvents to prevent use-after-free
 
         /// <summary>
         /// Creates a network with default configuration.
         /// </summary>
         protected UcpNetwork()
-            : this(new UcpConfiguration())
+            : this(new UcpConfiguration()) // Chain to the parameterized constructor with a fresh default configuration
         {
         }
 
@@ -158,25 +159,25 @@ namespace Ucp
         /// <param name="configuration">Protocol configuration (cloned internally).</param>
         protected UcpNetwork(UcpConfiguration configuration)
         {
-            Configuration = configuration == null ? new UcpConfiguration() : configuration.Clone();
-            _transportAdapter = new NetworkTransportAdapter(this);
-            _currentTimeUs = UcpTime.ReadStopwatchMicroseconds();
-            _currentTimeMs = _currentTimeUs / UcpConstants.MICROS_PER_MILLI;
+            Configuration = configuration == null ? new UcpConfiguration() : configuration.Clone(); // Clone to prevent external mutation; default to new if null passed
+            _transportAdapter = new NetworkTransportAdapter(this); // Create the adapter that bridges this network instance to the transport layer
+            _currentTimeUs = UcpTime.ReadStopwatchMicroseconds(); // Seed the cached clock with the current high-resolution monotonic time
+            _currentTimeMs = _currentTimeUs / UcpConstants.MICROS_PER_MILLI; // Derive the millisecond value from the microsecond reading
         }
 
         /// <summary>Protocol configuration (read-only after construction).</summary>
-        public UcpConfiguration Configuration { get; private set; }
+        public UcpConfiguration Configuration { get; private set; } // Exposed so connections/servers can read tuning parameters
 
         /// <summary>Internal transport adapter exposed for connection/server creation.</summary>
         internal IBindableTransport TransportAdapter
         {
-            get { return _transportAdapter; }
+            get { return _transportAdapter; } // Internal visibility: only the UCP library assembly uses this for factory methods
         }
 
         /// <summary>Returns the raw stopwatch-based microsecond time (not the cached clock).</summary>
         public long NowMicroseconds
         {
-            get { return Volatile.Read(ref _currentTimeUs); }
+            get { return Volatile.Read(ref _currentTimeUs); } // Volatile read avoids a full fence; value may be stale up to ~1ms
         }
 
         /// <summary>
@@ -186,13 +187,13 @@ namespace Ucp
         /// </summary>
         public long CurrentTimeUs
         {
-            get { return Volatile.Read(ref _currentTimeUs); }
+            get { return Volatile.Read(ref _currentTimeUs); } // Same backing field as NowMicroseconds; protocol reads this for consistent time within a tick
         }
 
         /// <summary>Local endpoint of the network (override in derived classes).</summary>
         public virtual EndPoint LocalEndPoint
         {
-            get { return null; }
+            get { return null; } // Base returns null; derived classes (e.g. UdpNetwork) override with the bound socket's local endpoint
         }
 
         /// <summary>
@@ -203,9 +204,9 @@ namespace Ucp
         /// <returns>A started UcpServer.</returns>
         public UcpServer CreateServer(int port)
         {
-            UcpServer server = new UcpServer(_transportAdapter, false, Configuration.Clone(), this);
-            server.Start(port);
-            return server;
+            UcpServer server = new UcpServer(_transportAdapter, false, Configuration.Clone(), this); // 'false' = not client-owned; clone config to isolate mutations
+            server.Start(port); // Bind to the given port and start the accept loop
+            return server; // Return the now-running server to the caller for further use
         }
 
         /// <summary>
@@ -214,7 +215,7 @@ namespace Ucp
         /// </summary>
         public UcpConnection CreateConnection()
         {
-            return CreateConnection(Configuration);
+            return CreateConnection(Configuration); // Delegate to the parameterized overload with the network's stored configuration
         }
 
         /// <summary>
@@ -224,18 +225,20 @@ namespace Ucp
         /// <param name="configuration">Protocol configuration (cloned internally).</param>
         public UcpConnection CreateConnection(UcpConfiguration configuration)
         {
-            UcpConfiguration config = configuration == null ? Configuration.Clone() : configuration.Clone();
-            return new UcpConnection(_transportAdapter, false, config, this);
+            UcpConfiguration config = configuration == null ? Configuration.Clone() : configuration.Clone(); // Fall back to network config if null; always clone for isolation
+            return new UcpConnection(_transportAdapter, false, config, this); // 'false' = client-mode connection (not server-owned)
         }
 
         /// <summary>Starts the network (override in derived classes for socket binding).</summary>
         public virtual void Start(int port)
         {
+            // Base implementation is a no-op; derived classes bind a socket and begin receiving here
         }
 
         /// <summary>Stops the network (override in derived classes for socket cleanup).</summary>
         public virtual void Stop()
         {
+            // Base implementation is a no-op; derived classes close their socket here
         }
 
         /// <summary>
@@ -247,50 +250,50 @@ namespace Ucp
         /// <param name="remote">The source endpoint.</param>
         public void Input(byte[] datagram, IPEndPoint remote)
         {
-            if (_disposed)
+            if (_disposed) // Guard: reject all input after disposal to prevent accessing cleared data structures
             {
-                throw new ObjectDisposedException(GetType().Name);
+                throw new ObjectDisposedException(GetType().Name); // Fail loudly; caller should not be feeding a disposed network
             }
 
-            if (datagram == null)
+            if (datagram == null) // Validate the datagram argument
             {
-                throw new ArgumentNullException(nameof(datagram));
+                throw new ArgumentNullException(nameof(datagram)); // Fail fast rather than producing confusing NullReferenceException later
             }
 
-            if (remote == null)
+            if (remote == null) // Validate the remote endpoint argument
             {
-                throw new ArgumentNullException(nameof(remote));
+                throw new ArgumentNullException(nameof(remote)); // Fail fast; routing requires a valid remote address
             }
 
-            if (datagram.Length < UcpConstants.CommonHeaderSize)
+            if (datagram.Length < UcpConstants.CommonHeaderSize) // Reject packets that cannot contain a valid UCP header
             {
-                return; // Too short to be a valid UCP packet.
+                return; // Too short to be a valid UCP packet. // Drop silently: attacker probing or truncated packet
             }
 
-            UcpPacket packet;
-            if (UcpPacketCodec.TryDecode(datagram, 0, datagram.Length, out packet))
+            UcpPacket packet; // Declare here so it is in scope for both the TryDecode block and the fallback path
+            if (UcpPacketCodec.TryDecode(datagram, 0, datagram.Length, out packet)) // Attempt to decode the binary datagram into a structured packet object
             {
-                UcpPcb pcb;
-                lock (_pcbSync)
+                UcpPcb pcb; // Will hold the matching PCB if the connection ID is registered
+                lock (_pcbSync) // Acquire PCB lock to safely read from the shared _pcbsByConnectionId dictionary
                 {
-                    _pcbsByConnectionId.TryGetValue(packet.Header.ConnectionId, out pcb);
+                    _pcbsByConnectionId.TryGetValue(packet.Header.ConnectionId, out pcb); // O(1) lookup by connection ID; pcb is null for unknown connections
                 }
 
-                if (pcb != null)
+                if (pcb != null) // Found a known PCB — this is an established connection
                 {
                     // Directly dispatch to the known PCB for efficiency.
-                    pcb.DispatchFromNetwork(packet, remote);
-                    return;
+                    pcb.DispatchFromNetwork(packet, remote); // Fast path: deliver the decoded packet straight to the owning PCB
+                    return; // Packet handled; no need to fall through to the adapter
                 }
 
-                if (packet.Header.Type != UcpPacketType.Syn)
+                if (packet.Header.Type != UcpPacketType.Syn) // Packet is from an unknown connection AND is not a connection request
                 {
-                    return; // Unknown connection and not a SYN; drop silently.
+                    return; // Unknown connection and not a SYN; drop silently. // Non-SYN from unknown source is noise; drop to avoid wasting CPU
                 }
             }
 
             // Fallback: raise to transport adapter for server/connection creation.
-            _transportAdapter.Raise(datagram, remote);
+            _transportAdapter.Raise(datagram, remote); // Let the protocol stack process the raw datagram (SYN → new connection, or server accept)
         }
 
         /// <summary>
@@ -298,7 +301,7 @@ namespace Ucp
         /// </summary>
         public void Output(byte[] datagram, IPEndPoint remote)
         {
-            Output(datagram, remote, null);
+            Output(datagram, remote, null); // Delegate to the abstract Output with null sender (no traceable source)
         }
 
         /// <summary>
@@ -307,7 +310,7 @@ namespace Ucp
         /// <param name="datagram">The encoded packet bytes.</param>
         /// <param name="remote">The destination endpoint.</param>
         /// <param name="sender">The sending object (connection, server, or null).</param>
-        public abstract void Output(byte[] datagram, IPEndPoint remote, IUcpObject sender);
+        public abstract void Output(byte[] datagram, IPEndPoint remote, IUcpObject sender); // Abstract: derived class performs the actual socket send (UDP, etc.)
 
         /// <summary>
         /// Adds a one-shot timer that fires at the given absolute time in microseconds.
@@ -318,51 +321,51 @@ namespace Ucp
         /// <returns>A timer ID that can be used with CancelTimer.</returns>
         public uint AddTimer(long expireUs, Action callback)
         {
-            if (callback == null)
+            if (callback == null) // Validate: callback must be non-null
             {
-                throw new ArgumentNullException(nameof(callback));
+                throw new ArgumentNullException(nameof(callback)); // Fail fast — a null callback would cause a NullReferenceException at fire time
             }
 
-            uint timerId = unchecked((uint)Interlocked.Increment(ref _nextTimerId));
-            TimerRegistration registration = new TimerRegistration();
-            registration.Id = timerId;
-            registration.ExpireMicros = expireUs;
+            uint timerId = unchecked((uint)Interlocked.Increment(ref _nextTimerId)); // Atomically allocate a unique timer ID; wrapping overflow is harmless
+            TimerRegistration registration = new TimerRegistration(); // Create the metadata container for this timer
+            registration.Id = timerId; // Store the ID so the wrapped callback can match against the active-timers dictionary
+            registration.ExpireMicros = expireUs; // Store the absolute expiration time so DoEvents can decide when to fire
 
             // Wrap the callback to check for cancellation before executing.
-            Action wrappedCallback = delegate
+            Action wrappedCallback = delegate // Closure: validates the timer registration is still active before invoking the real callback
             {
-                bool shouldRun = false;
-                lock (_timerSync)
+                bool shouldRun = false; // Guard flag: true if the timer was NOT cancelled between AddTimer and now
+                lock (_timerSync) // Synchronize with CancelTimer to ensure atomic check-and-remove
                 {
-                    TimerRegistration active;
-                    if (_activeTimers.TryGetValue(timerId, out active) && object.ReferenceEquals(active, registration))
+                    TimerRegistration active; // Holds the registration currently stored under this ID
+                    if (_activeTimers.TryGetValue(timerId, out active) && object.ReferenceEquals(active, registration)) // This exact registration is still the active one (not cancelled, not replaced)
                     {
-                        _activeTimers.Remove(timerId);
-                        shouldRun = true;
+                        _activeTimers.Remove(timerId); // Consume the timer: remove from active set so it cannot fire again
+                        shouldRun = true; // Mark as safe to invoke the user callback
                     }
                 }
 
-                if (shouldRun)
+                if (shouldRun) // Timer was not cancelled — safe to execute
                 {
-                    callback();
+                    callback(); // Invoke the user's callback now that cancellation has been ruled out
                 }
             };
 
-            registration.Callback = wrappedCallback;
-            lock (_timerSync)
+            registration.Callback = wrappedCallback; // Store the wrapped callback so the reference-equality check above works
+            lock (_timerSync) // Acquire lock to atomically insert into both timer data structures
             {
-                _activeTimers[timerId] = registration;
-                List<Action> callbacks;
-                if (!_timerHeap.TryGetValue(expireUs, out callbacks))
+                _activeTimers[timerId] = registration; // Insert into the ID-indexed dictionary for fast cancellation
+                List<Action> callbacks; // The bucket of callbacks at this expiration time (may already exist)
+                if (!_timerHeap.TryGetValue(expireUs, out callbacks)) // Check if a bucket for this expiration time already exists
                 {
-                    callbacks = new List<Action>();
-                    _timerHeap[expireUs] = callbacks;
+                    callbacks = new List<Action>(); // Create a new bucket for this microsecond
+                    _timerHeap[expireUs] = callbacks; // Insert into the sorted heap; SortedDictionary orders by key
                 }
 
-                callbacks.Add(wrappedCallback);
+                callbacks.Add(wrappedCallback); // Append this timer's callback to the bucket (multiple timers can share the same expiration)
             }
 
-            return timerId;
+            return timerId; // Return the ID so the caller can cancel before it fires if needed
         }
 
         /// <summary>
@@ -371,9 +374,9 @@ namespace Ucp
         /// <param name="timerId">The timer ID returned by AddTimer.</param>
         public bool CancelTimer(uint timerId)
         {
-            lock (_timerSync)
+            lock (_timerSync) // Synchronize with AddTimer and timer execution to prevent racing with the wrapped callback
             {
-                return _activeTimers.Remove(timerId);
+                return _activeTimers.Remove(timerId); // Remove returns true if the timer existed (was successfully cancelled)
             }
         }
 
@@ -384,57 +387,57 @@ namespace Ucp
         /// <returns>Number of work items processed in this iteration.</returns>
         public virtual int DoEvents()
         {
-            if (_disposed)
+            if (_disposed) // Guard: refuse to process events after disposal
             {
-                return 0;
+                return 0; // Report zero work — nothing was or should be done on a disposed network
             }
 
-            UpdateCachedClock();
+            UpdateCachedClock(); // Refresh the cached time so all operations in this tick share a consistent logical clock
 
             // Collect all due callbacks from the timer heap.
-            List<Action> dueCallbacks = new List<Action>();
-            long nowMicros = CurrentTimeUs;
-            lock (_timerSync)
+            List<Action> dueCallbacks = new List<Action>(); // Accumulator for all callbacks that have expired this tick
+            long nowMicros = CurrentTimeUs; // Snapshot the logical "now" so the while-loop condition is stable across iterations
+            lock (_timerSync) // Synchronize timer-heap access with concurrent AddTimer calls
             {
-                while (_timerHeap.Count > 0)
+                while (_timerHeap.Count > 0) // Loop while there are timers that could potentially be expired
                 {
-                    long firstKey;
-                    List<Action> firstCallbacks;
-                    GetFirstTimerUnsafe(out firstKey, out firstCallbacks);
-                    if (firstKey > nowMicros)
+                    long firstKey; // The expiration time of the earliest timer in the heap
+                    List<Action> firstCallbacks; // The callback bucket at that expiration time
+                    GetFirstTimerUnsafe(out firstKey, out firstCallbacks); // Peek at the earliest entry without removing
+                    if (firstKey > nowMicros) // Earliest timer has NOT yet expired — stop draining
                     {
-                        break; // No more expired timers.
+                        break; // No more expired timers. // All remaining timers are in the future; exit the drain loop
                     }
 
-                    _timerHeap.Remove(firstKey);
-                    for (int i = 0; i < firstCallbacks.Count; i++)
+                    _timerHeap.Remove(firstKey); // Remove the expired bucket from the sorted dictionary
+                    for (int i = 0; i < firstCallbacks.Count; i++) // Iterate all callbacks that expired at this microsecond
                     {
-                        dueCallbacks.Add(firstCallbacks[i]);
+                        dueCallbacks.Add(firstCallbacks[i]); // Move each callback to the execution list (outside the lock)
                     }
                 }
             }
 
             // Execute all due callbacks.
-            for (int i = 0; i < dueCallbacks.Count; i++)
+            for (int i = 0; i < dueCallbacks.Count; i++) // Iterate all collected expired callbacks
             {
-                dueCallbacks[i]();
+                dueCallbacks[i](); // Invoke each wrapped callback; the wrapper internally handles cancellation checks
             }
 
             // Tick all active PCBs.
-            List<UcpPcb> snapshot = SnapshotPcbs();
-            int pcbWork = 0;
-            for (int i = 0; i < snapshot.Count; i++)
+            List<UcpPcb> snapshot = SnapshotPcbs(); // Take a snapshot under lock so we can iterate PCBs safely without holding the lock
+            int pcbWork = 0; // Accumulator for work items processed by PCB ticks (used for return value and idle detection)
+            for (int i = 0; i < snapshot.Count; i++) // Iterate the snapshot (safe — no lock held during OnTick)
             {
-                pcbWork += snapshot[i].OnTick(CurrentTimeUs);
+                pcbWork += snapshot[i].OnTick(CurrentTimeUs); // Tick each PCB; each returns how many work items it processed (retransmits, flushes, etc.)
             }
 
             // If no work was done, yield to avoid busy-waiting.
-            if (dueCallbacks.Count == 0 && pcbWork == 0)
+            if (dueCallbacks.Count == 0 && pcbWork == 0) // Neither timers nor PCBs produced any work this tick
             {
-                YieldWhenIdle();
+                YieldWhenIdle(); // Yield CPU time to avoid a hot spin-loop when nothing is pending
             }
 
-            return dueCallbacks.Count + pcbWork;
+            return dueCallbacks.Count + pcbWork; // Report total work items so the event-loop driver can track activity
         }
 
         /// <summary>
@@ -442,21 +445,21 @@ namespace Ucp
         /// </summary>
         internal void RegisterPcb(UcpPcb pcb)
         {
-            if (pcb == null)
+            if (pcb == null) // Defensive: guard against null argument
             {
-                return;
+                return; // Silently ignore; caller should not pass null but we don't want to crash in release
             }
 
-            lock (_pcbSync)
+            lock (_pcbSync) // Synchronize with Input, DoEvents, and other PCB mutations
             {
-                if (!_activePcbs.Contains(pcb))
+                if (!_activePcbs.Contains(pcb)) // Avoid adding the same PCB twice (idempotent registration)
                 {
-                    _activePcbs.Add(pcb);
+                    _activePcbs.Add(pcb); // Add to the tick list; OnTick will now be called for this PCB each DoEvents
                 }
 
-                if (pcb.ConnectionId != 0)
+                if (pcb.ConnectionId != 0) // Connection ID 0 means the handshake hasn't assigned a real ID yet
                 {
-                    _pcbsByConnectionId[pcb.ConnectionId] = pcb;
+                    _pcbsByConnectionId[pcb.ConnectionId] = pcb; // Index by connection ID for O(1) routing in Input
                 }
             }
         }
@@ -467,26 +470,26 @@ namespace Ucp
         /// </summary>
         internal void UpdatePcbConnectionId(UcpPcb pcb, uint oldConnectionId, uint newConnectionId)
         {
-            if (pcb == null || newConnectionId == 0)
+            if (pcb == null || newConnectionId == 0) // Guard: need a valid PCB and a non-zero new ID to proceed
             {
-                return;
+                return; // Nothing meaningful to do with null PCB or zero ID
             }
 
-            lock (_pcbSync)
+            lock (_pcbSync) // Synchronize with Input and other PCB lookups
             {
-                if (oldConnectionId != 0)
+                if (oldConnectionId != 0) // If there was a previous non-zero ID, clean up the stale mapping
                 {
-                    UcpPcb existing;
-                    if (_pcbsByConnectionId.TryGetValue(oldConnectionId, out existing) && object.ReferenceEquals(existing, pcb))
+                    UcpPcb existing; // Holds the PCB currently mapped to the old ID
+                    if (_pcbsByConnectionId.TryGetValue(oldConnectionId, out existing) && object.ReferenceEquals(existing, pcb)) // Verify the old mapping still points to THIS PCB (defensive)
                     {
-                        _pcbsByConnectionId.Remove(oldConnectionId);
+                        _pcbsByConnectionId.Remove(oldConnectionId); // Remove the stale entry so future lookups for this old ID don't misroute
                     }
                 }
 
-                _pcbsByConnectionId[newConnectionId] = pcb;
-                if (!_activePcbs.Contains(pcb))
+                _pcbsByConnectionId[newConnectionId] = pcb; // Insert the new mapping so packets with the new connection ID route correctly
+                if (!_activePcbs.Contains(pcb)) // Ensure the PCB is in the tick list (belt-and-suspenders; should already be there)
                 {
-                    _activePcbs.Add(pcb);
+                    _activePcbs.Add(pcb); // Add to tick list if not already present (shouldn't happen in normal flow)
                 }
             }
         }
@@ -496,21 +499,21 @@ namespace Ucp
         /// </summary>
         internal void UnregisterPcb(UcpPcb pcb)
         {
-            if (pcb == null)
+            if (pcb == null) // Defensive: guard against null argument
             {
-                return;
+                return; // Silently ignore
             }
 
-            lock (_pcbSync)
+            lock (_pcbSync) // Synchronize with Input and other PCB mutations
             {
-                _activePcbs.Remove(pcb);
-                uint connectionId = pcb.ConnectionId;
-                if (connectionId != 0)
+                _activePcbs.Remove(pcb); // Remove from tick list; OnTick will no longer be called for this PCB
+                uint connectionId = pcb.ConnectionId; // Snapshot the connection ID so we can clean up the routing entry
+                if (connectionId != 0) // Only clean up the routing table if a non-zero ID was actually assigned
                 {
-                    UcpPcb existing;
-                    if (_pcbsByConnectionId.TryGetValue(connectionId, out existing) && object.ReferenceEquals(existing, pcb))
+                    UcpPcb existing; // Holds the PCB currently mapped to this connection ID
+                    if (_pcbsByConnectionId.TryGetValue(connectionId, out existing) && object.ReferenceEquals(existing, pcb)) // Verify the mapping still points to THIS PCB (not a replacement PCB reusing the same ID)
                     {
-                        _pcbsByConnectionId.Remove(connectionId);
+                        _pcbsByConnectionId.Remove(connectionId); // Remove the routing entry so stale packets don't get misrouted to a freed PCB
                     }
                 }
             }
@@ -521,17 +524,17 @@ namespace Ucp
         /// </summary>
         public virtual void Dispose()
         {
-            if (_disposed)
+            if (_disposed) // Idempotent guard: prevent double-disposal from causing errors
             {
-                return;
+                return; // Already disposed; nothing to do
             }
 
-            _disposed = true;
-            Stop();
-            lock (_timerSync)
+            _disposed = true; // Set flag immediately so concurrent Input/DoEvents calls fail early
+            Stop(); // Call derived-class stop to close the underlying socket
+            lock (_timerSync) // Synchronize with any in-flight AddTimer or timer execution
             {
-                _activeTimers.Clear();
-                _timerHeap.Clear();
+                _activeTimers.Clear(); // Clear all active registrations; wrapped callbacks will see they are no longer active and skip execution
+                _timerHeap.Clear(); // Clear the heap so DoEvents will find no timers to fire
             }
         }
 
@@ -541,15 +544,15 @@ namespace Ucp
         /// </summary>
         private void GetFirstTimerUnsafe(out long expireUs, out List<Action> callbacks)
         {
-            foreach (KeyValuePair<long, List<Action>> pair in _timerHeap)
+            foreach (KeyValuePair<long, List<Action>> pair in _timerHeap) // SortedDictionary enumerates in key order; first iteration yields the earliest timer
             {
-                expireUs = pair.Key;
-                callbacks = pair.Value;
-                return;
+                expireUs = pair.Key; // Output the expiration time of the earliest bucket
+                callbacks = pair.Value; // Output the callback list at that time
+                return; // Exit after the first entry — we only need the earliest
             }
 
-            expireUs = 0;
-            callbacks = null;
+            expireUs = 0; // Sentinel: no timers in the heap
+            callbacks = null; // Sentinel: no callbacks
         }
 
         /// <summary>
@@ -559,25 +562,25 @@ namespace Ucp
         /// </summary>
         private void YieldWhenIdle()
         {
-            long nextExpireUs = 0;
-            bool hasTimer = false;
-            lock (_timerSync)
+            long nextExpireUs = 0; // Will hold the expiration time of the soonest pending timer
+            bool hasTimer = false; // Will be true if at least one timer is registered
+            lock (_timerSync) // Synchronize with AddTimer so we see the latest timer state
             {
-                if (_timerHeap.Count > 0)
+                if (_timerHeap.Count > 0) // Check if any timers exist
                 {
-                    List<Action> ignored;
-                    GetFirstTimerUnsafe(out nextExpireUs, out ignored);
-                    hasTimer = true;
+                    List<Action> ignored; // We only need the key (expiration time), not the callback list
+                    GetFirstTimerUnsafe(out nextExpireUs, out ignored); // Peek at the earliest timer's expiration time
+                    hasTimer = true; // Mark that a timer exists so the conditional yield below triggers
                 }
             }
 
-            if (hasTimer && nextExpireUs - CurrentTimeUs <= UcpConstants.MICROS_PER_MILLI)
+            if (hasTimer && nextExpireUs - CurrentTimeUs <= UcpConstants.MICROS_PER_MILLI) // The next timer fires within 1ms — don't sleep, just yield
             {
-                Thread.Yield();
-                return;
+                Thread.Yield(); // Yield the current time slice; keeps latency low for imminent timers while still being cooperative
+                return; // Yield is sufficient; no need to sleep
             }
 
-            Thread.Sleep(1);
+            Thread.Sleep(1); // No imminent timer: sleep for 1ms to dramatically reduce CPU usage during idle periods
         }
 
         /// <summary>
@@ -587,13 +590,13 @@ namespace Ucp
         /// </summary>
         private void UpdateCachedClock()
         {
-            long stopwatchUs = UcpTime.ReadStopwatchMicroseconds();
-            long stopwatchMs = stopwatchUs / UcpConstants.MICROS_PER_MILLI;
-            long cachedMs = Volatile.Read(ref _currentTimeMs);
-            if (stopwatchMs != cachedMs)
+            long stopwatchUs = UcpTime.ReadStopwatchMicroseconds(); // Read the high-resolution monotonic stopwatch in microseconds
+            long stopwatchMs = stopwatchUs / UcpConstants.MICROS_PER_MILLI; // Convert to milliseconds for the granularity throttle check
+            long cachedMs = Volatile.Read(ref _currentTimeMs); // Read the last cached millisecond value without a full memory barrier
+            if (stopwatchMs != cachedMs) // Has at least 1 full millisecond elapsed since the last update?
             {
-                Volatile.Write(ref _currentTimeUs, stopwatchUs);
-                Volatile.Write(ref _currentTimeMs, stopwatchMs);
+                Volatile.Write(ref _currentTimeUs, stopwatchUs); // Update the microsecond cache so protocol code sees the freshest time
+                Volatile.Write(ref _currentTimeMs, stopwatchMs); // Update the millisecond cache so the next call can compare against the new value
             }
         }
 
@@ -602,9 +605,9 @@ namespace Ucp
         /// </summary>
         private List<UcpPcb> SnapshotPcbs()
         {
-            lock (_pcbSync)
+            lock (_pcbSync) // Acquire the PCB lock to get a consistent view of the active PCB list
             {
-                return new List<UcpPcb>(_activePcbs);
+                return new List<UcpPcb>(_activePcbs); // Shallow-copy the list; caller can iterate (and call OnTick) without holding the lock
             }
         }
     }

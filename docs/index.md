@@ -1,12 +1,12 @@
-# PPP PRIVATE NETWORK™ X - Universal Communication Protocol (UCP)
+# PPP PRIVATE NETWORK™ X — Universal Communication Protocol (UCP)
 
 [中文](index_CN.md)
 
-**Protocol designation: `ppp+ucp`** — A next-generation reliable transport protocol built for modern networks where random loss, jitter, and asymmetric routing are the norm, not the exception. UCP combines QUIC-inspired fast recovery, BBRv2 congestion control, Reed-Solomon FEC over GF(256), and IP-agnostic connection tracking to deliver predictable high-throughput performance over any UDP-capable network path.
+**Protocol designation: `ppp+ucp`** — UCP (Universal Communication Protocol) is an industrial-grade reliable transport protocol for next-generation heterogeneous networks. Operating directly atop UDP, it draws architectural inspiration from QUIC while making fundamentally different design choices in loss recovery, acknowledgment strategy, congestion control, and forward error correction. UCP re-examines every classical assumption about loss, congestion, and acknowledgment in transport layers, delivering predictable line-rate throughput across paths ranging from ideal data-center links (10 Gbps, <1ms RTT) to 300ms satellite hops with 10% random loss.
 
-UCP operates at the transport layer above UDP, providing ordered reliable byte-stream delivery while maintaining the deployment flexibility of datagram-based communication. Unlike TCP, which interprets every packet loss as a congestion signal, UCP classifies loss events into random and congestion categories before making rate-control decisions. This allows UCP to achieve high throughput on lossy paths (wireless, satellite, long-fat pipes) where TCP would unnecessarily collapse its congestion window.
+UCP's core tenet: **loss classification must precede rate control**. TCP treats all packet loss as a congestion signal—reasonable in the 1980s but catastrophic on modern wireless networks. UCP introduces a multi-signal classifier that distinguishes random loss (physical layer interference, Wi-Fi collisions) from congestion loss (bottleneck saturation, buffer bloat), applying rate reduction only after cross-validating multiple independent signals. This design enables UCP to maintain 85-95% link utilization on 5% random loss paths where TCP collapses to 30-50%.
 
-## Language Switch / 语言切换
+## Language Switch
 
 | English | 中文 |
 |---|---|
@@ -19,116 +19,353 @@ UCP operates at the transport layer above UDP, providing ordered reliable byte-s
 
 ---
 
-## Documentation Index
+## Documentation Map
 
-This is the global entry point for UCP documentation. English files are the default maintainer reference; each page links to its Chinese `_CN` counterpart for bilingual engineering teams. The documentation is organized into five vertical slices, each covering a distinct aspect of the protocol:
-
-- **Protocol**: Wire format, state machines, and algorithmic behavior.
-- **Architecture**: Internal runtime design, threading model, and component layering.
-- **API**: Public surface for application integration.
-- **Constants**: All tunable knobs and their default values.
-- **Performance**: Benchmark methodology, validation, and acceptance criteria.
-
-## Quick Links
-
-| Document | Purpose |
-|---|---|
-| [../README.md](../README.md) | Project overview, quick start, feature matrix, and configuration reference for first-time users. |
-| [../README_CN.md](../README_CN.md) | Chinese translation of project overview with bilingual switch support. |
-| [architecture.md](architecture.md) | Internal runtime layering from application API down to transport socket, Connection-ID-based session tracking, random ISN generation, SerialQueue per-connection strand-based execution, fair-queue server scheduling, pacing controller token bucket design, BBRv2 delivery-rate estimation internals, and deterministic network simulator architecture. Includes mermaid diagrams for the connection state machine, PCB component relationships, packet flow through the stack, BBR state machine, and threading model. |
-| [architecture_CN.md](architecture_CN.md) | Chinese translation of architecture deep dive with all mermaid diagrams. |
-| [protocol.md](protocol.md) | Authoritative wire format specification including common header, all packet types (SYN, SYNACK, ACK, NAK, DATA, FIN, RST, FecRepair), piggybacked cumulative ACK on all packet types via the HasAckNumber flag, QUIC-style SACK with per-block send limits, NAK tiered-confidence recovery (Low/Medium/High tiers), BBRv2 congestion control with adaptive pacing gain, FEC Reed-Solomon GF(256) with adaptive transmission, urgent retransmit mechanism, loss detection and recovery flow, and the complete connection state machine. |
-| [protocol_CN.md](protocol_CN.md) | Chinese translation of protocol specification with all mermaid diagrams. |
-| [api.md](api.md) | Complete public API surface documentation including `UcpConfiguration.GetOptimizedConfig()` factory method with all parameter defaults organized by category (protocol tuning, RTO/timers, pacing/BBRv2, bandwidth/loss control, FEC, connection/session), `UcpServer` lifecycle (Start/AcceptAsync/Stop) with sequence diagram, `UcpConnection` methods for connection management (ConnectAsync/Close/Dispose), sending (Send/SendAsync/Write/WriteAsync), receiving (Receive/ReceiveAsync/Read/ReadAsync), event model (OnData/OnConnected/OnDisconnected), diagnostics (GetReport/GetRttMicros/GetCwndBytes), `UcpNetwork.DoEvents()` driver loop, `ITransport` interface for custom transport integration, and a full end-to-end code example with error handling. |
-| [api_CN.md](api_CN.md) | Chinese translation of API reference with all mermaid diagrams. |
-| [performance.md](performance.md) | Benchmark methodology, 14+ scenario matrix organized by category (stable no-loss, random loss, long fat pipes, asymmetric routing, weak mobile, burst loss), report column semantics and validation rules, directional route modeling, end-to-end loss-recovery interaction flow diagram, BBRv2 throughput tuning strategies, MSS/send-buffer/CWND/FEC/pacing tuning guidelines, common performance pitfalls with symptoms and solutions, and acceptance criteria. |
-| [performance_CN.md](performance_CN.md) | Chinese translation of performance guide with all mermaid diagrams. |
-| [constants.md](constants.md) | Exhaustive catalog of every tunable and fixed constant in `UcpConstants`, organized by subsystem: packet encoding sizes, RTO and recovery timers, pacing and queuing parameters, SACK and NAK tiered-confidence thresholds, BBRv2 recovery constants, FEC group sizing and adaptive redundancy thresholds, benchmark payload selections with rationale, and acceptance criteria for performance validation. |
-| [constants_CN.md](constants_CN.md) | Chinese translation of constants reference with all mermaid diagrams. |
-
----
-
-## Protocol Feature Overview
-
-UCP (`ppp+ucp`) implements a comprehensive set of transport protocol primitives designed for loss-tolerant, high-throughput communication across diverse network environments:
+UCP documentation is organized across five core domains. Each domain covers a distinct dimension with cross-references but clear content boundaries:
 
 ```mermaid
 mindmap
-  root((ppp+ucp Protocol))
-    Reliability
-      Piggybacked cumulative ACK on all packets
-      QUIC-style SACK recovery with 2-send-per-block limit
-      NAK-based fast recovery with tiered confidence levels
-      Duplicate ACK fast retransmit
-      RTO/PTO last-resort guard with 1.2x backoff
-    Congestion Control
-      BBRv2 with adaptive pacing gain
-      Loss classification before rate reduction
-      Gentle congestion response 0.98x multiplier
-      Network path classifier with 200ms windows
-      ProbeBW cycling with 8-phase gain schedule
-    Forward Error Correction
-      Reed-Solomon GF(256) codec
-      Adaptive redundancy transmission
-      Multi-packet repair per group
-      Recovered DATA retains original sequence
-      Gaussian elimination decoder
-    Connection Management
-      Connection-ID-based session tracking (IP-agnostic)
-      Random ISN per connection (TCP-style)
-      Server dynamic IP binding
-      Fair-queue server scheduling
-      SerialQueue per-connection strand execution
+  root(("ppp+ucp Documentation"))
+    Architecture
+      Runtime Layer Design
+      Protocol Control Block PCB
+      SerialQueue Strand Execution
+      Fair-Queue Server Scheduling
+      BBRv2 Congestion Control Internals
+      FEC Codec Design
+      Deterministic Network Simulator
+      ConnectionID Session Tracking
+    Protocol
+      Wire Format Specification
+      Packet Types and Flags
+      Piggybacked Cumulative ACK
+      SACK Dual-Observation Threshold
+      NAK Three-Tier Confidence Recovery
+      Loss Detection and Recovery Flow
+      Connection State Machine
+      Sequence Number Arithmetic
+      FEC Reed-Solomon GF256
+      BBRv2 State Transitions
+      Reporting Semantics
+    API
+      UcpConfiguration Factory
+      Protocol Parameter Tuning
+      RTO and Timer Configuration
+      Pacing and BBRv2 Gains
+      Bandwidth and Loss Control
+      FEC Parameters
+      UcpServer Lifecycle
+      UcpConnection API
+      UcpNetwork Event Loop
+      ITransport Custom Transport
+    Performance
+      Benchmark Framework Architecture
+      14+ Scenario Coverage Matrix
+      Report Column Semantics
+      Loss% vs Retrans% Independence
+      Validation Rules and Acceptance Criteria
+      Directional Route Models
+      Throughput Tuning Strategies
+      MSS/FEC/Pacing Tuning Guide
+      Common Performance Pitfalls
+    Constants
+      Packet Encoding Sizes
+      RTO and Recovery Timers
+      Pacing and Queuing Parameters
+      SACK Fast Retransmit Thresholds
+      NAK Tiered-Confidence Constants
+      BBRv2 Recovery Parameters
+      FEC Group Size and Adaptive Redundancy
+      Benchmark Payload Selection
+      Acceptance Criteria Thresholds
+      Route and Weak-Network Constants
 ```
 
 ---
 
-## Reliability Architecture
+## Quick Links
 
-UCP's reliability stack operates on three independent recovery paths, each with a specific role in the overall repair strategy:
+| Document | Language | Summary |
+|---|---|---|
+| [../README.md](../README.md) | English | Project overview, design philosophy, key innovations, quick start, configuration reference, deployment scenarios, TCP/QUIC comparison |
+| [../README_CN.md](../README_CN.md) | 中文 | 项目总览、设计哲学、关键创新、快速开始、配置参考、部署场景、与TCP/QUIC对比 |
+| [architecture.md](architecture.md) | English | Runtime layering (app API→UDP Socket), UcpPcb state management, ConnId tracking, random ISN, SerialQueue execution, fair-queue scheduling, PacingController token bucket, BBRv2 delivery-rate estimation, deterministic simulator, FEC codec math, inbound/outbound packet flow, test architecture, validation flow |
+| [architecture_CN.md](architecture_CN.md) | 中文 | 运行时分层、UcpPcb状态、ConnId追踪、SerialQueue串行、公平队列、Pacing、BBRv2内核、FEC编解码、网络模拟器、包流、测试架构 |
+| [protocol.md](protocol.md) | English | Authoritative wire format: common header (12B), 8 packet types, Flags bit layout, HasAckNumber piggybacked ACK, DATA/ACK/NAK/FecRepair layouts, SACK 2-send limit, state machine transitions, sequence arithmetic, three-way handshake, complete loss recovery flow, SACK fast retransmit params, NAK three-tier guards, urgent retransmit, BBRv2 states/adaptive pacing, RS-GF(256) math, report metric definitions |
+| [protocol_CN.md](protocol_CN.md) | 中文 | 线格式、包类型、捎带ACK、SACK限制、NAK分级、握手、丢包恢复、BBRv2、FEC Reed-Solomon、报告口径 |
+| [api.md](api.md) | English | Complete public API: UcpConfiguration.GetOptimizedConfig() factory (6 parameter groups), UcpServer lifecycle, UcpConnection management/send/receive/events/diagnostics, UcpNetwork.DoEvents(), ITransport, full example, error handling |
+| [api_CN.md](api_CN.md) | 中文 | 公开API：UcpConfiguration、UcpServer、UcpConnection、UcpNetwork、ITransport、完整示例、错误处理 |
+| [performance.md](performance.md) | English | Benchmark framework overview, 14+ scenario matrix by category, results table, 16-column report semantics, Loss% vs Retrans% independence analysis, 11 validation rules, directional route modeling, end-to-end loss recovery flow diagram, BBRv2 recovery strategy params, tuning guide (MSS/FEC/common pitfalls), acceptance criteria |
+| [performance_CN.md](performance_CN.md) | 中文 | 性能基准、场景矩阵、报告字段、校验规则、路由模型、调优指南、验收标准 |
+| [constants.md](constants.md) | English | Exhaustive UcpConstants catalog: packet encoding (9), RTO/recovery timers (8), pacing/queuing (5), fast retransmit & NAK tiers (14), BBRv2 recovery (7), FEC (10), benchmark payloads (12 scenarios), acceptance criteria (5), route/weak-network (6), connection/session (4). 77+ total protocol constants |
+| [constants_CN.md](constants_CN.md) | 中文 | UcpConstants目录：包编码、RTO定时器、Pacing、SACK/NAK分级、BBRv2、FEC、基准Payload、验收标准、路由常量 |
 
-| Recovery Path | Trigger | Latency | Use Case |
-|---|---|---|---|
-| **SACK (Selective ACK)** | Receiver observes out-of-order arrival; sender receives SACK blocks | Sub-RTT (RTT/8 grace) | Primary fast recovery for random independent losses. Bounded by 2-send-per-block limit. |
-| **Duplicate ACK** | Same cumulative ACK received twice | Sub-RTT | Fast recovery when SACK blocks are suppressed or unavailable. |
-| **NAK (Negative ACK)** | Receiver accumulates gap observations; confidence tier escalates | RTT/4 to RTTx2 depending on tier | Conservative receiver-driven recovery for unambiguous loss. Tiered guards prevent false positives on jittery paths. |
-| **FEC (Forward Error Correction)** | Receiver has enough repair packets in the group | No additional RTT | Zero-latency recovery when parity information is available. Best for predictable loss patterns. |
-| **RTO (Retransmission Timeout)** | No ACK progress within RTO | RTO x backoff | Last-resort recovery when all proactive mechanisms fail. Suppressed during recent ACK progress. |
+---
+
+## Protocol Feature Panorama
+
+```mermaid
+mindmap
+  root(("ppp+ucp Protocol Panorama"))
+    ["Reliability Engine"]
+      ["Piggybacked ACK on ALL packet types"]
+      ["QUIC-style SACK dual-observation"]
+      ["NAK three-tier confidence recovery"]
+      ["Duplicate ACK fast retransmit"]
+      ["RTO last-resort with 1.2x backoff"]
+      ["FEC zero-latency recovery"]
+    ["Congestion Control"]
+      ["BBRv2 delivery-rate bandwidth estimation"]
+      ["Loss classification before rate reduction"]
+      ["Gentle congestion response 0.98x"]
+      ["CWND floor 0.95xBDP protection"]
+      ["Network path classifier 200ms windows"]
+      ["ProbeBW eight-phase gain cycle"]
+      ["ProbeRTT intelligent skip on lossy paths"]
+    ["Forward Error Correction"]
+      ["Reed-Solomon GF256 codec"]
+      ["Systematic code: DATA preserved as-is"]
+      ["Gaussian elimination decoder"]
+      ["Precomputed log/antilog O1 operations"]
+      ["Adaptive redundancy five tiers"]
+      ["Recovered DATA retains original sequence"]
+    ["Connection Management"]
+      ["ConnectionID 32-bit random identifier"]
+      ["IP-agnostic session tracking"]
+      ["NAT rebinding transparent recovery"]
+      ["WiFi-to-Cellular seamless migration"]
+      ["Random ISN per connection"]
+      ["Two-message handshake SYN-SYNACK"]
+    ["Server Scheduling"]
+      ["Credit-based round-robin fair-queuing"]
+      ["10ms rounds 2-round credit buffer"]
+      ["Single-connection anti-monopoly"]
+      ["Urgent retransmit bypass FQ gate"]
+      ["Per-RTT 16-packet urgent budget"]
+    ["Threading Model"]
+      ["SerialQueue strand lock-free"]
+      ["Per-Connection Strand isolation"]
+      ["PCB state single-threaded access"]
+      ["I/O offloaded outside strand"]
+      ["Deterministic event loop DoEvents"]
+      ["Virtual logical clock network simulator"]
+```
+
+---
+
+## Core Protocol Flows
+
+### End-to-End Connection Lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> Init["Init"]
+    Init --> HandshakeSynSent["HandshakeSynSent<br/>active SYN sent"]
+    Init --> HandshakeSynReceived["HandshakeSynReceived<br/>passive SYN received"]
+    
+    HandshakeSynSent --> Established["Established<br/>connection ready"]
+    HandshakeSynReceived --> Established
+    
+    Established --> ClosingFinSent["ClosingFinSent<br/>local close"]
+    Established --> ClosingFinReceived["ClosingFinReceived<br/>peer close"]
+    
+    ClosingFinSent --> Closed["Closed"]
+    ClosingFinReceived --> Closed
+    
+    Closed --> [*]
+    
+    HandshakeSynSent --> Closed
+    HandshakeSynReceived --> Closed
+    Established --> Closed
+    ClosingFinSent --> Closed
+    ClosingFinReceived --> Closed
+    
+    note right of HandshakeSynSent["Random ISN generated<br/>Random ConnId assigned<br/>connectTimer started"]
+    note left of HandshakeSynReceived["ConnId extracted<br/>UcpPcb allocated<br/>ISN validated<br/>SYNACK sent"]
+    note right of Established["Bidirectional data flow<br/>Piggybacked ACK active<br/>BBRv2 controls rate<br/>SACK/NAK/FEC protect"]
+```
+
+### Loss Detection and Multi-Path Recovery
+
+```mermaid
+flowchart TD
+    Drop["Network drops DATA"] --> Gap["Receiver detects gap"]
+    
+    Gap --> OutOfOrder["Out-of-order arrives above gap"]
+    OutOfOrder --> SackGen["Generate SACK block"]
+    SackGen --> SackLimit{"Block sent < 2x?"}
+    SackLimit -->|"Yes"| SackSend["Include in next ACK/piggyback"]
+    SackLimit -->|"No"| SackSuppress["Suppress — rely on NAK"]
+    
+    SackSend --> SackRecv["Sender receives SACK"]
+    SackRecv --> SackEval{"SACK obs >=2<br/>AND reorder grace elapsed?"}
+    SackEval -->|"Yes"| SackRepair["Mark urgent retransmit"]
+    SackEval -->|"No"| SackWait["Wait for more SACKs"]
+    
+    Gap --> ObsCount["Increment missing seq count"]
+    ObsCount --> NakTier{"Confidence tier?"}
+    NakTier -->|"Low: 1-2"| NakGuard1["Guard max(RTTx2, 60ms)"]
+    NakTier -->|"Med: 3-4"| NakGuard2["Guard max(RTT, 20ms)"]
+    NakTier -->|"High: 5+"| NakGuard3["Guard max(RTT/4, 5ms)"]
+    NakGuard1 --> NakEmit["Emit NAK"]
+    NakGuard2 --> NakEmit
+    NakGuard3 --> NakEmit
+    
+    NakEmit --> NakRecv["Sender receives NAK"]
+    NakRecv --> NakRepair["Mark urgent retransmit"]
+    
+    Gap --> FecCheck{"FEC group<br/>sufficient repairs?"}
+    FecCheck -->|"Yes"| FecRepair["GF256 Gaussian elimination"]
+    FecRepair --> FecInsert["Insert recovered DATA"]
+    FecCheck -->|"No"| WaitRetrans["Await retransmission"]
+    
+    SackRepair --> Repair["Execute retransmission"]
+    NakRepair --> Repair
+    
+    Repair --> UrgentBudget{"Urgent budget<br/>remaining?"}
+    UrgentBudget -->|"Yes"| ForceSend["ForceConsume bypass FQ"]
+    UrgentBudget -->|"No"| NormalSend["Normal pacing + FQ path"]
+    
+    ForceSend --> Deliver["Deliver to application"]
+    NormalSend --> Deliver
+    FecInsert --> Deliver
+```
+
+### BBRv2 Congestion Control State Machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> Startup["Startup"]
+    Startup --> Drain["Drain"]
+    Drain --> ProbeBW["ProbeBW"]
+    ProbeBW --> ProbeRTT["ProbeRTT"]
+    ProbeRTT --> ProbeBW
+    ProbeBW --> ProbeBW
+    
+    note right of Startup["pacing_gain: 2.5<br/>cwnd_gain: 2.0<br/>Exponential probing<br/>Exit: 3 rounds no growth"]
+    note right of Drain["pacing_gain: 0.75<br/>Drain Startup queue<br/>Exit: inflight below BDP"]
+    note right of ProbeBW["8-phase gain cycle<br/>[1.25, 0.85, 1.0*6]<br/>Lossy paths skip ProbeRTT"]
+    note right of ProbeRTT["cwnd reduced to 4 pkts<br/>100ms duration<br/>Every 30s"]
+```
+
+---
+
+## Reliability Architecture Comparison
+
+| Recovery Path | Trigger | Recovery Latency | Use Case | Key Constraints |
+|---|---|---|---|---|
+| **SACK** | Receiver sees out-of-order; sender gets 2 SACK blocks + reorder grace | Sub-RTT (max(3ms, RTT/8) grace) | Primary fast recovery for random independent losses. Most responsive path. | Per-block max 2 sends; parallel gaps >32 seq distance |
+| **DupACK** | Same cumulative ACK received twice | Sub-RTT | Backup fast recovery when SACK blocks unavailable | Requires 2 duplicate observations |
+| **NAK** | Receiver accumulates gap observations; three-tier confidence escalation | RTT/4 to RTTx2 depending on tier | Conservative receiver-driven recovery. Tiered guards prevent false positives on jittery paths. | 250ms repeat suppression per sequence; max 256 seqs per NAK |
+| **FEC** | Receiver has enough repair packets in group | Zero additional RTT | Zero-latency recovery when parity available. Best for predictable uniform random loss. | Group size 2-64; adaptive redundancy 0.5%-10% five tiers |
+| **RTO** | No ACK progress within RTO window | RTO x 1.2 backoff factor | Last-resort when all proactive mechanisms fail. Bulk scanning suppressed during ACK progress. | Max 4 packets per tick; 200ms→15s escalation |
+
+### Recovery Path Priority Decision
+
+```mermaid
+flowchart LR
+    LossEvent["Loss detected"] --> FEC{"FEC group<br/>repairable?"}
+    FEC -->|"Yes"| ZeroLatency["Zero-latency recovery<br/>no retransmit needed"]
+    FEC -->|"No"| SACK{"SACK block<br/>available?"}
+    SACK -->|"Yes"| SackPath["SACK path<br/>sub-RTT recovery"]
+    SACK -->|"No 2x limit"| NAK{"Receiver NAK<br/>ready?"}
+    NAK -->|"Yes"| NakPath["NAK path<br/>confidence-tier delay"]
+    NAK -->|"No"| DupACK{"Duplicate ACK<br/>triggered?"}
+    DupACK -->|"Yes"| DupAckPath["DupACK path<br/>sub-RTT recovery"]
+    DupACK -->|"No"| RTOPath["Await RTO<br/>last-resort"]
+```
 
 ---
 
 ## Congestion Control Philosophy
 
-UCP's BBRv2 implementation departs from TCP's loss-based congestion control in several fundamental ways:
+1. **Loss is not congestion by default.** UCP classifies each loss event before rate-control decisions. Isolated losses (≤2/short window) with stable RTT are treated as random—retransmit only, no rate reduction. Clustered losses (≥3) require corroborating RTT inflation (≥1.10×MinRtt) or delivery-rate degradation before being confirmed as congestion.
 
-1. **Loss is not congestion by default.** UCP classifies each loss event before making rate-control decisions. Isolated losses with no RTT inflation are treated as random and trigger only retransmission — no rate reduction.
+2. **Adaptive pacing gain.** BBRv2 adjusts pacing gain based on ongoing network assessment rather than TCP CUBIC's binary congested/non-congested response. Congestion evidence applies a gentle 0.98× reduction (only 2% per event), far milder than TCP's 50% window halving.
 
-2. **Adaptive pacing gain.** BBRv2 adjusts the pacing gain multiplier based on ongoing network assessment, rather than using fixed cycle gains. Congestion evidence applies a gentle 0.98x reduction.
+3. **CWND floor protection.** After congestion events, CWND is floored at 95% of BDP (`BBR_MIN_LOSS_CWND_GAIN = 0.95`). Recovery is incremental at 0.04 per ACK (`BBR_LOSS_CWND_RECOVERY_STEP`), rather than TCP's slow-start exponential recovery.
 
-3. **CWND floor protection.** After a congestion event, the CWND is floored at 95% of BDP, preventing the window from collapsing below the path's fundamental capacity. Recovery is incremental at 0.04 per ACK.
+4. **Network path classification.** A 200ms sliding-window classifier distinguishes five network types (LowLatencyLAN, MobileUnstable, LossyLongFat, CongestedBottleneck, SymmetricVPN), feeding differentiated behavior into the BBRv2 state machine.
 
-4. **Network path classification.** A sliding-window classifier distinguishes LAN, mobile/unstable, lossy long-fat, congested bottleneck, and VPN-like paths, feeding differentiated behavior into the BBRv2 state machine.
+```mermaid
+flowchart TD
+    LossSignal["Loss signal"] --> Classifier["Multi-signal classifier"]
+    
+    Classifier --> IsolatedCount{"Isolated losses<br/><=2 events?"}
+    IsolatedCount -->|"Yes"| RTTStable{"RTT stable<br/>< 1.10xMinRtt?"}
+    RTTStable -->|"Yes"| RandomLoss["Classify: Random Loss"]
+    RTTStable -->|"No"| CongestionLoss["Classify: Congestion Loss"]
+    
+    IsolatedCount -->|"No >=3"| ClusteredRTT{"RTT inflated<br/>>= 1.10xMinRtt?"}
+    ClusteredRTT -->|"Yes"| CongestionLoss
+    ClusteredRTT -->|"No"| DeliveryDrop{"Delivery rate dropping?"}
+    DeliveryDrop -->|"Yes"| CongestionLoss
+    DeliveryDrop -->|"No"| RandomLoss
+    
+    RandomLoss --> FastRecovery["Fast Recovery:<br/>1.25x pacing gain<br/>Preserve CWND<br/>Immediate retransmit"]
+    CongestionLoss --> GentleReduce["Gentle Reduction:<br/>0.98x pacing gain<br/>CWND floor 0.95xBDP<br/>Immediate retransmit"]
+```
 
 ---
 
 ## Forward Error Correction Design
 
-UCP's FEC subsystem uses Reed-Solomon coding over the GF(256) finite field, which supports recovery from up to R packet losses in a group of N data packets, where R is the number of repair packets transmitted alongside the data. Key design characteristics:
+UCP's FEC subsystem uses systematic Reed-Solomon coding over GF(256). Key design features:
 
-- **Galois Field GF(256)**: Operations use the irreducible polynomial `x^8 + x^4 + x^3 + x + 1` (0x11B). Precomputed logarithm/antilogarithm tables provide O(1) multiplication and division.
-- **Adaptive redundancy**: The effective redundancy ratio adjusts based on observed loss rate: minimum at <0.5% loss, 1.25x at 0.5-2%, 1.5x at 2-5%, 2.0x at 5-10%. Above 10% loss, retransmission becomes the primary recovery mechanism.
-- **Recovered packet integrity**: FEC-recovered DATA packets retain their original sequence numbers and fragment metadata, so cumulative ACK processing and in-order delivery remain correct.
+- **Galois Field GF(256)**: Operations use irreducible polynomial `x^8 + x^4 + x^3 + x + 1` (0x11B). Precomputed log/antilog tables provide O(1) multiplication and division.
+- **Systematic code**: Original DATA packets are sent as-is; repair packets are sent as independent FecRepair (type 0x08) packets. Receiver needs at least N independent entities (DATA + Repair) to decode.
+- **Adaptive redundancy five tiers**: Minimum at <0.5% loss, 1.25x at 0.5-2%, 1.5x at 2-5%, 2.0x at 5-10%. Above 10% loss, retransmission becomes primary.
+- **Recovered packet integrity**: FEC-recovered DATA packets retain original sequence numbers and fragment metadata.
+
+```mermaid
+sequenceDiagram
+    participant Encoder as "Sender FEC Encoder"
+    participant Net as "Network"
+    participant Decoder as "Receiver FEC Decoder"
+    
+    Encoder->>Encoder: "Group 8 DATA (Seq 100-107)"
+    Encoder->>Encoder: "RS-GF(256) encode: 2 repair pkts"
+    Note over Encoder: "repair[i][j] = SUM(data[k][j] * alpha^(i*k))"
+    
+    Encoder->>Net: "DATA Seq 100-107 (8 packets)"
+    Encoder->>Net: "FecRepair Group=100 Idx=0,1"
+    
+    Net--xNet: "DROP DATA Seq 102, 105"
+    
+    Decoder->>Decoder: "Received: 6 DATA + 2 Repair = 8 entities"
+    Decoder->>Decoder: "Detect missing Seq 102, 105"
+    Decoder->>Decoder: "Build GF256 linear system (8 equations)"
+    Decoder->>Decoder: "Gaussian elimination recovers Seq 102, 105"
+    Decoder->>Decoder: "Insert recovered with original SeqNums"
+```
 
 ---
 
 ## Connection Model
 
-UCP connections are identified by random 32-bit Connection IDs rather than by IP:port tuples. This design choice provides:
+UCP connections are identified by random 32-bit Connection IDs rather than IP:port tuples:
 
-- **NAT rebinding resilience**: If a client's NAT mapping changes mid-session, the server routes packets to the correct session using the Connection ID from the common header.
-- **IP mobility**: A client can migrate between network interfaces (Wi-Fi to cellular) while maintaining the same session state.
-- **Server-side scalability**: The server uses fair-queue scheduling with per-connection credit accounting (10ms rounds, 2-round credit buffer) to prevent any single connection from monopolizing egress bandwidth.
-- **Lock-free concurrency**: Each connection's protocol processing executes on a dedicated SerialQueue strand, eliminating lock contention while maintaining strict ordering guarantees.
+```mermaid
+sequenceDiagram
+    participant C as "Client (Wi-Fi→Cellular)"
+    participant N as "NAT Gateway"
+    participant S as "UcpServer"
+    
+    C->>N: "SYN ConnId=0xABCD1234 src=10.0.0.1:50000"
+    N->>S: "SYN ConnId=0xABCD1234 src=1.2.3.4:30000"
+    S->>S: "ConnId lookup: none → create PCB"
+    S->>N: "SYNACK ConnId=0xABCD1234"
+    N->>C: "SYNACK ConnId=0xABCD1234"
+    
+    Note over C,N: "Client switches to Cellular"
+    
+    C->>N: "DATA ConnId=0xABCD1234 src=10.0.1.1:60000"
+    N->>S: "DATA ConnId=0xABCD1234 src=1.2.3.4:40000 (new mapping)"
+    S->>S: "ConnId lookup: found PCB → accept new endpoint"
+    S->>N: "DATA ConnId=0xABCD1234"
+    N->>C: "DATA ConnId=0xABCD1234"
+    Note over C,S: "Session continues uninterrupted"
+```
 
 ---
 
@@ -136,32 +373,32 @@ UCP connections are identified by random 32-bit Connection IDs rather than by IP
 
 ```mermaid
 flowchart TD
-    App[Application Code] --> Server[UcpServer]
-    App --> Client[UcpConnection]
-    Server --> FQ[Fair-Queue Scheduler]
-    Server --> Bind[Dynamic IP Binding]
-    Server --> ConnIdSvr[ConnectionIdTracker]
-    Client --> ConnId[Connection ID Tracking]
-    Client --> SerialQ[SerialQueue Strand]
-    Client --> ISN[Random ISN Generator]
-    ConnId --> Net[UcpNetwork]
+    App["Application"] --> Server["UcpServer"]
+    App --> Client["UcpConnection"]
+    Server --> FQ["Fair-Queue Scheduler"]
+    Server --> Bind["Dynamic IP Binding"]
+    Server --> ConnIdSvr["ConnectionIdTracker"]
+    Client --> ConnId["Connection ID Tracking"]
+    Client --> SerialQ["SerialQueue Strand"]
+    Client --> ISN["Random ISN Generator"]
+    ConnId --> Net["UcpNetwork"]
     ConnIdSvr --> Net
     SerialQ --> Net
     ISN --> Net
-    Net --> BBRv2[BBRv2 Congestion Control]
-    Net --> FEC[RS-GF256 FEC Codec]
-    Net --> SACKNAK[SACK/NAK Recovery]
-    Net --> Pacing[PacingController Token Bucket]
-    Net --> Socket[UDP Socket]
-    Socket --> Wire[Network Wire]
-
-    subgraph "Per-Connection Strand"
+    Net --> BBRv2["BBRv2 Congestion Control"]
+    Net --> FEC["RS-GF256 FEC Codec"]
+    Net --> SACKNAK["SACK/NAK Recovery"]
+    Net --> Pacing["PacingController"]
+    Net --> Socket["UDP Socket"]
+    Socket --> Wire["Network Wire"]
+    
+    subgraph Strand["Per-Connection Strand (lock-free)"]
         SerialQ
         ConnId
         ISN
     end
-
-    subgraph "Protocol Engine"
+    
+    subgraph Engine["Protocol Engine"]
         BBRv2
         FEC
         SACKNAK
@@ -171,30 +408,25 @@ flowchart TD
 
 ---
 
-## Getting Started
+## Quick Start
 
 ### Prerequisites
 
 - .NET 8.0 SDK or later
 - Windows, Linux, or macOS
-- Git for source control
+- Git
 
-### Build And Test
+### Build and Test
 
 ```powershell
-# Clone and build
 git clone <repository-url>
 cd ucp
 dotnet build ".\Ucp.Tests\UcpTest.csproj"
-
-# Run the full test suite
 dotnet test ".\Ucp.Tests\UcpTest.csproj" --no-build
-
-# Generate and validate the performance benchmark report
 dotnet run --project ".\Ucp.Tests\UcpTest.csproj" --no-build -- ".\Ucp.Tests\bin\Debug\net8.0\reports\test_report.txt"
 ```
 
-### Quick Start Example
+### Minimal Example
 
 ```csharp
 using Ucp;
@@ -213,28 +445,30 @@ using var client = new UcpConnection(config);
 await client.ConnectAsync(new IPEndPoint(IPAddress.Loopback, 9000));
 var serverConn = await acceptTask;
 
-// Exchange
+// Bidirectional reliable exchange
 byte[] msg = Encoding.UTF8.GetBytes("Hello, ppp+ucp!");
 await client.WriteAsync(msg, 0, msg.Length);
 byte[] buf = new byte[msg.Length];
 await serverConn.ReadAsync(buf, 0, buf.Length);
 
 Console.WriteLine($"Received: {Encoding.UTF8.GetString(buf)}");
+
+// Diagnostics
+var report = client.GetReport();
+Console.WriteLine($"Throughput: {report.ThroughputMbps} Mbps, RTT: {report.AverageRttMs} ms");
 ```
 
 ---
 
 ## Test Suite Coverage
 
-The UCP test suite validates the protocol across five dimensions:
-
-| Dimension | Tests | What's Validated |
+| Dimension | Tests | Validates |
 |---|---|---|
-| **Core Protocol** | Sequence wrapping, packet codec round-trip, RTO estimator convergence, pacing controller token accounting. | Wire-format correctness, timer behavior, basic send/receive integrity. |
-| **Connection Management** | Connection ID demultiplexing, random ISN uniqueness, server dynamic IP rebinding, serial queue ordering guarantees. | Session tracking, handshake completion, thread safety. |
-| **Reliability** | Lossy transfer, burst loss, SACK 2-send-per-range limit, NAK tiered confidence activation, FEC single and multi-loss repair. | Recovery correctness under all loss patterns. |
-| **Stream Integrity** | Reordering, duplication, partial reads, full-duplex non-interleaving, piggybacked ACK correctness on all packet types. | Application data integrity under all network impairments. |
-| **Performance** | 14 benchmark scenarios spanning 4 Mbps to 10 Gbps, 0-10% loss, mobile, satellite, VPN, and long-fat pipes. | Throughput, convergence, utilization against acceptance criteria. |
+| **Core Protocol** | 10+ | Sequence wrap-around, codec round-trip, RTO estimator convergence, pacing token arithmetic |
+| **Connection Mgmt** | 8+ | ConnId demultiplexing, random ISN uniqueness, dynamic IP rebinding, SerialQueue ordering |
+| **Reliability** | 12+ | Lossy transfer, burst loss, SACK 2-send-per-range, NAK tiered confidence, FEC single/multi-loss repair |
+| **Stream Integrity** | 10+ | Reordering, deduplication, partial reads, full-duplex, piggybacked ACK on all types |
+| **Performance** | 14+ | 4Mbps-10Gbps, 0-10% loss, LAN/DC/Gigabit/Satellite/3G/4G/VPN/LFN, BBRv2 convergence |
 
 ---
 
@@ -242,76 +476,73 @@ The UCP test suite validates the protocol across five dimensions:
 
 ```mermaid
 flowchart TD
-    A[Need to change UCP behavior] --> B{What changed?}
-    B -->|Wire format or reliability algorithms| C[Update protocol.md]
-    B -->|Runtime layering or state machines| D[Update architecture.md]
-    B -->|Thresholds, budgets, or payloads| E[Update constants.md]
-    B -->|Benchmarks or report semantics| F[Update performance.md]
-    B -->|Public API surface| G[Update api.md]
-    B -->|Protocol overview or quick start| H[Update README.md]
-    C --> I[Run dotnet build]
+    A["Need to change UCP behavior"] --> B{"What changed?"}
+    B -->|"Wire format / reliability"| C["Update protocol.md + protocol_CN.md"]
+    B -->|"Runtime / state machines"| D["Update architecture.md + architecture_CN.md"]
+    B -->|"Thresholds / budgets"| E["Update constants.md + constants_CN.md"]
+    B -->|"Benchmarks / report semantics"| F["Update performance.md + performance_CN.md"]
+    B -->|"Public API surface"| G["Update api.md + api_CN.md"]
+    B -->|"Overview / quick start"| H["Update README.md + README_CN.md"]
+    C --> I["dotnet build"]
     D --> I
     E --> I
     F --> I
     G --> I
     H --> I
-    I --> J[Run dotnet test]
-    J --> K[Run ReportPrinter]
-    K --> L[Verify zero report-error lines]
-    L --> M{Any failures?}
-    M -->|Yes| N[Fix protocol or tests]
-    M -->|No| O[Update CHANGELOG and commit]
+    I --> J["dotnet test"]
+    J --> K["ReportPrinter.ValidateReportFile"]
+    K --> L["Verify zero report-error lines"]
+    L --> M{"Any failures?"}
+    M -->|"Yes"| N["Fix protocol or tests"]
+    M -->|"No"| O["Update CHANGELOG and commit"]
     N --> I
 ```
 
 ---
 
-## Design Philosophy And Key Differentiators
-
-UCP was designed with a clear philosophy that distinguishes it from both TCP and QUIC in several important ways.
+## Design Philosophy and Key Differentiators
 
 ### Why Not TCP?
 
-TCP's fundamental design assumption is that all packet loss indicates congestion. This was a reasonable assumption in the 1980s when most links were wired and loss was rare outside of congestion events. In modern networks — wireless, cellular, satellite, and long-distance fiber — random loss is common and independent of congestion. TCP's response of cutting the congestion window in half on every loss event dramatically underutilizes these paths.
-
-UCP breaks this assumption by making loss classification a first-class protocol function:
-- Isolated losses with stable RTT are treated as random and trigger only retransmission.
-- Clustered losses with RTT inflation are classified as congestion and trigger gentle rate reduction.
-- The BBRv2 controller independently measures bottleneck bandwidth from delivery rate, not from loss events.
+TCP's foundational assumption—all loss = congestion—fails on modern wireless networks. UCP classifies loss before rate control: random losses trigger retransmission only; congestion losses trigger gentle 0.98x reduction. BBRv2 independently estimates bottleneck bandwidth from delivery rate, not loss events.
 
 ### Why Not QUIC?
 
-QUIC improves on TCP with features like stream multiplexing, 0-RTT handshakes, and better loss recovery. However, QUIC is tightly coupled to HTTP/3 and the web ecosystem. UCP is designed as a general-purpose transport that can be embedded in any application — game engines, IoT telemetry, financial data feeds, VPN tunnels — without requiring the HTTP ecosystem.
-
-UCP's Connection-ID-based session tracking goes beyond QUIC's connection migration: while QUIC supports connection migration as an optional feature, UCP makes it the default model. Every connection is identified by a random ID from inception, making IP address changes transparent at the protocol level.
+QUIC is tightly coupled to HTTP/3 and the web ecosystem. UCP is designed as a general-purpose transport embeddable in any application—game engines, IoT telemetry, financial data feeds, VPN tunnels—without requiring the HTTP ecosystem. UCP makes Connection-ID-based session tracking the default model (not optional), making IP address changes fully transparent.
 
 ### Deployment Scenarios
 
-| Scenario | Why UCP Is Suitable |
+| Scenario | Why UCP |
 |---|---|
-| **VPN tunnels** | High-throughput over lossy long-distance paths with asymmetric routing. BBRv2 maintains throughput where TCP collapses. |
-| **Real-time multiplayer games** | Low-latency recovery with FEC for predictable loss patterns. Connection-ID tracking survives Wi-Fi-to-cellular handoffs. |
-| **Satellite backhaul** | Long RTT (500ms+) paths with moderate random loss. BBRv2's ProbeRTT skipping on lossy paths avoids unnecessary throughput dips. |
-| **IoT sensor networks** | Lightweight wire format, random ISN security, and IP-agnostic connections survive DHCP renumbering behind NAT. |
-| **Financial data distribution** | Ordered reliable delivery with sub-RTT loss recovery. Piggybacked ACK eliminates control-packet overhead under bidirectional traffic. |
-| **Content delivery at the edge** | Fair-queue server scheduling prevents any single slow client from starving others. Adaptive FEC reduces retransmission overhead. |
-
-### Configuration Philosophy
-
-UCP's `GetOptimizedConfig()` provides sensible defaults that work well across most network environments. The defaults are tuned for the 80th percentile of use cases: moderate bandwidth (up to ~100 Mbps), moderate RTT (up to ~100ms), and moderate loss (up to ~5%). Applications with extreme requirements should tune accordingly:
-
-- **High bandwidth (>1 Gbps)**: Increase `Mss` to 9000, increase `MaxCongestionWindowBytes` to 256 MB, set `MaxPacingRateBytesPerSecond` to 0.
-- **High RTT (>300ms)**: Increase `InitialCwndPackets` and `SendBufferSize` to fill the BDP. Consider increasing `ProbeRttIntervalMicros`.
-- **High loss (>5%)**: Enable FEC with `FecRedundancy = 0.25` or higher, enable adaptive FEC.
-- **Mobile/low-power**: Reduce `Mss`, reduce `SendBufferSize`, increase `DisconnectTimeoutMicros`.
+| **VPN Tunnels** | High throughput over lossy asymmetric paths. BBRv2 maintains throughput where TCP collapses. Fair-queuing prevents single tunnel monopoly. |
+| **Real-time Games** | FEC zero-latency recovery for predictable loss. ConnId tracking survives Wi-Fi to cellular handoffs. NAK tiers prevent false positives. |
+| **Satellite Backhaul** | Long RTT (300ms+) with moderate random loss. BBRv2 skips ProbeRTT automatically. Large CWND fills high BDP. |
+| **IoT Sensor Networks** | Lightweight wire format (12B common header). Random ISN security. IP-agnostic survives DHCP renumbering and NAT rebinding. |
+| **Financial Data Feeds** | Ordered reliable delivery with sub-RTT loss recovery. Piggybacked ACK eliminates control-packet overhead under bidirectional flow. |
+| **Edge CDN** | Fair-queue server scheduling prevents slow-client starvation. Adaptive FEC adjusts redundancy dynamically. PacingController precisely governs egress rate. |
+| **Distributed DB Replication** | Low-latency reliable replication channels. Connection migration supports failover. Send buffer backpressure prevents OOM. |
 
 ---
 
-## Report Files
+## Performance Summary
 
-| File | Location | Purpose |
-|---|---|---|
-| `summary.txt` | `Ucp.Tests/bin/Debug/net8.0/reports/` | Append-only detailed per-scenario records with byte-level integrity traces, retransmission logs, and convergence timing details. |
-| `test_report.txt` | `Ucp.Tests/bin/Debug/net8.0/reports/` | Normalized ASCII table validated by `ReportPrinter`. Contains all scenario rows with throughput, utilization, retransmission ratio, directional RTT statistics, CWND, pacing rate, and convergence time. |
+| Property | Value |
+|---|---|
+| Max tested throughput | 10 Gbps |
+| Min RTT (loopback) | <100µs |
+| Max tested RTT | 300ms (satellite) |
+| Max tested loss rate | 10% random loss |
+| Jumbo MSS (≥1 Gbps) | 9000 bytes |
+| Default MSS | 1220 bytes |
+| FEC redundancy range | 0.0–1.0 |
+| Max FEC group size | 64 packets |
+| Max SACK blocks per ACK | 149 (default MSS) |
+| Max server connections | Limited by OS file descriptors |
+| Convergence (no loss) | 2-5 RTT (BBR Startup+Drain) |
+| Convergence (lossy) | +1-2 RTT per burst |
 
-Always validate both tests and the generated report. Passing xUnit alone is insufficient when report semantics change — the report must reflect physically plausible throughput, independent loss/retransmission separation, and correct convergence timing. The `ValidateReportFile()` method enforces all constraints automatically.
+---
+
+## License
+
+MIT. See [LICENSE](../LICENSE) for full text.
