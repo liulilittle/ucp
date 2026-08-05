@@ -462,7 +462,7 @@ All wire-format constants (packet type codes, header sizes, KCC gains, NAK thres
 The kernel module in `linux/tcp_kcc.c` implements KCC v2.0 (Geodesic Congestion Control) and shares the same congestion control design philosophy but uses different values for certain constants due to kernel integration constraints:
 
 | Constant | C#/C++ Lib | Kernel | Notes |
-|---|---|---|---|---|
+|---|---|---|---|
 | UCP_DRAIN_PACING_GAIN | 0.344 (88/256) | 0.344 | All implementations use same 0.344 drain pacing gain — UcpCongestionControl drain pacing gain |
 | UCP_CWND_GAIN | 2.0 | 2.0 | All implementations use cwnd_gain = 2.0 in PROBE_BW (UCP standard) |
 | SACK_FAST_RETRANSMIT_MIN_REORDER_GRACE_MICROS | 5,000 | Not in kernel | Kernel relies on TCP stack reorder handling |

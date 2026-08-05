@@ -1702,7 +1702,7 @@ The **cross-connection Global estimated BDP filter** (`kcc_kf_enable = 1`) provi
 **Summary:**
 
 | | FILTER | Global KCC Forwarding (KF) enabled |
-|---|---|---|---|
+|---|---|---|
 | Fairness mechanism | PROBE_BW + gate | PROBE_BW + gate + shared init_bw |
 | Fairness guarantee | Proven | Proven (accelerated) |
 | Why? | `model_rtt` ∉ bw, pacing | `kcc_kf_x` seeds bw, not T_prop |

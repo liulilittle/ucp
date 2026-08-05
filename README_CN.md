@@ -31,7 +31,7 @@ UCP 是一个通用传输协议，填补了 TCP 和 QUIC 之间的技术空白�
 | HTTP 耦合 | 可选 | 必需（HTTP/3） | 无 |
 | 1% 丢包吞吐* | 约 150-200 Mbps | 约 300 Mbps | 288 Mbps |
 
-\*Gigabit_Loss1 场景（1000 Mbps / 40ms RTT（20ms 单向））。
+*Gigabit_Loss1 场景（1000 Mbps / 40ms RTT（20ms 单向））。
 
 ### 1.3 部署环境配置
 
@@ -515,7 +515,7 @@ dotnet run --project samples/cs/Server -- --port 9000 --bandwidth 100
 ### 7.1 基准测试结果（C++ NetworkSimulator，730/730 测试通过）
 
 | 场景 | 目标 Mbps | RTT | 丢包率 | 吞吐 Mbps | 重传率 | 平均 RTT | 利用率 |
-|---|---|---|---|---|---|---|---|---|
+|---|---|---|---|---|---|---|---|
 | NoLoss | 83.89 | 9ms | 0% | 35.54 | 0% | 9ms | 42.37% |
 | LongFatPipe | 100 | 102ms | 0% | 64.35 | 0% | 102ms | 64.35% |
 | Gigabit_Ideal | 1000 | 2ms | 0% | 533.05 | 0% | 2ms | 53.30% |
@@ -528,7 +528,7 @@ dotnet run --project samples/cs/Server -- --port 9000 --bandwidth 100
 | HighJitter | 100 | 100ms | 0% | 22.93 | 0% | 100ms | 22.93% |
 | Weak4G | 10 | 160ms | 10.91% | 3.63 | 10.91% | 160ms | 36.32% |
 
-\*Gigabit_Ideal 受基准配置瓶颈限制。
+*Gigabit_Ideal 受基准配置瓶颈限制。
 
 ### 7.2 全局性能特征
 
@@ -716,7 +716,7 @@ C++ 实现共享与 C# 完全相同的线格式规范和协议语义，支持跨
 ### 9.4 Linux 内核模块文档
 
 | 文档 | 中文 | English | 说明 |
-|---|---|---|---|---|
+|---|---|---|---|
 | Linux README | [linux/README.md](linux/README.md) | [linux/README.md](linux/README.md) | 快速入门 + 完整文档 |
 | 模块源码 | — | [linux/tcp_kcc.c](linux/tcp_kcc.c) | 内核模块源代码 |
 

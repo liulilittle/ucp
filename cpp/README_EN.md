@@ -458,7 +458,7 @@ Extended performance test: connects to localhost, sends 32 KB payload at 100 Mbp
 ### Wire and Algorithm Equivalence
 
 | Component | Status |
-|:---|---|---|
+|---|---|
 | Wire format | Byte-identical, same big-endian encoding |
 | Protocol constants | All 77+ values match |
 | KCC algorithm | Identical state machine and gains |

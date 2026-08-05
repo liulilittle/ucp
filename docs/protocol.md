@@ -112,7 +112,7 @@ packet-beta
 ### DATA Packet (Type=0x5)
 
 | Offset | Size | Field | Notes |
-|---|---|---|---|---|
+|---|---|---|---|
 | 0 | 12 | CommonHeader | Type=0x5, Flags include NeedAck, HasAckNumber etc. |
 | 12 | 4 | SequenceNumber | Data sequence number |
 | 16 | 2 | FragmentTotal | Total fragments in message (1 = unfragmented) |
@@ -146,7 +146,7 @@ Offset  Hex Bytes                       Field
 ### ACK Packet (Type=0x3)
 
 | Offset | Size | Field |
-|---|---|---|---|
+|---|---|---|
 | 0 | 12 | CommonHeader |
 | 12 | 4 | AckNumber |
 | 16 | 2 | SackBlockCount (0-149) |
@@ -181,7 +181,7 @@ Offset  Hex Bytes                       Field
 ### NAK Packet (Type=0x4)
 
 | Offset | Size | Field |
-|---|---|---|---|
+|---|---|---|
 | 0 | 12 | CommonHeader |
 | 12 | 4 | AckNumber (last contiguous sequence before gaps) |
 | 16 | 2 | MissingCount (1-256) |

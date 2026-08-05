@@ -31,7 +31,7 @@ Wire format uses big-endian encoding. Each packet type consists of a common head
 | HTTP coupling | Optional | Required (HTTP/3) | None |
 | Throughput on 1% loss | 150-200 Mbps* | ~300 Mbps* | 288 Mbps* |
 
-\*1000 Mbps / 40ms RTT (20ms one-way) test scenario (Gigabit_Loss1).
+*1000 Mbps / 40ms RTT (20ms one-way) test scenario (Gigabit_Loss1).
 
 ### 1.3 Deployment Environment
 
@@ -431,7 +431,7 @@ Cross-validation covers:
 ### 7.1 Benchmark Results (C++ NetworkSimulator, 730/730 tests passing)
 
 | Scenario | Target Mbps | RTT | Loss | Throughput Mbps | Retrans% | Avg RTT | Util% |
-|---|---|---|---|---|---|---|---|---|
+|---|---|---|---|---|---|---|---|
 | NoLoss | 83.89 | 9ms | 0% | 35.54 | 0% | 9ms | 42.37% |
 | LongFatPipe | 100 | 102ms | 0% | 64.35 | 0% | 102ms | 64.35% |
 | Gigabit_Ideal | 1000 | 2ms | 0% | 533.05 | 0% | 2ms | 53.30% |
@@ -444,8 +444,8 @@ Cross-validation covers:
 | HighJitter | 100 | 100ms | 0% | 22.93 | 0% | 100ms | 22.93% |
 | Weak4G | 10 | 160ms | 10.91% | 3.63 | 10.91% | 160ms | 36.32% |
 
-\*Gigabit_Ideal is bottleneck-limited by test configuration.
-\*\*Loss columns report measured loss (simulator configured for 1%/5%; effective loss is higher under 40-60ms delay + burst behavior).
+*Gigabit_Ideal is bottleneck-limited by test configuration.
+**Loss columns report measured loss (simulator configured for 1%/5%; effective loss is higher under 40-60ms delay + burst behavior).
 
 ### 7.2 Global Characteristics
 
@@ -589,7 +589,7 @@ The C++ implementation shares identical wire format and protocol semantics with 
 ### 9.4 Linux Kernel Module Documents
 
 | Document | Chinese | English | Description |
-|---|---|---|---|---|
+|---|---|---|---|
 | Linux README | — | [linux/README.md](linux/README.md) | Quick-start guide + full documentation |
 | Module Source | — | [linux/tcp_kcc.c](linux/tcp_kcc.c) | Kernel module source code |
 

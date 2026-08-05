@@ -112,7 +112,7 @@ packet-beta
 ### DATA 包（Type=0x5）
 
 | 偏移 | 大小 | 字段 | 说明 |
-|---|---|---|---|---|
+|---|---|---|---|
 | 0 | 12 | CommonHeader | Type=0x5 |
 | 12 | 4 | SequenceNumber | 数据序号 |
 | 16 | 2 | FragmentTotal | 消息总分片数（1 = 未分片） |
@@ -169,7 +169,7 @@ packet-beta
 ### ACK 包（Type=0x3）
 
 | 偏移 | 大小 | 字段 |
-|---|---|---|---|
+|---|---|---|
 | 0 | 12 | CommonHeader |
 | 12 | 4 | AckNumber |
 | 16 | 2 | SackBlockCount（0-149） |
@@ -204,7 +204,7 @@ packet-beta
 ### NAK 包（Type=0x4）
 
 | 偏移 | 大小 | 字段 |
-|---|---|---|---|
+|---|---|---|
 | 0 | 12 | CommonHeader |
 | 12 | 4 | AckNumber（缺口前最后连续序号） |
 | 16 | 2 | MissingCount（1-256） |

@@ -158,7 +158,7 @@ The C++17 implementation shares the identical wire format specification and prot
 ## 5. Linux Kernel Module (KCC) Documentation
 
 | Document | Language | Description |
-|---|---|---|---|
+|---|---|---|
 | [linux/README.md](../linux/README.md) | English | Linux kernel module full documentation: build, architecture, parameters, performance |
 | [linux/tcp_kcc.c](../linux/tcp_kcc.c) | C | Kernel module source code |
 

@@ -461,7 +461,7 @@ p_est 是 Geodesic 估计器的标量置信代理（init = 1000，floor = 10，m
 `linux/tcp_kcc.c` 中的内核模块实现了 KCC v2.0（Geodesic Congestion Control），共享相同的拥塞控制设计理念，但由于内核集成约束，某些常量使用不同的值：
 
 | 常量 | C#/C++ 库 | 内核 | 说明 |
-|---|---|---|---|---|
+|---|---|---|---|
 | UCP_DRAIN_PACING_GAIN | 0.344 (88/256) | 0.344 | 所有实现均使用相同 0.344 排空 pacing 增益（88/256）|
 | UCP_CWND_GAIN | 2.0 | 2.0 | 所有实现均在 PROBE_BW 中使用 cwnd_gain = 2.0（UCP 标准） |
 | SACK_FAST_RETRANSMIT_MIN_REORDER_GRACE_MICROS | 5,000 | 不适用 | 内核依赖 TCP 栈的乱序处理 |
