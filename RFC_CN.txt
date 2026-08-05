@@ -1,0 +1,2078 @@
+[中文版本](RFC_CN.txt) | [英文版本](RFC.txt)
+
+
+PPP PRIVATE NETWORK™ X                                                     PPP PRIVATE NETWORK™ X
+Request for Comments:  UCP-1
+Category: Standards Track
+
+                      Universal Communication Protocol (UCP)
+                              （通用通信协议）
+
+                                  版本 1.0
+
+                                  2026 年 8 月
+
+
+摘要
+
+     本文档规定通用通信协议（UCP）——一种运行于 UDP/IP 之上的纯控制协议。
+     UCP 提供 CID 轮换切换、FEC 前向纠错、捎带 ACK 与 SACK/NAK 恢复——
+     所有这些都将高保真投递样本送入 KCC 拥塞控制（经 tcp_kcc.c、KCC 2.0
+     验证），以实现精确的 BDP 与 RTT 估计。UCP 使用 KCC 2.0——一种
+     BBR 风格三模式状态机（STARTUP/DRAIN/PROBE_BW），由测地线
+     （G1/G2/G3）估计器驱动进行传播时延估计；不存在 PROBE_RTT 模式，
+     MinRtt 由测地线估计器持续跟踪。新数据的可发送上限为
+     min(cwnd, 对端宣告窗口)，无固定 10 报文初始上限。其五路径丢包恢复
+     模型通过 32 位连接标识符（CID）在单个 UDP 套接字上复用多个连接，
+     支持跨网络变化的连接迁移，并通过捎带 ACK 机制在每种报文类型中携带
+     确认信息，从而将纯确认开销降至最低。UCP 运行于 UDP 之上，无需对
+     网络基础设施进行任何修改。
+
+本备忘录状态
+
+     本文档为互联网标准跟踪（Internet Standards Track）文档，是 PPP
+     PRIVATE NETWORK™ X 项目的产物，代表协议作者的共识，并已对照参考
+      C#（644 项测试）与 C++（729 项测试）实现进行验证。
+
+版权声明
+
+     版权所有（c）2026 PPP PRIVATE NETWORK™ X。
+
+     特此免费授予任何获得本软件及随附文档（以下简称"软件"）副本之人，
+     在不受限制的情况下处理该软件，包括但不限于使用、复制、修改、合并、
+     发布、分发、再许可和/或销售软件副本的权利，并允许向其提供软件之人
+     如此行事，但须遵守 MIT 许可证的条件。
+
+
+目录
+
+     1.  引言 . . . . . . . . . . . . . . . . . . . . . . . .   3
+     2.  术语  . . . . . . . . . . . . . . . . . . . . . . . .   4
+     3.  报文格式 . . . . . . . . . . . . . . . . . . . . . . .   5
+     4.  连接管理  . . . . . . . . . . . . . . . . . . . . . . .   9
+     5.  数据传输 . . . . . . . . . . . . . . . . . . . . . . .  13
+     6.  确认 . . . . . . . . . . . . . . . . . . . . . . . . .  15
+     7.  丢包检测与恢复 . . . . . . . . . . . . . . . . . . . .  18
+     8.  拥塞控制 . . . . . . . . . . . . . . . . . . . . . . .  22
+     9.  动态 CID 迁移  . . . . . . . . . . . . . . . . . . . .  29
+     10. DPLPMTUD  . . . . . . . . . . . . . . . . . . . . . .  33
+     11. 安全考虑 . . . . . . . . . . . . . . . . . . . . . . .  35
+     12. IANA 考虑  . . . . . . . . . . . . . . . . . . . . . .  38
+     13. 常量与默认值 . . . . . . . . . . . . . . . . . . . . .  38
+     14. 参考文献 . . . . . . . . . . . . . . . . . . . . . . .  43
+
+
+1.  引言
+
+     通用通信协议（UCP）是一种传输层协议，可在不可靠的数据报传输（通常
+     是 UDP）之上提供可靠、有序的应用数据投递。UCP 适用于广泛的部署场景：
+     从低延迟数据中心互连（10 Gbps 下亚毫秒级 RTT），到移动无线路径
+     （4G/5G 上的高抖动、突发丢包、切换事件），再到卫星与长肥管道网络
+     （600 ms RTT、稳定的背景丢包）。同一套 UCP 实现无需运维人员调参即可
+     自适应各种路径特征。
+
+     UCP 提供以下核心能力：
+
+     o  可靠、有序的字节流投递，支持消息分片。
+
+     o  面向连接的通信，通过独立于 IP 五元组的 32 位连接 ID 进行解复用。
+
+     o  三次握手，使用加密随机初始序列号（ISN）抵御路径外注入。
+
+     o  累计确认，配合 QUIC 风格的选择性确认（SACK）块精确报告乱序接收
+        情况。
+
+     o  基于 NAK 的显式丢包信号，带分级置信度误报控制（低、中、高三档）。
+
+     o  基于 SACK 的快速重传（阈值为 2 次观测）与重复 ACK 快速重传
+        （阈值为 2）。
+
+     o  RFC 6298 RTO 计算（SRTT + 4*RTTVAR），采用温和的 1.2x 退避因子。
+
+     o  KCC 拥塞控制（KCC 2.0，经 tcp_kcc.c 验证）：BBR 风格三模式
+        状态机（STARTUP/DRAIN/PROBE_BW），无 PROBE_RTT 模式，由测地线
+        （G1/G2/G3）估计器驱动进行传播时延估计，并配令牌桶 pacing。
+        STARTUP 使用 739/256（2.887x）pacing 与 cwnd 增益；DRAIN 使用
+        88/256（0.344x）pacing 增益与 739 cwnd 增益；PROBE_BW 循环 8
+        相位 pacing 增益表 {1.25, 0.75, 1.0 x6}，cwnd 增益为 512
+        （2.0x）。关键创新：测地线估计器（G1 瞬时向下吸收、G2 每 RTT
+        12.2% 几何增长、G3 双阈值路径增长检测、128 轮陈旧拉回）取代
+        滑动窗口最小 RTT；BDP 目标按 ceil(bw x model_rtt x gain >> 8
+        >> 24) 计算，其中 model_rtt = min(x_est >> 10, min_rtt)；
+        cwnd 慢启动至 BDP 目标，每 ACK 按新确认段数增长，并带
+        10 报文闩锁（累计交付不足 10 报文时即使已达目标仍增长，
+        与 tcp_kcc.c 一致）；可发送上限为
+        min(cwnd, 对端宣告窗口)；长期带宽（LT-BW）抑制器、双窗口 ACK
+        聚合、可选跨连接卡尔曼滤波器（KF，用于快速启动），以及 ECN
+        标记（默认禁用，运行时可选开启）。FEC 恢复与 NAK 观测为拥塞
+        控制提供投递样本，改善带宽与时延估计。所有参数均与 tcp_kcc.c
+        内核模块默认值一致（scale = 1024，p_est_init = 1000）。
+
+     o  Reed-Solomon GF(256) 前向纠错，实现零延迟丢包恢复。
+
+     o  所有报文类型均支持捎带 ACK。
+
+     o  通过连接 ID 实现与 IP 无关的连接迁移和动态 CID 轮换。
+
+     o  PAWS（防序列号回绕）时间戳校验。
+
+     UCP 从若干成熟传输协议中汲取重要机制：从 TCP [RFC9293] 借鉴累计
+     确认、序列编号、接收窗口流控与三次握手语义；从 QUIC [RFC9000]
+     借鉴基于 CID 的 UDP 复用、为隐私而进行的 CID 轮换、基于 SACK 的
+     丢包报告以及跨网络层变化的连接迁移。UCP 的拥塞控制为 KCC（测地线
+     拥塞控制，KCC 2.0）——一种基于 tcp_kcc.c 的 UCP 专用算法，结合
+     KCC 三模式状态机（STARTUP/DRAIN/PROBE_BW）与测地线（G1/G2/G3）
+     估计器进行传播时延估计；不存在 PROBE_RTT 模式。UCP 与上述任何
+     协议均不向后兼容——它定义了自有的线上格式、状态机与恢复逻辑。
+     KCC 是一种基于 tcp_kcc.c 并
+     带测地线估计器增强的独立拥塞控制算法。
+
+
+2.  术语
+
+     本文件中的关键词"MUST"、"MUST NOT"、"REQUIRED"、"SHALL"、
+     "SHALL NOT"、"SHOULD"、"SHOULD NOT"、"RECOMMENDED"、
+     "NOT RECOMMENDED"、"MAY"与"OPTIONAL"，当且仅当它们如所示以全
+     大写形式出现时，应按 BCP 14 [RFC2119] [RFC8174] 中的描述解释。
+
+     UCP 专用术语：
+
+     CID（连接 ID）：一个 32 位随机值，独立于 IP 地址与 UDP 端口标识
+         一条 UCP 连接。
+
+     ISN（初始序列号）：连接建立期间由每个端点选择的随机 32 位序列号。
+
+     SACK（选择性确认）：一个表示乱序接收的序列号范围的块，以（Start,
+         End）对报告，Start 含、End 含。
+
+     NAK（否定确认）：接收方向发送方显式报告缺失序列号，带三个置信度
+         档位（低/中/高）控制发送延迟。
+
+     FEC（前向纠错）：使用 Reed-Solomon 码（GF(256)）进行的主动丢包
+         恢复，组大小与修复包数量可配置。
+
+     PCB（协议控制块）：每个端点维护的每连接状态结构。
+
+     MSS（最大段长）：1220 字节。该值选定为可容纳于 IPv6 最小 MTU
+         （1280 字节）之内，其中含 40 字节 IPv6 头与 8 字节 UDP 头，
+         并为 IP 选项与隧道头预留 12 字节安全余量。
+
+     RTO（重传超时）：重传超时定时器的值，按 RFC 6298 计算并带 UCP
+         专用调整。
+
+     SRTT（平滑往返时间）：RTT 样本的指数加权移动平均（alpha = 1/8）。
+
+     RTTVAR（RTT 变化）：RTT 样本相对 SRTT 偏差的指数加权移动平均
+         度量（beta = 1/4）。
+
+     TLP（尾部丢包探测）：一种在发送队列清空后额外发送一个数据段的
+         机制，用于探测尾部丢包，避免虚假 RTO。
+
+     BottleneckBandwidth（瓶颈带宽）：路径瓶颈处可达到的最大带宽，
+         以字节/秒计，通过 10 轮滑动窗口最大值滤波器跟踪。
+
+     MinRtt（最小往返时间）：无排队时（纯传播时延）的最小 RTT。
+
+     BDP（带宽-时延积）：BottleneckBandwidth x MinRtt，即在途字节的
+         目标值。
+
+     CWND（拥塞窗口）：发送端状态变量，限制在途字节数的上限。
+
+     PAWS（防序列号回绕）：一种使用时间戳拒绝来自先前序列号周期陈旧
+         重复报文的机制。
+
+     位与字节序：所有多字节整数字段均按网络字节序（大端）编码。字段内
+     最高有效字节（MSB）占据最低内存偏移。字节内的位从 0（最低有效位）
+     编号至 7（最高有效位）。多位标志字段以位 0 作为最低有效标志位。
+
+     数值格式：除非另有说明，本文档中的所有数值均为十进制。十六进制值
+     以"0x"为前缀，二进制值以"0b"为前缀。
+
+     报文布局图遵循 [RFC9293] 中确立的格式：
+
+       0                   1                   2                   3
+       0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      |    Field 1    |    Field 2     |          Field 3              |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      |                         Field 4                                |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+     每个"+"代表一个位边界。竖线"|"表示字节边界（每 8 位）。顶部数字在
+     32 位字内逐位编号。
+
+
+3.  报文格式
+
+3.1.  公共头部
+
+     每个 UCP 报文均以 12 字节公共头部开始。所有多字节字段均按大端
+     编码。
+
+       0                   1                   2                   3
+       0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      |     Type      |     Flags     |          ConnectionId          |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      |         ConnectionId           |                              |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      |                        Timestamp (48 bits)                     |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+     字段说明：
+
+     Type（1 字节）：标识报文类型。已定义值见 3.2 节。
+
+     Flags（1 字节）：控制 ACK 存在性、报文分类与状态元数据的位标志。
+         见 3.3 节。
+
+     ConnectionId（4 字节）：由连接发起方分配的随机 32 位连接标识符。
+         用于 UDP 解复用与与 IP 无关的会话跟踪。
+
+     Timestamp（6 字节）：表示发送方本地微秒时间戳的 48 位无符号整数。
+         该值在 ACK 字段中回显以测量 RTT。实现必须使用单调非递减的
+         时钟源。48 位字段提供约 8.9 年的微秒范围。
+
+3.2.  报文类型代码
+
+     Type 字段定义以下报文类型：
+
+       Value   Name         Description
+       ------  -----------  --------------------------------------------
+       0x01    SYN          连接发起请求
+       0x02    SYNACK       连接接受响应
+       0x03    ACK          纯确认报文
+       0x04    NAK          否定确认（缺失序列）
+       0x05    DATA         应用数据载荷
+       0x06    FIN          正常连接终止
+       0x07    RST          硬性连接重置
+       0x08    FecRepair    前向纠错修复数据
+
+     值 0x00 与 0x09-0xFF 为保留值。实现必须静默丢弃 Type 字段无法识别
+     的报文。未知类型值不得触发任何响应，以防反射放大攻击。
+
+3.3.  标志位布局
+
+     Flags 字节编码报文的若干布尔属性。多个标志可通过按位 OR 组合。
+
+     Bit   Mask    Name             Description
+     ---   ------  ---------------  ------------------------------------
+     0     0x01    NeedAck          请求对端立即确认（绕过延迟 ACK 定时器）
+     1     0x02    Retransmit       此报文为重传（Karn 算法：不采样 RTT）
+     2     0x04    FinAck           确认对端的 FIN
+     3     0x08    HasAckNumber     携带捎带 ACK 字段
+     4-5   0x30    PriorityMask     优先级字段（2 位）
+     6     0x40    MtuProbe         DPLPMTUD 探测（路径 MTU 发现）
+     7     0x80    PathChallenge    连接迁移路径验证
+
+     HasAckNumber（位 3，掩码 0x08）：置位时，公共头部之后紧跟 4 字节
+         AckNumber 字段，随后依次为 SackCount、SACK 块、WindowSize 与
+         EchoTimestamp，如第 6 节所述。
+
+     Retransmit（位 1，掩码 0x02）：表示此报文为重传。用于区分原始
+         传输与重传，供指标报告与 FEC 编码使用。重传报文不用于 RTT
+         采样（Karn 算法）。
+
+     NeedAck（位 0，掩码 0x01）：请求对端发送立即确认，绕过延迟 ACK
+         定时器。用于握手完成或紧急操作。
+
+     FinAck（位 2，掩码 0x04）：由携带 FIN 的报文置位，表示该报文本身
+         正在确认对端的 FIN。
+
+     PriorityMask（位 4-5，掩码 0x30）：提取 2 位优先级值：
+         - 0x00 = Background（后台）(0)
+         - 0x10 = Normal（普通）(1) —— 默认
+         - 0x20 = Interactive（交互）(2)
+         - 0x30 = Urgent（紧急）(3)
+
+     MtuProbe（位 6，掩码 0x40）：标记 DPLPMTUD（RFC 8899）路径 MTU
+         发现探测报文。接收方不应在 MtuProbe 报文上采样 RTT；它们正常
+         确认以证实 MTU 可行性，但丢弃填充载荷。
+     PathChallenge（位 7，掩码 0x80）：标记连接迁移路径验证挑战或响应
+         报文。载荷携带随机 8 字节挑战令牌；对端回显相同标志与载荷以在
+         接受迁移前验证新路径。用于连接迁移安全，而非 MTU 发现。
+
+3.4.  SYN 报文
+
+     格式：公共头部（12 字节）+ SequenceNumber（4 字节，客户端 ISN）。
+     HasAckNumber 必须为 0（初始 SYN 没有可确认的对端数据）。总大小：
+     16 字节。
+
+3.5.  SYNACK 报文
+
+     格式：线上格式与 SYN 相同，但 Type=0x02 且 HasAckNumber 必须为 1。
+     AckNumber = 客户端 ISN + 1。SequenceNumber 携带服务器 ISN。总
+     大小：20 字节。
+
+3.6.  ACK 报文（Type 0x03）
+
+     当没有出站数据可用于捎带时，发送纯 ACK 报文。线上布局为：
+
+       0                   1                   2                   3
+       0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      |                     Common Header (12 bytes)                   |
+      |                       Type = 0x03                              |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      |                        AckNumber                               |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      |   SackCount   |   SACK Blocks[] (N x 8 bytes) ...              |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      |                        WindowSize                              |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      |                     EchoTimestamp (48 bits)                     |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+     AckNumber（4 字节）：累计确认号。序列号小于 AckNumber 的所有字节
+         均已按序接收并成功投递给应用。
+
+     SackCount（2 字节）：后续 SACK 块的数量。有效范围：0 至 255，
+         受 MSS 约束默认上限为 149。
+
+     SACK 块（N x 8 字节）：每个块是一对 4 字节序列号（Start, End）。
+         Start 含、End 含。块按 Start 升序排列，合并后不得重叠。
+
+     WindowSize（4 字节）：接收方可用接收缓冲区容量（字节）。发送方
+         在途字节数不得超过该值。
+
+     EchoTimestamp（6 字节）：最近收到报文中 Timestamp 的低 48 位。
+         用于发送端 RTT 计算：rtt = nowMicros() - EchoTimestamp。
+
+     ACK 固定大小：28 字节（不含 SACK 块）。每个 SACK 块为 8 字节。
+     最大报文大小 = 28 + SackCount * 8。
+
+3.7.  NAK 报文（Type 0x04）
+
+     NAK 报文由接收方发送，显式报告缺失的序列号。接收方使用三级置信度
+     升级系统（见 7.3 节）决定何时发出 NAK：
+
+       0                   1                   2                   3
+       0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      |                     Common Header (12 bytes)                   |
+      |                       Type = 0x04                              |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      |          [AckNumber]          |         MissingCount           |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      |                      MissingSeqs[] ...                         |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+     AckNumber（4 字节，可选）：当 HasAckNumber 标志置位时存在。携带
+         接收方当前的累计 ACK。
+
+     MissingCount（2 字节）：缺失序列条目的数量。有效范围：1 至
+         MAX_NAK_SEQUENCES_PER_PACKET（256）。
+
+     MissingSeqs[]（N x 4 字节）：严格升序的缺失序列号。每个条目是缺失
+         DATA 报文的 4 字节序列号。
+
+     实现应当（SHOULD）在 NAK 报文上置位 HasAckNumber，以便在报告丢包
+     的同时报告累计确认进度。
+
+3.8.  DATA 报文（Type 0x05）
+
+     基本头部（无捎带 ACK）：公共头部（12）+ SequenceNumber（4）+
+     FragmentTotal（2）+ FragmentIndex（2）+ 载荷。总头部 = 20 字节。
+
+     带捎带 ACK（HasAckNumber=0x08）：增加 AckNumber（4）+ SackCount
+     （2）+ SACK 块（N*8）+ WindowSize（4）+ EchoTimestamp（6）。
+     带 ACK 的 DATA 头部大小为 36 字节（不含可变 SACK 块）。
+
+     最大载荷：MAX_PAYLOAD_SIZE = 1200 字节（MSS 1220 减 20 字节 DATA
+     头部）。
+
+     特殊序列号：值 0xFFFFFFFF（CID_ROTATE_SEQUENCE_MARKER）表示 CID
+     轮换 DATA 报文。此时 4 字节"载荷"携带新的 Connection ID 而非应用
+     数据。见 9.3 节。
+
+3.9.  FIN 报文（Type 0x06）
+
+     公共头部 + 可选 SequenceNumber + 可选 AckNumber（当 HasAckNumber
+     标志置位时）。总计：12-20 字节。发起正常连接关闭。
+
+3.10.  RST 报文（Type 0x07）
+
+     仅包含 12 字节公共头部，无其他字段。Type 字段设为 0x07。立即终止
+     连接。
+
+3.11.  FecRepair 报文（Type 0x08）
+
+     公共头部（12）+ [AckNumber]（可选）+ GroupId（4）+ GroupIndex（1）
+     + 修复载荷。GroupId 标识 FEC 组（等于组内第一个 DATA 报文的序列
+     号）。GroupIndex 是该修复报文在组内的从 0 开始的索引。修复载荷是
+     GF(256) 上的 Reed-Solomon 修复数据，长度等于组内每个 DATA 报文的
+     载荷长度。
+
+3.12.  捎带 ACK 机制
+
+     HasAckNumber 标志（0x08）扩展任何报文类型以携带 ACK 信息。在 DATA
+     报文上，AckNumber、SackCount、SACK 块、WindowSize 与 EchoTimestamp
+     字段附加于 FragmentIndex 之后。在控制报文（SYN/SYNACK/FIN）上，
+     当 HasAckNumber 置位时，仅附加 AckNumber 字段（控制报文为紧凑性
+     省略 SACK、窗口与时间戳回显）。捎带 ACK 与独立 ACK Type 0x03 报文
+     语义完全相同——携带相同的累计确认号、SACK 信息、窗口大小与时间戳
+     回显。在双向流上，捎带 ACK 节省了纯 ACK 报文所需的额外往返。捎带
+     ACK 机制在第 6 节详细描述。
+
+
+4.  连接管理
+
+4.1.  连接状态机
+
+     UCP 连接在其生命周期内经历七个状态：
+
+     Init（初始）：端点尚未为此连接发送或接收任何报文。PCB 已分配但
+         未配置。
+
+     HandshakeSynSent（已发送 SYN）：客户端已发送 SYN 报文，正在等待
+         SYNACK 响应。connectTimer 处于活动状态。
+
+     HandshakeSynReceived（已接收 SYN）：服务器已接收 SYN 并发送
+         SYNACK。它等待客户端的 ACK。connectTimer 处于活动状态。
+
+     Established（已建立）：三次握手完成。允许双向数据流。KCC 拥塞
+         控制与所有可靠性机制处于活动状态。
+
+     ClosingFinSent（已发送 FIN）：端点已发送 FIN，正在等待对端确认。
+         出站新数据被阻止；入站数据接收正常继续（半关闭）。
+
+     ClosingFinReceived（已接收 FIN）：端点已从对端接收 FIN，并已发送
+         FIN-ACK。关闭前仍可发送剩余出站数据。
+
+     Closed（已关闭）：连接终止。PCB 资源在后台延迟清理线程上释放
+         （绝不在 PCB 自身的 worker 线程上）。
+
+     状态转换关系：
+
+                       +------+
+                       | Init |
+                       +------+
+                      /        \
+          (客户端)   /          \   (服务器)
+           发送 SYN /            \  接收 SYN
+                   v              v
+     +----------------+   +----------------------+
+     | HandshakeSyn   |   | HandshakeSynReceived |
+     | Sent           |   |                      |
+     +----------------+   +----------------------+
+            |                       |
+     接收 SYNACK             接收 ACK
+            |                       |
+            v                       v
+     +------------------------------------------+
+     |              Established                  |
+     +------------------------------------------+
+      |                          |
+      | (关闭)                   | (接收 FIN)
+      v                          v
+     +----------------+   +----------------------+
+     | ClosingFinSent |   | ClosingFinReceived   |
+     +----------------+   +----------------------+
+      |                          |
+     接收 FIN-ACK            本地 FIN 已确认
+      |                          |
+      v                          v
+     +------------------------------------------+
+     |               Closed                      |
+     +------------------------------------------+
+
+     任何状态在以下情况均可直接转换到 Closed：
+     - RTO 重传次数超过 MaxRetransmissions
+     - 收到有效的 RST 报文
+     - 应用调用 Dispose()
+
+4.2.  三次握手
+
+     UCP 采用三次握手建立连接。握手使用独立于数据序列号空间的控制报文
+     序列号。
+
+     第 1 步 —— 客户端 SYN：
+         客户端通过 CSPRNG 生成随机 32 位 ISN_c 与随机 32 位 ConnId，
+         并发送：
+           SYN(Type=0x01, ConnId=C_c, Seq=ISN_c, HasAckNumber=0,
+               Timestamp=T_c1)
+         它转换到 HandshakeSynSent 并启动 connectTimer。
+
+     第 2 步 —— 服务器 SYNACK：
+         服务器接收 SYN，验证 ConnId 不与任何活动连接冲突，分配新 PCB，
+         生成随机 ISN_s，并回复：
+           SYNACK(Type=0x02, ConnId=C_c, Seq=ISN_s, HasAckNumber=1,
+                  AckNumber=ISN_c+1, Timestamp=T_s1,
+                  EchoTimestamp=T_c1)
+         它转换到 HandshakeSynReceived 并启动 connectTimer。
+
+     第 3 步 —— 客户端 ACK：
+         客户端接收 SYNACK，验证 ConnId 匹配且 AckNumber 确认其 SYN，
+         转换到 Established，并发送：
+           ACK(Type=0x03, ConnId=C_c, AckNumber=ISN_s+1,
+               Timestamp=T_c2, EchoTimestamp=T_s1)
+         或发送带 HasAckNumber 置位的 DATA 报文。服务器接收此 ACK 并
+         转换到 Established。双方的 connectTimer 均停止。
+
+     ISN 生成：
+
+         hash_input = remote_address || remote_port || local_port
+                      || microsecond_timestamp
+         ISN = low32(SipHash-2-4(hash_input, secret_key))
+
+     secret_key 在进程启动时从系统熵源初始化，并在进程生命周期内保持
+     不变。ISN 随机化防止来自旧连接的历史报文被误认为新数据。
+
+     握手重传参数：
+
+     Parameter                    Default       Description
+     --------------------------   -----------   -------------------------
+     MIN_HANDSHAKE_WAIT_MS        100           最小握手等待（ms）
+     CONNECT_TIMEOUT_MS           5,000         总握手超时（ms）
+     MaxRetransmissions           10            最大重试次数
+
+     每次 connectTimer 到期，端点等待 max(MIN_HANDSHAKE_WAIT_MS, 当前 RTO)
+     后重传 SYN 或 SYNACK；RTO 本身在连续超时时按 RTO_BACKOFF（1.2x）
+     退避，最多 MaxRetransmissions 次尝试。
+
+     握手异常处理：
+     - SYN 丢失：未收到 SYNACK；按 RTO 退避（1.2x）重传 SYN。
+     - SYNACK 丢失：未收到 ACK；重传 SYNACK。
+     - 重复 SYN：HandshakeSynReceived 状态下收到相同 ConnId；重发
+       SYNACK。
+     - 陈旧 ConnId：SYN 的 ConnId 已处于 Established 状态；发送 RST
+       拒绝。
+     - 非法字段：ConnId=0 或非法标志组合；静默丢弃，不回复（防放大）。
+
+4.3.  正常关闭（FIN）
+
+     UCP 使用两阶段 FIN 握手实现正常连接终止。由于 UCP 使用独立的双向
+     序列号空间，全双工 FIN 确认只需一次往返（不同于 TCP 的四次关闭）。
+
+     主动关闭（发起 CloseAsync 的一方）：
+
+     1. 应用调用 CloseAsync()。
+     2. 端点停止接受新的 SendData() 调用。
+     3. 端点等待发送缓冲区中的所有段被确认（排空阶段）。
+     4. 排空完成后，发送 FIN（Type=0x06, Seq=S_final），HasAckNumber
+        置为 1。
+     5. 状态：Established -> ClosingFinSent。
+      6. 启动 disconnectTimer（初始当前 RTO；FIN 重传间隔为当前 RTO，按 RTO_BACKOFF 1.2x 退避）。
+     7. 收到 FIN-ACK（FinAck=0x04, AckNumber=S_final+1）后：
+        - 停止 disconnectTimer。
+        - 状态：ClosingFinSent -> Closed。
+        - 释放 PCB 资源；调用 OnDisconnected(GracefulClose)。
+
+     被动关闭（接收 FIN 的一方）：
+
+     1. 接收 FIN 报文。
+     2. 发送 FIN-ACK 响应：Type=0x06，
+        Flags=FinAck(0x04) | HasAckNumber(0x08)，Seq=本地当前序列号，
+        AckNumber=对端 Seq + 1。
+     3. 状态：Established -> ClosingFinReceived。
+      4. 启动 disconnectTimer（初始当前 RTO；FIN 重传间隔为当前 RTO，按 RTO_BACKOFF 1.2x 退避）。
+     5. 应用接收 OnFinReceived() 回调。
+     6. 应用可发送剩余数据，然后调用 CloseAsync()。
+     7. 当本地 FIN 已发送并确认，或 disconnectTimer 到期：状态 ->
+        Closed。
+
+     半关闭支持：发送 FIN 后，端点继续正常处理入站 DATA 报文并投递给
+     应用。对端可继续发送数据，完成后也发送 FIN。若 FIN 先于某些 DATA
+     报文到达（网络乱序），接收方不得丢弃随后到达的 DATA——乱序 DATA
+     插入 recvBuffer 并正常投递。
+
+     FIN 与 RST 的选择：
+
+     Condition                          Use FIN   Use RST
+     --------------------------------  --------- ---------
+     应用正常结束                         是        否
+     连接处于握手状态                     否        是
+     错误恢复（立即中止）                 否        是
+     保护在途数据投递                     是        否
+     对端无响应（超时）                   否        是
+
+4.4.  连接重置（RST）
+
+     RST 报文（Type=0x07）提供即时、无确认的连接终止机制。RST 报文仅
+     包含 12 字节公共头部，无其他字段，无捎带 ACK。
+
+     RST 发送触发条件：
+     - 收到无效 ConnId（无匹配 PCB）；
+     - 状态冲突（SYN 到达时 ConnId 已处于 Established 状态）；
+     - 握手中出现意外报文（HandshakeSynSent 状态下收到 ACK 或 DATA）；
+     - 重传耗尽（RTO 重试超过上限）；
+     - 应用调用 Dispose()；
+     - 协议违规（检测到非法标志组合）。
+
+     RST 接收处理：收到有效 RST（ConnId 与当前 PCB 匹配）后：
+     1. 将连接设为停止（阻止所有后续出站操作）；
+     2. 停止所有活动定时器（connect、disconnect、RTO、keepalive、
+        延迟 ACK）；
+     3. 清空发送缓冲区（未确认的发送数据丢失）；
+     4. 清空接收缓冲区（未投递的接收数据丢失）；
+     5. 取消所有进行中的 FEC 解码组；
+     6. 强制状态转换：任意 -> Closed；
+     7. 调用 OnDisconnected(ConnectionReset) 回调；
+     8. 将 PCB/连接交给后台延迟清理线程立即释放（绝不在 PCB 自身的
+        worker 线程上）。
+
+     陈旧 PCB 处理：
+     - 到达已关闭连接的陈旧数据/控制报文 -> 静默丢弃；
+     - 不回复 RST（防反射放大）；
+     - PCB 从活动连接表中移除；
+     - 所有 shared_ptr 引用过期后完全释放内存。
+
+
+5.  数据传输
+
+5.1.  序列号语义
+
+     UCP 使用 32 位无符号整数序列号（uint32_t），比较规则借鉴 TCP。
+     所有比较均将序列空间视为循环，以 2^31 窗口保证无歧义排序。
+
+     比较谓词：
+
+         seq_a > seq_b  iff  (uint32_t)(seq_a - seq_b) < 2^31
+         seq_a < seq_b  iff  (uint32_t)(seq_b - seq_a) < 2^31
+
+     这为最多 2^31（约 21 亿）个未确认序列号提供无歧义排序，远超任何
+     实际发送缓冲区容量。UCP 连接的每个方向维护独立的序列号空间。
+
+     特殊序列号值：
+     - 0xFFFFFFFF（CID_ROTATE_SEQUENCE_MARKER）：保留用于 CID 轮换
+       DATA 报文，见 9.3 节。
+
+5.2.  回绕处理
+
+     32 位序列空间在 10 Gbps 链路上约每 4,123 秒回绕一次（2^32 × 1200 B
+     / 1.25 GB/s）。UCP 通过有符号差值比较与 PAWS 时间戳校验处理回绕：
+
+         int SequenceBefore(uint32_t a, uint32_t b) {
+             return (int32_t)(a - b) < 0;
+         }
+
+     由于 UCP 的接收窗口上限为 4,096 个报文（1200 字节 MSS 下约 4.9 MB），
+     所有在途序列号始终落在安全的 2^31 比较窗口内。
+
+5.3.  PAWS 保护
+
+     PAWS（防序列号回绕）防止来自旧序列号周期的陈旧报文被当作有效数据
+     接受。每个 UCP 报文在公共头部携带 48 位微秒时间戳。
+
+     PAWS 校验算法：
+
+         接收报文 P，时间戳 T：
+
+           if (T < largest_timestamp_seen - MaxTimestampAgeMicros):
+               // 来自先前序列周期的陈旧重复
+               静默丢弃 P
+               return
+
+           if (T > largest_timestamp_seen):
+               largest_timestamp_seen = T
+
+           正常处理 P
+
+     MaxTimestampAgeMicros 默认为 60,000,000 微秒（60 秒）。选择此拒绝
+     窗口是因为最大可能网络延迟（约 600ms 的卫星 RTT，含重试与缓冲）远
+     小于 60 秒。延迟超过 60 秒的任何报文要么是陈旧重复，要么是恶意注入。
+
+     特殊情况：
+     - 初始状态（largest_timestamp_seen == 0）：首个报文始终通过 PAWS。
+     - 时钟回拨：若系统时钟显著向后跳变，PAWS 可能拒绝合法报文。实现
+       应当（SHOULD）在检测到超过合理阈值的时钟回拨时重置
+       largest_timestamp_seen。
+     - PAWS 适用于所有报文类型，包括 ACK 报文。
+
+5.4.  分片与重组
+
+     超过 MSS 的应用消息被拆分为多个 DATA 报文。每个分片携带
+     FragmentTotal 与 FragmentIndex 字段标识其在消息中的位置。
+
+     分片规则：
+     - FragmentTotal 表示分片总数。值为 1 表示消息未分片（常见情况）。
+     - FragmentIndex 从 0 开始，范围 0 至 FragmentTotal - 1。
+     - 发送方不得（SHALL NOT）在同一消息的分片之间更改 FragmentTotal。
+     - 每个分片获得自己的序列号，并由所有可靠性机制独立保护。
+     - 分片可能乱序到达；接收方的 recvBuffer 处理逐分片缓存。
+     - 当所有 FragmentTotal 个分片均已收到时进行消息重组。部分消息不
+       投递给应用。
+
+     重组过程：
+     1. 当 FragmentTotal > 1 的 DATA 报文到达时，接收方将载荷存入按首
+        分片起始序列号索引的每消息重组缓冲区。
+     2. 分片到达时，接收方在大小为 FragmentTotal 的位掩码中标记已接收
+        位置。
+     3. 当所有分片到位（位掩码已满）时，接收方按 FragmentIndex 顺序
+        拼接载荷，并将完整消息投递给应用。
+     4. 重组消息按序投递：投递延迟至所有先前序列号均已投递。
+
+     REASSEMBLY_TIMEOUT_MICROS（60 秒）丢弃不完整消息以防内存耗尽。
+     部分分片计入 queuedReceiveBytes，按比例减小通告的 WindowSize。
+
+5.5.  流控
+
+     UCP 使用类似 TCP 接收窗口管理的基于窗口的流控机制。接收方通过
+     每个 ACK 与捎带 ACK 中的 WindowSize 字段通告其可用缓冲区空间。
+
+     窗口计算：
+
+         WindowSize = RecvWindowPackets * MSS - queuedReceiveBytes
+
+     其中：
+      - RecvWindowPackets = 4096（C++ 默认，约 5 MB）
+      - queuedReceiveBytes = recvBuffer 中存储的总字节数（含按序与乱序
+        段）
+
+     发送方约束：当满足以下条件时，发送方不得（MUST NOT）发送新 DATA
+     报文：
+
+         flightBytes + next_packet_size > remoteWindowBytes
+
+     且不得（MUST NOT）超过：
+
+         flightBytes + next_packet_size > CWND
+
+     因此可发送上限为 min(CWND, remoteWindowBytes)，即标准的
+     TCP/QUIC 流控边界。特别地，初始发送不以固定报文数封顶：KCC 2.0
+     根据 BDP 目标计算初始 cwnd（见 8.6 节），发送方在有数据可用时
+     即可发送至多 min(cwnd, 对端窗口) 的报文，仅受接收方通告的
+     WindowSize 约束。
+
+     紧急重传不受窗口约束限制，因为它们不增加在途总载荷（它们替换已计
+     入 flightBytes 的段）。
+
+     零窗口处理：当接收方缓冲区已满（WindowSize = 0）时，发送方进入
+     零窗口状态：暂停新 DATA 发送，紧急重传继续发送，keepalive 定时器
+     保持活动。当接收方解除阻塞（应用从缓冲区读取）时，下一个 ACK 通告
+     非零 WindowSize。为加速窗口重新打开检测，当窗口从零转为非零时，
+     接收方在出站报文上置位 NeedAck，请求对端及时响应。
+
+
+6.  确认
+
+6.1.  捎带 ACK
+
+     UCP 最独特的特性之一是捎带 ACK 机制。通过 HasAckNumber 标志
+     （Flags 位 3），每种报文类型（DATA、NAK、SYNACK、FIN，以及可选
+     的 FecRepair）都可在单次传输中同时携带数据与确认信息。
+
+     当 HasAckNumber 置位（Flags & 0x08 非零）时，以下字段依次出现在
+     公共头部之后：
+
+     1. AckNumber（4 字节）：累计确认号。序列号严格小于 AckNumber 的
+        所有字节均已按序接收并投递给应用。捎带 ACK 携带累计 ACK，语义
+        与 TCP 的累计确认完全相同。
+
+     2. SackCount（2 字节）：后续 SACK 块的数量（0-255）。
+
+     3. SACK 块（N x 8 字节）：有序、不重叠的范围列表。
+
+     4. WindowSize（4 字节）：可用接收窗口（字节）。
+
+     5. EchoTimestamp（6 字节）：回显时间戳的低 48 位。
+
+     按报文类型的 HasAckNumber 规则：
+
+     Type         HasAckNumber     Notes
+     ----------   ---------------- --------------------------------------
+     SYN           必须为 0        尚无对端数据可确认
+     SYNACK        必须为 1        确认客户端的 ISN
+     ACK           隐式（类型为     AckNumber 为固定字段
+                   ACK）
+     NAK           应当为 1        报告丢包的同时报告 ACK 进度
+     DATA          当 m_ackPiggyback 最常见的捎带路径
+                   Queue 非空时置位
+     FIN           应当为 1        确认收到的最终数据
+     RST           通常为 0        单向中止
+     FecRepair     可选             双向流量存在时捎带
+
+     捎带开销：
+
+     Scenario             ACK Fields    MSS        Overhead
+     -----------------    -----------   ---------  --------
+     纯 DATA（无 SACK）    16 字节       1220       1.31%
+     纯 DATA（无 SACK）    16 字节       9000       0.18%
+     DATA + 3 SACK        40 字节       1220       3.28%
+
+6.2.  独立 ACK 报文
+
+     纯 ACK 报文（Type=0x03）仅在以下情况发送：
+     - 延迟 ACK 定时器到期且没有待发送的出站数据。
+     - 收到带 NeedAck 标志的报文（握手完成或紧急操作需要立即确认）。
+
+     以下情况不发送纯 ACK 报文：
+     - 有待发送的出站 DATA（改为捎带）。
+     - 正在发送 NAK 报文（改为捎带）。
+     - 连接处于握手或关闭状态（改为通过控制报文携带捎带 ACK）。
+
+     在双向流中，纯 ACK 报文通常占所有传输报文的不到 1%。在单向流中，
+     ACK 报文约每 100 微秒发送一次，在保持低开销的同时提供频繁的 RTT
+     样本。
+
+     独立 ACK 报文携带与捎带 ACK 完全相同的 ACK 信息——AckNumber、SACK
+     块、WindowSize 与 EchoTimestamp——且语义完全相同，仅在投递方式上
+     不同（独立报文 vs 附加于 DATA 报文）。
+
+6.3.  延迟 ACK 定时器
+
+     UCP 使用自适应延迟 ACK 策略聚合确认并最小化纯 ACK 报文传输。
+
+     算法：
+
+     1. 收到按序 DATA 报文时：
+        - 在 m_ackPiggybackQueue 中设置待确认。
+        - 启动 DelayedAckTimer（默认 100 微秒）。
+        - 不立即发送 ACK。
+
+     2. 若定时器到期前有更多 DATA 报文到达：
+        - 更新待确认（推进 AckNumber）。
+        - 将 DelayedAckTimer 重置为完整时长。
+
+     3. 当 DelayedAckTimer 到期：
+        - 若有出站 DATA 报文待发送或正在组装，则在其上捎带 ACK
+          （置位 HasAckNumber）。
+        - 若无出站数据可用，则触发发送独立 ACK 报文。
+
+     4. 若延迟期间收到带 HasAckNumber 置位的入站报文：
+        - 对端的捎带 ACK 可能隐式确认本地侧的数据，从而无需单独 ACK。
+
+     立即 ACK 触发条件：
+     - 收到带 NeedAck 标志（0x01）置位的报文；
+     - 缓冲了 IMMEDIATE_ACK_REORDERED_PACKET_THRESHOLD（4）个乱序
+       报文；
+     - 两次立即乱序 ACK 之间至少间隔 REORDERED_ACK_MIN_INTERVAL_MICROS
+       （250 微秒）以防洪泛。
+
+     在双向流量中，延迟 ACK 策略几乎消除所有纯 ACK 报文。在单向流量中，
+     ACK 报文约每 100 微秒发送一次，以低开销为 UCP 与 RTO 估计提供连续、
+     频繁的 RTT 样本。
+
+6.4.  SACK 块
+
+     每当乱序 DATA 报文到达时，接收方生成一个 SACK 块。每个 SACK 块
+     捕获累计 ACK 值之外的一段连续已接收序列号范围。SACK 块格式（每个
+     8 字节）：
+
+       0                   1                   2                   3
+       0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      |                     Start Sequence (inclusive)                 |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      |                     End Sequence (inclusive)                    |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+     编码 SACK 块之前，接收方必须合并相邻与重叠的块：
+
+          Input:  [100,200], [200,300]   -> [100,300]  (adjacent)
+          Input:  [100,200], [150,250]   -> [100,250]  (overlapping)
+          Input:  [100,200], [201,300]   -> no merge   (gap = 1 seq)
+          Input:  [100,200], [250,300]   -> no merge   (significant gap)
+
+     SACK 块抑制：为防止持续的 SACK 块膨胀（潜在放大向量），每个 SACK
+     块范围最多传输 MAX_SACK_SEND_COUNT（2）次。计数达到 2 时，该块被
+     抑制，缺口移交给 NAK。清理：当累计 ACK 越过块范围（AckNumber >=
+     End）时，从映射中移除。若两次 SACK 传输均丢失（5% 丢包率下概率
+     小于 0.25%），NAK 路径接管恢复，确保发送方最终获知缺口。
+
+6.5.  EchoTimestamp 与 RTT 测量
+
+     EchoTimestamp 字段在每一个被确认的报文上提供连续、精确的 RTT
+     测量：
+
+         rtt_micros = current_time_micros() - ack.echo_timestamp
+
+     RTT 样本投递给两个消费者：
+
+       1. KCC 拥塞控制：用于更新 MinRtt、BottleneckBandwidth 并计算
+          pacing 增益。
+
+       2. RTO 估计器：用于计算 SRTT、RTTVAR 并设置重传超时。
+
+     特殊情况：
+     - echo_timestamp == 0：无有效时间戳可回显；丢弃 RTT 样本。
+     - SYNACK EchoTimestamp：提供首个连接 RTT 测量（SYN -> SYNACK
+       往返）。
+     - CPU 抖动：时间戳精度为微秒级；轻微偏差（< 1ms）由 EWMA 平滑
+       吸收。
+
+
+7.  丢包检测与恢复
+
+7.1.  五路径恢复模型
+
+     UCP 采用五条独立恢复路径，每条在特定条件下激活，通过去重防止恢复
+     路径竞争：
+
+     恢复路径摘要：
+
+     Path    Trigger                Direction        Role
+     ------  ---------------------  ---------------  -------------------
+     SACK    2 次 SACK 观测且乱序    发送方驱动       基于接收方报告范围
+             宽限期已过                             的快速重传
+     DupACK  3 次重复 ACK 观测      发送方驱动       基于重复 ACK 号
+                                                    的快速重传
+     NAK     达到分级置信度阈值      接收方驱动       带升级防护的显式
+                                                     缺口报告
+     FEC     组收集完成             主动（发送方     经 Reed-Solomon 的
+                                    发起）           零延迟恢复
+     RTO     重传超时到期            发送方驱动       其他全部失败时的
+                                                     最终回退
+
+     恢复路径激活遵循两条原则：
+
+       1. 每次丢包至多一条路径：对给定缺失序列号，仅激活一条恢复路径。
+          m_sackFastRetransmitNotified 集合提供去重——首个将该序列标记
+          为重传的路径胜出；后续路径激活被抑制。
+
+       2. 优先级排序：当多个缺失序列待处理时，RTO 触发的重传优先级最高，
+          其次为 SACK 触发，再其次为 NAK 触发。所有紧急重传共享
+          UrgentRetransmitBudget（每 RTT 8192 个报文）。
+
+7.2.  基于 SACK 的快速重传
+
+     SACK 快速重传参数：
+
+     Parameter                        Value   Description
+     -------------------------------  -----   --------------------------
+     SACK_FAST_RETRANSMIT_THRESHOLD   2       SACK 观测次数阈值
+     SACK_FAST_RETRANSMIT_MIN_REORDER_GRACE_MICROS   5000    最小乱序宽限期（us）
+     SACK_FAST_RETRANSMIT_DISTANCE_THRESHOLD   48      超出此距离的额外空洞
+                                                      可重传
+     MAX_SACK_SEND_COUNT             2       每块最大传输次数
+
+     发送方处理：
+
+     1. 对每个收到的 SACK 块（Start, End），递增 Start 之前缺口（即
+        [累计 ACK, Start)）的观测计数。
+     2. 检查快速重传条件：观测计数 >= SACK_FAST_RETRANSMIT_THRESHOLD
+        （2），且自上次发送以来段龄 > max(5ms, RTT)（乱序宽限期，基于平滑 RTT）。
+     3. 条件满足时，将缺失序列标记为紧急重传，并加入
+        m_sackFastRetransmitNotified 集合去重。
+     4. 超出最高 SACK 块超过 SACK_FAST_RETRANSMIT_DISTANCE_THRESHOLD（48 个序列）的
+        额外空洞也可重传。
+
+7.3.  基于 NAK 的丢包报告
+
+     NAK 是接收方驱动的显式丢包信号，采用三级置信度升级：
+
+     Tier    Obs.    Guard Formula                Purpose
+     ------  ------  --------------------------  ----------------
+     低      1-31    max(NAK_REORDER_GRACE=2ms,  保守：缺口可能
+     (Std)          min(RTT/2, MinRto))         是乱序
+     中      32-127  max(低档/2, 1ms)            证据累积：很可能
+                                                是真实丢包
+     高      128+    max(低档/2, 1ms)            确凿：最快恢复
+
+     防护时长使用 SRTT/RTT 估计（下限 NAK_REORDER_GRACE_MICROS=2ms，
+     上限 MinRto）。在 100ms RTT 的跨洋链路上，低置信度防护为 50ms。
+
+     每序列状态机：
+     - 计数 0->1：进入低档。防护 = max(2ms, min(RTT/2, MinRto))。
+     - 计数 1->31：保持低档。从首次观测起重新计算防护。
+     - 计数 31->32：进入中档。防护 = max(低档/2, 1ms)。重置防护起始
+       时间。
+     - 计数 32->127：保持中档。
+     - 计数 127->128：进入高档。防护 = max(低档/2, 1ms)。重置防护起始
+       时间。
+     - 计数 >=128：保持高档。防护不再缩短。
+
+     重置条件（从 m_missingSequenceCounts 中移除序列）：缺口被正常到达
+     的 DATA 报文填满、经 FEC 解码恢复、累计 ACK 越过该序列，或连接
+     关闭。
+
+     NAK 重复抑制：对给定缺失序列，接收方按 per-sequence 标记（直到数据
+     到达）抑制重复 NAK；另有基于平滑 RTT 的 NAK 窗口限速（SendNak）。
+     NAK_REPEAT_INTERVAL_MICROS 在 C# UcpConstants.cs 声明为 5ms 但未使用。
+
+     每个 NAK 报文携带最多 MAX_NAK_SEQUENCES_PER_PACKET（256）个缺失
+     条目。每个 SRTT 窗口最多 MAX_NAKS_PER_RTT（1024）个 NAK。
+
+7.4.  RTO 重传超时
+
+     RTO 是最终回退恢复机制，当所有其他恢复路径（SACK、NAK、FEC）均
+     未能恢复缺失数据时触发。
+
+     RTO 估计遵循 [RFC6298] 中描述的算法并带 UCP 专用调整：
+
+     变量：
+     - SRTT：平滑往返时间（EWMA，alpha = 1/8）
+     - RTTVAR：RTT 变化（EWMA，beta = 1/4）
+     - RTO：重传超时
+
+     初始值：
+         SRTT = 第一个 RTT 样本
+         RTTVAR = 第一个 RTT 样本 / 2
+         RTO = SRTT + max(G, 4 * RTTVAR)，其中 G = 1ms（时钟粒度）
+
+     RTT 样本处理（当 ACK 中收到 EchoTimestamp 时）：
+
+         rtt_sample = nowMicros() - ack.echo_timestamp
+         if (rtt_sample <= 0): 丢弃
+
+         delta = rtt_sample - SRTT
+         SRTT = SRTT + delta / 8
+         RTTVAR = RTTVAR + (|delta| - RTTVAR) / 4
+         RTO = SRTT + max(G, 4 * RTTVAR)
+
+     RTO 退避：当 RTO 触发（RTO 间隔内无 ACK 进度）时：
+     - RTO = RTO * RTO_BACKOFF_FACTOR (1.2)
+     - 递增重传计数
+     - 发送最旧的未确认段
+
+     退避序列（以 200ms SRTT 起始）：
+     200ms -> 240ms -> 288ms -> 346ms -> 415ms -> 498ms -> 598ms -> 717ms ->
+     861ms -> 1033ms -> 1239ms
+
+     检测到有效 ACK 进度（累计 ACK 前进）时：
+     - 将 RTO 重置为根据当前 SRTT 与 RTTVAR 计算的值
+     - 将重传计数重置为 0
+     - 取消所有待处理的 RTO 重传
+
+     MaxRetransmissions（默认 10）：当重传计数达到该值时，连接以 RST
+     终止并转换到 Closed。
+
+     RTO 批量控制：RTO_RETRANSMIT_BUDGET_PER_TICK = 4 限制每个定时器
+     滴答的 RTO 触发重传数量，防止大量报文同时超时时出现重传风暴。
+
+7.5.  重复 ACK 重传
+
+     当发送方收到 DUPLICATE_ACK_THRESHOLD（3）个携带相同累计 AckNumber
+     的连续 ACK 报文时，它触发序列号缺口处段的快速重传。首个相同 ACK
+     被记录为潜在 DupACK；若序列缺口在乱序宽限期内且 SACK 尚未触发恢复，
+     则第三个触发重传，将该段标记为紧急重传。DupACK 重传与 SACK 和 NAK
+     触发共享紧急预算。
+
+7.6.  紧急重传机制
+
+     当 SACK 或 NAK 确认报文丢失时，发送方将其标记为紧急重传。紧急重传
+     绕过正常 pacing 公平队列门控，通过 ForceConsume 直接从令牌桶发送
+     （将正令牌清零，不产生债务）。每 RTT 的紧急重传预算为
+     URGENT_RETRANSMIT_BUDGET_PER_RTT（8192）个报文，在每个来自 KCC
+     拥塞控制的新 RTT 样本处重置。
+
+7.7.  前向纠错（FEC）
+
+     前向纠错使用 GF(256) 上的 Reed-Solomon 码提供主动、零延迟的丢包
+     恢复。
+
+     FEC 组参数：
+
+     Parameter          Value   Description
+     -----------------  -----   ----------------------------
+     FecGroupSize (N)   8       每组 DATA 报文数（配置）
+     FecRedundancy      0.0     修复比例；修复包数 = ceil(FecGroupSize *
+                               FecRedundancy)（配置，默认关闭）
+
+     组形成：
+     1. 发送方在组缓冲区中累积 N 个连续 DATA 报文载荷。
+     2. 组内每个 DATA 报文必须具有相同的载荷长度 L。长度不同的报文
+        开启新组。
+     3. 累积 N 个报文后，编码器计算 R 个修复包并发出 R 个 FecRepair
+        报文（Type=0x08）。
+     4. 修复包的 GroupId 设为组内第一个 DATA 报文的序列号。GroupIndex
+        范围从 0 至 R-1。
+
+     编码使用 GF(256) 上的 Vandermonde 矩阵。对修复索引 i 与字节位置 j，
+     修复值是位置 j 处所有 N 个数据字节的加权异或和（GF(256) 加法），
+     权重为 alpha^(i*k)，其中 alpha = 0x02 是 GF(256) 的本原元。
+
+     解码使用 GF(256) 上的高斯消元。当接收方为该组收集到任意 N 个独立
+     实体（DATA 与修复报文的任意组合）时，即可唯一重建全部 N 个数据
+     字节。复杂度为每组 O(N^2 * L)。
+
+     GF(256) 运算使用预计算的对数与反对数表实现 O(1) 乘法与除法。本原
+     多项式为 P(x) = x^8 + x^4 + x^3 + x^2 + 1 (0x11D)，与 AES 及许多
+     Reed-Solomon 实现使用的不可约多项式相同。
+
+
+8.  拥塞控制
+
+8.1.  KCC 拥塞控制（KCC 2.0，经 tcp_kcc.c 验证）
+
+     UCP 的拥塞控制由 KCC 2.0 提供，即 tcp_kcc.c 内核模块所实现的
+     KCC 算法版本。KCC 是一种基于模型的拥塞控制算法：它将路径建模为
+     具有瓶颈带宽（BottleneckBandwidth）与最小 RTT（MinRtt）的管道，
+     以控制器计算出的 pacing 速率进行速率控制，并将最大在途数据设为
+     按每状态 cwnd 增益缩放的带宽-时延积（BDP）。这种基于模型的
+     方法从根本上区别于基于丢包的拥塞控制（Reno、CUBIC）——后者将
+     每次丢包都视为拥塞信号。
+
+     KCC 2.0 将 KCC 三模式状态机（STARTUP/DRAIN/PROBE_BW）与用于
+     传播时延估计的测地线（G1/G2/G3）估计器相结合。不存在 PROBE_RTT
+     模式：MinRtt 由测地线估计器持续跟踪（见 8.5 节）。初始发送不以
+     固定报文数封顶。新数据的可发送上限为 min(cwnd, 对端宣告窗口)
+     （标准的 TCP/QUIC 流控，见 5.5 节）。初始 cwnd 由 BDP 目标计算
+     得出：仅在尚无 RTT 模型时回退为 INITIAL_CWND_PACKETS（10）个段；
+     当跨连接卡尔曼滤波器启用时，快速启动上限可达 20000 个段
+     （见 8.9 节）。
+
+     KCC 2.0 包含以下特性，与 tcp_kcc.c 实现一致：
+
+     - 三模式状态机（STARTUP/DRAIN/PROBE_BW）：STARTUP 使用 739/256
+       （2.887x）pacing 与 cwnd 增益填满管道；DRAIN 使用 88/256
+       （0.344x）pacing 增益与 739 cwnd 增益释放 STARTUP 期间累积的
+       队列；PROBE_BW 循环 8 相位 pacing 增益表 {1.25, 0.75, 1.0 x6}，
+       cwnd 增益为 512（2.0x），用于发现并共享带宽。不存在 PROBE_RTT
+       模式（见 8.2 节）。
+
+     - 测地线估计器（G1/G2/G3）：标量结构估计器取代滑动窗口最小 RTT。
+       G1 瞬时吸收向下样本（x_est = min(x_est, z)）；G2 将向上增长限
+       制为每 RTT 12.2%（x_est = min(x_est + x_est * 122/1000, z)）；
+       G3 以双阈值连续计数测试检测真实路径增长（快路径：6 次事件
+       >= 1.10 x min_rtt；慢路径：7 次事件 >= 1.05 x min_rtt），按
+       MinRtt 分档且在低于 5 ms 时锁定。128 轮陈旧窗口在 G3 未触发时
+       将估计值拉回 MinRtt 的 95%。抖动与排队时延估计使用 7/8 EWMA
+       滤波器；标量收敛代理 p_est（初值 1000，下限 10，上限 1000000）
+       跟踪估计器置信度（见 8.4 节）。
+
+     - BDP 目标与 cwnd 更新：BDP = ceil(bw x model_rtt x gain >> 8
+       >> 24)，其中 model_rtt = min(x_est >> 10, min_rtt)，gain 为
+       每状态 cwnd 增益（STARTUP 与 DRAIN 为 739，PROBE_BW 为 512）。
+        cwnd 慢启动至 BDP 目标，每 ACK 按新确认段数增长，带 10 报
+        文闩锁（累计交付不足 10 报文时即使已达目标仍增长，与
+        tcp_kcc.c 一致）。可发送上限为 min(cwnd, 对端窗口)（见 8.6 节）。
+
+     - Pacing 控制器：令牌桶强制执行按 ((bw x MSS x pacing_gain) >>
+       8) x 990000 >> 24 计算的 pacing 速率，其中 bw x MSS 将定点带宽
+       换算为字节/秒，990000 因子施加 99/100 安全余量（见 8.3 节）。
+
+     - 长期带宽（LT-BW）抑制器：在有损路径上将 PROBE_BW pacing 增益
+       强制为 1.0x（lt_use_bw）。当某轮丢包/投递比超过 50/256 时开始
+       LT-BW 采样；有效 LT 间隔至少需要 4 个 RTT；当当前带宽处于存储
+       lt_bw 的 1/8 相对与 500 B/s 绝对容差内时，以权重 1/2 的 EMA
+       更新；LT-BW 活动在 48 个 RTT 后过期（见 8.7 节）。
+
+     - 双窗口 ACK 聚合：在两个每 5 个 RTT 轮换的窗口中测量 extra_acked
+       （超出带宽预期周期总量的已确认字节数）。cwnd 奖励为 gain x
+       max(extra_acked)，上限为 bw x 100 ms，仅在 MinRtt >= 7.5 ms
+       时加入 BDP 目标（见 8.8 节）。
+
+     - 跨连接卡尔曼滤波器（KF，可选）：全局卡尔曼滤波器
+       （kcc_kf_enable = 0 默认禁用）在 KCC 连接间共享带宽估计并提供
+       快速启动：公平份额初始带宽（默认 50% 折扣）设置初始 pacing
+       速率，并将初始 cwnd 限制在 [max(cwnd, 10), 20000] 段之间。
+       chi2 门（384/100）拒绝虚假新息（见 8.9 节）。
+
+     - ECN 标记：默认禁用（kcc_ecn_enable = 0，运行时可选开启）。启用
+       后，CE 标记段经 EWMA 跟踪，当排队时延估计超过拥塞阈值时，cwnd
+       增益最多降低 20%（见 8.10 节）。
+
+     - FEC/NAK 集成：FEC 恢复与 NAK 观测将高保真投递样本送入拥塞控制
+       引擎，在丢包突发期间保持带宽估计，并在非对称路径上补充 RTT
+       样本（见 8.11 节）。
+
+     所有可调参数均与 tcp_kcc.c 内核模块默认值一致（见 13.6 节）。
+
+8.2.  KCC 拥塞控制状态机
+
+     KCC 2.0 三模式状态机在 tcp_kcc.c 内核模块中实现。固定开环增益按
+     状态设置：
+
+     State     Pacing Gain   CWND Gain   Duration   Exit Condition
+     --------  ------------- ----------  ---------  ----------------------------
+     Startup   2.887x        2.887x      可变        3 个 RTT 轮内吞吐量
+               (739/256,     (739/256,               增长均 < 1.25x
+               HIGH_GAIN)    HIGH_GAIN)
+     Drain     0.344x        2.887x      可变        在途不超过 1.0x BDP
+               (88/256,      (739/256,               且经过 1 个 RTT
+               DRAIN_GAIN)   HIGH_GAIN)              （AND 门，
+                                                     kcc_drain_and_or_mode=1），
+                                                     或 4x-min_rtt 超时
+     ProbeBW   8 相位循环    2.0x        稳态        Min RTT 由测地线
+               {1.25, 0.75,  (512/256)               G1/G3 跟踪；lt_use_bw
+               1.0 x6}                               置位时 pacing 增益
+                                                     强制为 1.0x
+
+     Startup：通过每个 RTT 倍增 pacing 速率（增益 739/256 = 2.887x）
+          快速探测瓶颈带宽。cwnd 向 BDP 目标慢启动，每 ACK 按新确认
+          段数增长（带 10 报文闩锁：累计交付不足 10 报文时即使已达
+          目标仍增长，与 tcp_kcc.c 一致）。当吞吐量连续 3 个 RTT 窗口增长
+          不足 1.25x（KCC_FULL_BW_CNT = 3）时退出。
+
+     Drain：将 pacing 增益设为 88/256（0.344x）排空 Startup 期间累积
+          的队列，同时保持 cwnd 增益为 739。当在途字节降至至多 1.0x
+          BDP 且至少经过 1 个 RTT（AND 门），或经过 4x-min_rtt 超时
+          后退出。
+
+     ProbeBW：稳态循环 8 相位 pacing 增益表（默认模式：[1.25, 0.75,
+          1.0, 1.0, 1.0, 1.0, 1.0, 1.0]），cwnd 增益为 512（2.0x）。
+          探测上升相位（1.25x）在经过完整 RTT 且（观察到丢包或发送时
+          在途达到 1.25x BDP）时退出；排空相位（0.75x）在经过完整 RTT
+          且在途降至 1.0x BDP，或 4x-min_rtt 超时后退出；巡航相位
+          （1.0x）经过一个 RTT 后推进。入口相位偏移按流在 7 个相位内
+          随机化以去同步探测。在有损路径上，LT-BW 抑制器在 lt_use_bw
+          置位时将 pacing 增益强制为 1.0x（见 8.7 节）。不存在
+          PROBE_RTT 模式。
+
+8.3.  Pacing 控制器
+
+     UCP 通过令牌桶 pacing 控制器强制执行拥塞控制计算出的 pacing
+     速率。所有出站报文（紧急重传除外）在发送前必须获取令牌。
+
+     Pacing 速率：pacing 速率（字节/秒）由当前瓶颈带宽估计 bw（定点，
+     24 位缩放）与当前 pacing 增益计算得出：
+
+         rate = ((bw x MSS x pacing_gain) >> 8) x 990000 >> 24
+
+     其中 bw x MSS 将定点带宽换算为字节/秒，>> 8 施加 8 位增益缩放
+     （BBR_SCALE），因子 990000（= USEC_PER_SEC x 99/100）施加 99/100
+     pacing 余量，>> 24 从 24 位带宽缩放换算回来。结果以套接字最大
+     pacing 速率为上限。在观察到首个 RTT 之前，pacing 速率由初始 cwnd
+     与 srtt（或默认 RTT 1000 us）以 739 增益初始化。
+
+     令牌桶参数：
+
+     Parameter    Description
+     -----------  ---------------------------------
+     _rate        每秒令牌数 = PacingRate
+     _capacity    max(sendQuantum, minPacketCap,
+                  速率 x 桶时长（10 ms））
+     _tokens      当前令牌数（永不为负；
+                  上限为 _capacity）
+
+     操作：
+     - TryConsume(packet_size)：先补充令牌，若 _tokens >= 所需数量，
+       扣除令牌并返回 true；否则返回 false。
+     - ForceConsume(packet_size)：仅用于紧急重传。先补充令牌，再将
+       任何正令牌清零。它不扣除报文大小，也永远不会使 _tokens 为负。
+
+     因为令牌永不为负，所以不存在需要偿还的债务：ForceConsume 只是
+     清空令牌桶，补充令牌恢复到所需数量后，后续 TryConsume 调用即可
+     恢复发送。
+
+     TSO 段数：TSO 段目标由 pacing 速率推导，介于最小 1 或 2 段
+     （取决于 pacing 速率与抖动估计；抖动超过 4 ms 时减小除数）与最大
+     127 段之间。这使每次发送突发与 pacing 速率保持一致。
+
+8.4.  测地线 RTT 估计（G1/G2/G3）
+
+     标量测地线结构估计器（G1/G2/G3）跟踪真实 RTT，无协方差矩阵、无
+     预测步、无自适应增益。估计器对每个 RTT 观测值 z（微秒，以 10 位
+     定点缩放存储，x_est = z << 10）的操作如下：
+
+     冷启动：首个样本时 x_est = z，p_est = 1000，qdelay_avg = 0，
+         jitter = max(rtt >> 2, 1)，sample_cnt = 1。第二个样本时，若
+         min_rtt 已知且 x_est > min_rtt << 10，则 x_est 钳制为
+         min_rtt << 10。
+
+     G1 —— 向下吸收（innovation <= 0）：
+         x_est = min(x_est, z)
+         （传播分量的结构性下降被瞬时吸收；估计值不得增大）
+
+     G2 —— 有界向上增长（innovation > 0）：
+         x_est = min(x_est + x_est * 122/1000, z)
+         （每 RTT 12.2% 几何增长，上限为观测值 z，防止排队时延导致
+         估计值无界膨胀）
+
+     陈旧拉回：若自上次 min_rtt 更新以来已过 128 轮（KCC_STALENESS_
+         RNDS）且 x_est 处于或低于 1.10 x min_rtt，则 x_est 拉回至
+         min_rtt 的 95% 并重新开始观测窗口。这防止 G3 未触发时估计值
+         漂移。
+
+     抖动 EWMA：raw = |z - x_est| >> 10；
+         jitter = (sample_cnt > 1) ? (7 * jitter + raw) / 8 : raw，
+         上限为 max(min_rtt, 500000 us)。
+
+     排队时延 EWMA：inst = max((z - x_est) >> 10, 0)；
+         qdelay_avg = (sample_cnt == 1) ? inst :
+         (7 * qdelay_avg + inst) / 8。
+
+     收敛代理 p_est：标量代理（初值 1000，下限 10，上限 1000000）跟踪
+         估计器置信度：
+         - 衰减：当 x_est <= min_rtt x 21/20 且无待处理 G3 确认时，
+           delta = (p_est - 10) >> 4；p_est -= max(delta, 1)（趋向
+           下限）。
+         - 增长：当 x_est > min_rtt x 11/10 时，delta = (1000 - p_est)
+           >> 3；p_est += max(delta, 1)，上限 1000000（趋向初值）。
+
+     G3 —— 路径变化检测（双阈值连续计数）：
+         快路径：x_est >= 1.10 x min_rtt 连续 6 个样本
+         慢路径：x_est >= 1.05 x min_rtt 连续 7 个样本
+         确认后，min_rtt 提升至 x_est >> 10，计数器重置，p_est 重置为
+         1000。阈值按 min_rtt 分档（见 8.5 节）。
+
+     滤波后的 RTT（x_est）供 MinRtt 跟踪（8.5 节）与 BDP 的
+     model_rtt 计算（8.6 节）使用。
+
+8.5.  测地线 MinRTT 跟踪（无 PROBE_RTT）
+
+     KCC 2.0 没有 PROBE_RTT 模式，也没有探测间隔：MinRtt 由测地线
+     估计器持续跟踪。
+
+     分档 G3 设计：
+     - min_rtt < 5 ms：估计器锁定（一次性）。G3 路径增长检测禁用——
+       低于 5 ms 的光纤路径不可能出现真实 RTT 阶跃。
+     - 5 ms <= min_rtt < 7.5 ms：仅运行快 G3 路径（1.10x，6 个连续
+       样本）。
+     - min_rtt >= 7.5 ms：快、慢 G3 路径均运行。
+
+     传统跟踪：无待处理 G3 确认时，min_rtt 遵循经典规则：不高于
+     min_rtt 的新样本被吸收（含 75% 粘性阈值：低于 min_rtt 25% 的
+     样本立即下降，处于 [25%, 75%) 的样本需连续 5 个合格样本，以及将
+     min_rtt 钳制为不低于 srtt 90% 的 SRTT 防护）；轮边界上低于粘性
+     阈值的样本将 min_rtt 降低 25%。
+
+     测地线接管（快速下降）：估计器至少有 5 个样本后，若 x_est >> 10
+     连续 5 个 ACK 低于 min_rtt 的 95%，则 min_rtt 设为 x_est >> 10
+     并重新开始观测窗口。
+
+     不存在周期性吞吐量惩罚、无探测持续时间、无探测定时器。
+
+8.6.  BDP 目标与拥塞窗口更新
+
+     Model RTT：测地线估计器至少有 KCC_MIN_SAMPLES（5）个样本后，
+     model_rtt = min(x_est >> 10, min_rtt)；否则 model_rtt = min_rtt。
+
+     BDP 目标：给定带宽估计 bw 与增益 gain 的目标在途字节数为：
+
+         bdp = ceil(bw x model_rtt x gain >> 8 >> 24)
+         inflight = bdp + quantization_budget
+
+     其中 bw 与 model_rtt 使用各自的定点缩放，>> 8 施加 8 位增益缩放，
+     >> 24 从 24 位带宽缩放换算回来。若 model_rtt 未设置（~0U），bdp
+     回退为 INITIAL_CWND_PACKETS（10）个段。量化预算增加 3 x
+     tso_segs_goal，取整为偶数段，并在 PROBE_BW 探测上升相位额外增加
+     2 段。
+
+     每 ACK 的 cwnd 更新（kcc_set_cwnd）：
+
+         target = bdp(bw, cwnd_gain)
+         if (bw > 0 && min_rtt >= 7500 us)
+             target += ack_agg_cwnd                （8.8 节）
+         target = quantization_budget(target)
+         if (full_bw_reached)
+             cwnd = min(cwnd + acked, target)
+         else if (cwnd < target || delivered < INITIAL_CWND_PACKETS)
+             cwnd += acked                         （慢启动）
+         cwnd = max(cwnd, 4)
+         snd_cwnd = min(cwnd, clamp)
+
+      慢启动行为：在 full_bw_reached 之前，cwnd 每 ACK 按新确认段数增长
+      直至 BDP 目标，带 10 报文闩锁（累计交付不足 10 报文时即使已达
+      目标仍增长，与 tcp_kcc.c 一致）；流不会停留在
+      INITIAL_CWND_PACKETS 等待更多 RTT 证据；cwnd 在 ACK 允许下尽快
+      达到 BDP 目标，任意时刻最多可有 min(cwnd, 对端窗口) 个段在途
+     （5.5 节）。
+
+     丢包处理：发生丢包时，cwnd 先按丢包段数减少（绝对下限为 1）。进入
+     恢复时启用报文守恒（cwnd = inflight + acked）并保存先前 cwnd；
+     离开恢复时将 cwnd 恢复至至少保存值。
+
+8.7.  长期带宽（LT-BW）抑制器
+
+     LT-BW 机制检测持续受丢包限制（非瓶颈限制）的路径，并强制 PROBE_BW
+     采取保守行为：
+
+     - 采样：当某轮丢包/投递比超过 KCC_LT_LOSS_THRESH（50/256，约
+       20%）时开始 LT-BW 采样。有效 LT 间隔至少需要 KCC_LT_INTVL_MIN_
+       RTTS（4）个 RTT。
+     - 更新：有效间隔结束时，若当前带宽处于存储 lt_bw 的
+       KCC_LT_BW_RATIO（1/8）相对与 KCC_LT_BW_DIFF（500 B/s）绝对
+       容差内，则以权重 KCC_LT_BW_EMA（1/2）的 EMA 更新存储值：
+           lt_bw = (1 - 1/2) x lt_bw + (1/2) x interval_delivery_rate
+     - 过期：LT-BW 活动在 KCC_LT_BW_MAX_RTTS（48）个 RTT 后自动过期。
+     - 效果：LT-BW 活动期间 lt_use_bw 置位，PROBE_BW pacing 增益强制
+       为 1.0x（256），移除 1.25x 探测上升突发与 0.75x 排空相位。这
+       防止有损、受缓冲限制路径上的流过度探测而为其他流增加排队时延。
+
+8.8.  双窗口 ACK 聚合
+
+     ACK 压缩（由于接收方 CPU 调度或中断合并，多个 ACK 突发到达）会在
+     cwnd 完全由 BDP 推导时暂时低估在途使用量。KCC 2.0 用两个轮换窗口
+     测量聚合伪象：
+
+     - 每个 ACK 周期累加 ack_epoch_acked；周期带宽预期总量为
+       expected = (bw x epoch_us) >> 24。extra_acked = max(ack_epoch_
+       acked - expected, 0)，上限为当前 cwnd。
+     - 两个窗口槽（extra_acked[2]）每 KCC_AGG_WINDOW_ROTATION_RTTS
+       （5）个 RTT 轮换；轮换时非活动槽重置。
+     - cwnd 奖励计算如下：
+           aggr = (kcc_extra_acked_gain x max(extra_acked[0],
+                  extra_acked[1])) >> 8
+           ack_agg_cwnd = min(aggr, (bw x 100 ms) >> 24)
+     - 奖励仅在全部满足以下条件时加入 BDP 目标：kcc_extra_acked_gain
+       > 0、full_bw_reached、且 min_rtt >= 7500 us。低 RTT 光纤路径上
+       聚合伪象可忽略，不施加奖励。
+
+8.9.  跨连接卡尔曼滤波器（KF，可选）
+
+     全局卡尔曼滤波器（kcc_kf_enable = 0 默认禁用，运行时可选开启）在
+     KCC 连接间共享带宽估计，为新连接提供快速启动：
+
+     - 滤波器：KF 是标量滤波器，具有固定过程噪声下限（每样本
+       P += 1 << 20）与测量噪声 R = (z x r_pct / 100)^2，其中 r_pct
+       首个样本为 15%（KF_STARTUP_R_PCT），其后为 5%
+       （KF_STEADY_R_PCT）。新息门为 chi2 检验：当 nu2 x 100 >
+       384 x S（KCC_KF_CHI2 = 384/100）时拒绝新息，其中 nu2 为新息
+       平方、S 为预测方差。
+     - 折扣：共享公平份额估计在使用前按 kcc_kf_discount（50/100）
+       折扣。
+     - 快速启动：滤波器启用时，折扣初始带宽设置初始 pacing 速率，
+       初始 cwnd 钳制在 [max(cwnd, INITIAL_CWND_PACKETS), 20000] 段
+       （KCC_KF_CWND_SEGS_MAX）。连接因此以先前观测到的跨连接带宽
+       启动，而非从头学习路径。
+     - STARTUP 下限：STARTUP 期间，KF 值还可提供 pacing 速率下限，
+       使新连接在与其他已收敛流共享路径时不会探测不足。
+
+8.10.  ECN 标记（默认禁用）
+
+     ECN 处理默认禁用（kcc_ecn_enable = 0），为运行时可选开启。启用后：
+
+     - CE 标记段经 EWMA（KCC_ECN_EWMA_RETAINED/TOTAL = 3/4）跟踪，
+       每 ACK 空闲衰减因子 31/32，下限为 4。
+     - 当排队时延估计 qdelay_avg 超过拥塞阈值且存在 CE 标记时，cwnd
+       增益最多降低 kcc_ecn_backoff（20/100）。
+
+     由于该算法主要基于时延模型，ECN 仅在显式启用时作为附加拥塞信号。
+
+8.11.  FEC/NAK 与拥塞控制的集成
+
+     FEC 恢复与 NAK 观测是 UCP 用户态协议特性，为拥塞控制引擎（源于
+     tcp_kcc.c）提供投递与丢包样本。它们本身不是 tcp_kcc.c 内核模块
+     的一部分，但通过提供高保真投递样本提升拥塞控制的样本精度，改善
+     带宽与时延估计的准确性。
+
+     FEC 馈送：当报文经 FEC 恢复（在任何重传需要之前通过 Reed-Solomon
+     解码实现零延迟修复）时，投递事件作为正常 ACK 报告给拥塞控制器。
+     经 FEC 恢复投递的字节计入投递率样本，防止在 FEC 成功掩盖的丢包
+     事件期间带宽估计下降。这使 UCP 能够在原本会导致吞吐量崩溃的丢包
+     突发期间保持完整 pacing 速率。
+
+     NAK 馈送：NAK 报文仅报告缺失序列号，不携带 EchoTimestamp。NAK
+     丢包样本数据改善长期带宽 EWMA 估计。此外，NAK 置信度档位
+     （低/中/高）与队列深度相关：高置信度的重复 NAK 提示持续排队，
+     拥塞控制据此保持 LT 带宽估计保守（有损间隔不用于 LT 更新）。
+
+     FEC 与 NAK 馈送既独立又互补于基于 ACK 的主要投递样本路径。它们
+     不替代基于 ACK 的估计，而是增强之，尤其适用于反向路径 ACK 稀疏
+     的非对称路由、高丢包或单向流量路径。
+
+
+9.  动态 CID 迁移
+
+9.1.  CID 生成
+
+       连接 ID（CID）是唯一标识 UCP 连接的 32 位随机值。不同于按五元组
+       （src_ip, src_port, dst_ip, dst_port, protocol）解复用连接的 TCP，
+       UCP 以 CID 作为主要解复用键。
+
+       CID 由连接发起方（客户端）通过独立于 ISN 的 CSPRNG 生成，并包含
+       在 SYN 报文中。服务器提取 CID 并将其用于双向的所有后续报文。CID
+       以明文形式在每个报文头部传输——它纯粹是解复用标识符，而非安全
+       凭据。安全要求由上层 DTLS 加密隧道解决（见第 11 节）。
+
+9.2.  连接迁移
+
+       UCP 支持跨网络层变化的连接迁移。由于连接由 CID 而非 IP/端口元组
+       标识，端点可更改 IP 地址或端口而不中断已建立的连接。
+
+       迁移机制：若收到的报文源地址与当前存储地址不同，m_remote 更新
+       为该报文的源地址。所有协议状态（序列号、KCC 拥塞控制参数、
+       pacing 令牌、FEC 组）在迁移期间持续保留。
+
+       PATH_CHALLENGE 迁移验证：为防止通过地址欺骗劫持连接，UCP 采用
+       PATH_CHALLENGE / PATH_RESPONSE 机制进行迁移验证：
+
+       1. 检测：当服务器从现有 CID 的新源 IP 地址或端口收到报文时，它
+          将新地址记录到 m_pendingRemote，但不立即接受其进行数据传输。
+
+       2. 挑战：服务器生成随机 8 字节 PATH_CHALLENGE 令牌，并以 DATA
+          报文（载荷长度 = 8 字节，Flags = NeedAck）发送到新地址。
+
+       3. 响应：客户端必须（MUST）提取 8 字节令牌并作为 PATH_RESPONSE
+          DATA 报文（载荷长度 = 8 字节，Flags = NeedAck）在
+          PATH_CHALLENGE_TIMEOUT_MULTIPLIER x RTO（默认 3 x RTO）内
+          回显。
+
+       4. 验证：收到携带期望令牌的 PATH_RESPONSE 后，服务器接受新地址
+          为 m_remote，后续所有数据发送到已验证地址，并清除
+          m_pendingRemote。
+
+       5. 超时：若 PATH_CHALLENGE_TIMEOUT_MULTIPLIER x RTO 到期仍未收
+          到 PATH_RESPONSE，新地址被拒绝，清除 m_pendingRemote，来自被
+          拒绝地址的报文必须在 PATH_CHALLENGE_REJECT_COOLDOWN_MICROS
+          （默认 1 秒）内静默丢弃，连接继续使用原地址。
+
+       PATH_CHALLENGE 迁移参数：
+
+       Parameter                          Default      Description
+       ------------------------------     ---------    -------------------
+       PATH_CHALLENGE_TIMEOUT_            3            应用于当前 RTO 的
+       MULTIPLIER                                      倍数
+       PATH_CHALLENGE_REJECT_             1,000,000    在重新接受被拒绝
+       COOLDOWN_MICROS                                 地址报文之前的
+                                                       冷却时间（us）
+       PATH_CHALLENGE_TOKEN_LENGTH        8            随机令牌字节数
+
+       安全性质：
+       - 路径外攻击者无法完成 PATH_CHALLENGE 验证，因为他们收不到挑战
+         令牌。
+       - 能观察到 PATH_CHALLENGE 令牌的路径内攻击者可重定向连接。DTLS
+         （11.1 节）通过加密包括令牌在内的所有报文内容防止此问题。
+       - 3xRTO 超时在及时接受迁移与高抖动路径上的虚假超时之间取得平衡。
+
+9.3.  动态 CID 轮换
+
+       为防止长期连接可关联性并缓解路径外 RST 注入攻击，UCP 每 60 秒
+       轮换一次 CID。
+
+       CID 轮换参数：
+
+       Constant                       Value            Description
+       ---------------------------    -------------    ------------------
+       CID_ROTATE_INTERVAL_MICROS     60,000,000       轮换间隔（60s）
+       CID_RETIRE_AGE_MICROS          120,000,000      旧 CID 生命周期
+                                                       （120s）
+       CID_ROTATE_SEQUENCE_MARKER     0xFFFFFFFF       为 CID 轮换 DATA
+                                                       报文保留的序列号
+
+       发送方轮换逻辑：
+       1. 每 CID_ROTATE_INTERVAL_MICROS（60s），生成新的随机 32 位 CID。
+       2. 发送 Sequence=0xFFFFFFFF、4 字节载荷携带新 CID 的 DATA 报文。
+       3. 将新 CID 加入 extra_cids 集合。
+       4. 经过 CID_RETIRE_AGE_MICROS（120s）后清空 extra_cids。
+
+       接收方处理：
+       1. 通过 Sequence=0xFFFFFFFF 识别 CID 轮换报文。
+       2. 从 4 字节载荷中提取新 CID。
+       3. 通过 AddExtraCid() 将新 CID 加入有效集合，并通过
+          RemoveExtraCid() 移除源报文的 CID。
+       4. 正常处理捎带 ACK。
+
+       在 CID_RETIRE_AGE_MICROS（120s）重叠期内，新旧 CID 均有效，允许
+       使用旧 CID 的在途报文安全到达。
+
+       CID 轮换安全：CID 轮换 DATA 报文必须（MUST）经初始三次握手认证：
+       接收方必须（MUST）仅接受来自已完成握手并证明持有正确 ISN 与连接
+       ID 的远端端点的 CID 轮换。携带 CID_ROTATE_SEQUENCE_MARKER
+       （0xFFFFFFFF）且来自未认证源的报文必须（MUST）被静默丢弃。这可
+       防止路径外攻击者注入恶意 CID 轮换以重定向或劫持现有连接。此外，
+       发起 CID 轮换之前，发送方应当（SHOULD）通过 PATH_CHALLENGE 探测
+       验证当前路径的可达性。
+
+9.4.  CID 冲突处理
+
+       CID 冲突发生在两个不同客户端独立选择相同 32 位 CID 并尝试连接到
+       同一服务器时。
+
+       冲突概率：32 位 CID 空间（2^32 ~ 4.29e9）上 N = 1,000,000 个
+       并发连接时，预期冲突对数为 N^2 / (2 * 2^32) ~ 116。要使单连接
+       冲突概率约 0.5%，连接数需满足 N << sqrt(0.005 × 2 × 2^32) ~ 6,000。
+       服务器通过下述 RST 处理解决任何实际冲突。
+
+       服务器冲突处理：
+       1. 服务器收到 CID = C 的 SYN。
+       2. 服务器在其活动连接表中查找 CID = C。
+       3. 若 CID = C 已在使用（Established 或握手状态），服务器向新
+          SYN 的源发送 RST（Type=0x07），指示该 CID 不可用。现有连接
+          不被修改。
+       4. 客户端收到 RST，生成新的随机 CID 并重试连接。
+
+
+10.  DPLPMTUD
+
+10.1.  概述
+
+       UCP 按照 [RFC8899] 中描述的方法实现数据报分片层路径 MTU 发现
+       （DPLPMTUD）。该机制发现可无 IP 分片穿越路径的最大报文大小，这对
+       FEC 组编码至关重要——组内所有 DATA 报文必须具有相同载荷长度。
+       DPLPMTUD 在 UCP 层运行，不依赖经常被防火墙与中间盒过滤的 ICMP
+       "Packet Too Big" 消息。
+
+10.2.  探测报文规范
+
+       PMTU 探测是特殊的 DATA 报文：其载荷填充至目标探测大小，置位
+       NeedAck 标志（请求立即确认），Retransmit 标志为清零（探测是新
+       传输）。
+
+       探测确认：若发送方在 3 x SRTT 内收到 ACK，则探测大小视为有效
+       （报文穿越了路径）。若 3 x SRTT 内未收到 ACK，则探测视为丢失
+       （对路径而言过大）。
+
+       探测超时使用复合超时，防止 ProbeBW 上升相位期间 SRTT 出现瞬时
+       膨胀时发生虚假超时分类：
+
+           probe_timeout = max(3 * SRTT, MinRtt * 5)
+
+       MinRtt * 5 下限提供稳定性。
+
+10.3.  PMTU 搜索算法
+
+       UCP 在 [BASE_PLPMTU, MAX_PLPMTU] 范围内使用二分搜索：
+
+       Parameter               Default      Description
+       --------------------    ---------    ----------------------
+       BASE_PLPMTU             1200         最小载荷大小
+       MAX_PLPMTU              1500         最大载荷大小
+       MtuProbeTimeoutMicros   10,000,000   探测确认超时（10s）
+
+       二分搜索过程（每种大小单次探测）：
+       1. 初始化：lo = BASE_PLPMTU，hi = MAX_PLPMTU，pmtu =
+          BASE_PLPMTU。
+       2. 在 mid = (lo + hi) / 2 处探测。
+       3. 以大小 mid 发送一个探测。
+       4. 若被确认 -> pmtu = mid，lo = mid + 1。
+       5. 若超时（MtuProbeTimeoutMicros，10s）-> hi = mid - 1。
+       6. 重复步骤 2-5 直至 lo > hi（或 hi - lo <= 8）。
+       7. 最终 PMTU = pmtu。转换到 SEARCH_COMPLETE 状态。
+
+       稳态运行期间，发送方周期性探测更大尺寸（MtuProbeIntervalMicros，
+       600s）以检测路径 MTU 增长（例如路由变化之后）。
+
+       探测 pacing：PMTU 探测限制为每 RTT 一次，避免在二分搜索阶段淹没
+       路径。
+
+10.4.  黑洞处理
+
+       PMTU 黑洞处理：若探测超时（MtuProbeTimeoutMicros 内未收到 ACK），
+       上限（probeMax）降低，二分搜索从更小尺寸继续。没有独立的黑洞冷却
+       定时器或 PMTU 历史；通过二分搜索本身收敛到可用 MTU。
+
+
+11.  安全考虑
+
+11.1.  DTLS 兼容性
+
+       UCP 本身不提供加密、认证或完整性保护。所有 UCP 报文字段均明文
+       传输。
+
+       为确保安全通信，UCP 必须（MUST）分层于 DTLS（数据报传输层安全）
+       [RFC9147] 之上。推荐做法：应用使用在传输前将 UCP 数据报包装进
+       DTLS 记录的 ITransport 实现。DTLS 提供机密性、完整性与端点认证。
+       UCP 基于 CID 的连接管理在 DTLS 会话内透明运行。
+
+       DTLS 活动时：
+       - UCP 公共头部（含 ConnId）与载荷一起被加密，防止被动连接跟踪。
+       - 路径外攻击者的 RST 注入被阻止，因为 RST 报文将无法通过 DTLS
+         认证。
+       - CID 轮换（9.3 节）即使不使用 DTLS 也提供针对连接跟踪的纵深防御。
+
+11.2.  RST 伪造与路径外攻击
+
+       无 DTLS 时，UCP 易受 RST 伪造攻击。任何知道活动 ConnId 的第三方
+       都可发送伪造 RST 报文（12 字节：Type=0x07, ConnId=目标）终止
+       连接。
+
+       风险评估：
+       - 攻击者必须知道 32 位 ConnId（暴力搜索空间：2^32 ~ 42.9 亿）。
+       - 攻击者还必须能够注入源地址与其中一个连接端点匹配的伪造 UDP
+         报文。
+       - 路径内攻击者（能观察连接者）可从任何报文提取 ConnId 并立即
+         发送伪造 RST。
+
+       缓解措施：
+       - CID 轮换将攻击窗口缩短为每个 CID 60 秒，之后连接切换到新标识符。
+       - DTLS（11.1 节）完全阻止 RST 注入。
+       - 未来版本可能（MAY）实现每 RST nonce 验证，即对端在数据报文中
+         包含必须回显到有效 RST 中的加密令牌。
+
+11.3.  CID 预测抵抗
+
+       连接 ID 由系统熵源生成（C++ 为 random_device，C# 为
+       RNGCryptoServiceProvider），无可预测模式。攻击者无法猜测未来
+       CID 以先发制人劫持或终止连接。CID 轮换进一步降低了任何已学习
+       CID 的价值。
+
+11.4.  反射放大
+
+       UCP 实施以下反放大措施：
+       - 服务器不得（MUST NOT）对无效握手报文（例如 ConnId=0 或非法
+         标志组合的 SYN）作出任何响应。无效报文被静默丢弃。
+       - RST 生成严格受限：绝不对收到的 RST 发送 RST 响应。绝不对到达
+         已关闭/陈旧连接的报文发送 RST。
+       - 服务器初始响应（SYNACK）与客户端 SYN 大小相当（SYNACK 约 20
+         字节 vs SYN 约 16 字节），无放大机会。
+       - 陈旧 PCB 清理（4.4 节）抑制对已关闭连接迟到报文的所有响应。
+
+11.5.  CID 迁移安全
+
+       CID 迁移安全由两个互补机制保证：
+
+       1. PATH_CHALLENGE / PATH_RESPONSE（9.2 节）：确保新地址确实由
+          合法端点控制（能够接收并回显服务器生成的挑战令牌）。该机制
+          概念上类似 QUIC 的 PATH_CHALLENGE [RFC9000]，但针对 UCP 基于
+          DATA 的帧格式做了适配。
+
+       2. CID 轮换（9.3 节）：限制静态 CID 的暴露窗口。每 60 秒生成新
+          CID，旧 CID 在 120 秒退役期内仍对在途报文有效。轮换由已完成
+          三次握手认证的发送方发起，防止路径外攻击者注入轮换报文。
+
+       这两个机制协同工作：PATH_CHALLENGE 验证路径可达性，而 CID 轮换
+       限制长期可关联性。在 DTLS 加密隧道内使用时，令牌与 CID 值均被
+       加密，为抵御路径外与中间人攻击者增加额外保护层。
+
+
+12.  IANA 考虑
+
+       本文档无 IANA 操作。UCP 是运行于 UDP 之上的私有协议，不需要注册
+       端口、协议号或任何其他 IANA 分配。实现可使用任何可用 UDP 端口。
+
+       若此协议的未来版本寻求 IANA 注册，适用以下考虑：
+       - 可向 IANA 请求一个 UDP 端口号作为 UCP 默认端口。
+       - 若希望获得专用 IP 协议号，则需要从"协议号"注册表获得 IANA
+         分配。
+       - 本规范不涉及 MIME 类型、服务名称或其他 IANA 注册表。
+
+
+13.  常量与默认值
+
+       本节列出所有协议常量及其默认值。数值取自参考实现（UcpConstants.cs）。
+
+13.1.  时间单位常量
+
+       Constant               Value        Description
+       --------------------   ---------    ----------------------------
+       MICROS_PER_MILLI       1000         1 ms = 1000 微秒
+       MICROS_PER_SECOND      1000000      1 秒 = 1,000,000 微秒
+       NANOS_PER_MICRO        1000         1 微秒 = 1000 纳秒
+
+13.2.  报文格式常量
+
+       Constant                      Value     Description
+       ------------------------      --------  --------------------------
+       MSS                            1220     最大段长（字节）
+       COMMON_HEADER_SIZE               12     Type + Flags + CID +
+                                               Timestamp
+       DATA_HEADER_SIZE                 20     12 + SeqNo + FragmentInfo
+       DATA_HEADER_SIZE_WITH_ACK        36     20 + ACK 字段（不含
+                                               SACK 块）
+       ACK_FIXED_SIZE                   28     SACK 块之前的固定 ACK
+                                               （字节）
+       MAX_PAYLOAD_SIZE               1200     MSS - DATA_HEADER_SIZE
+       SACK_BLOCK_SIZE                   8     4 字节 Start + 4 字节 End
+       UINT48_MASK        0x0000FFFFFFFFFFFF
+
+13.3.  连接管理参数
+
+     连接时序通过每个连接的 UcpConfiguration 配置（C# UcpConfiguration 镜像）；
+     没有硬编码的线上常量。默认值（ucp_configuration.h / UcpConfiguration.cs）：
+
+       Parameter                          Default        Description
+       ----------------------------      ------------   -----------------
+       ConnectTimeoutMilliseconds           5,000       总握手超时（ms）
+       MaxRetransmissions                       10      最大重试次数
+       KeepAliveIntervalMicros            1,000,000     Keepalive 间隔（1s）
+       DisconnectTimeoutMicros            4,000,000     断开检测（4s）
+
+13.4.  窗口与缓冲区常量
+
+       Constant                           Default         Description
+       ------------------------------     -------------   ---------------
+       DEFAULT_RECV_WINDOW_PACKETS           4096         接收窗口报文数
+       DEFAULT_RECV_WINDOW_BYTES         4,997,120       接收窗口（约
+                                                         5 MB）
+        INITIAL_CWND_PACKETS                    10        回退初始 cwnd（段数），
+                                                          仅在尚无 RTT 模型时使用
+       DEFAULT_SEND_BUFFER_BYTES        33,554,432       发送缓冲区
+                                                         （32 MB）
+       DEFAULT_DELAYED_ACK_TIMEOUT             100        延迟 ACK 超时
+       MICROS                                             （us）
+
+13.5.  RTO 常量
+
+       Constant                               Value      Description
+       ------------------------------------   --------   ----------------
+       MIN_RTO_MICROS                           50000    最小 RTO（50ms）
+       DEFAULT_RTO_MICROS                       50000    默认 RTO（50ms）
+       INITIAL_RTO_MICROS                       50000    初始 RTO（50ms）
+       DEFAULT_MAX_RTO_MICROS               15,000,000   默认最大 RTO（15s）
+       MAX_RTO_MICROS                       60,000,000   绝对最大 RTO（60s）
+       RTO_BACKOFF_FACTOR                         1.2    RTO 退避因子
+       MAX_RETRANSMISSIONS                         10    最大重传次数
+       RTO_RETRANSMIT_BUDGET_PER_TICK               4    每滴答 RTO 重传
+                                                        预算
+       URGENT_RETRANSMIT_BUDGET_PER_RTT          8192    每 RTT 紧急重传
+                                                         预算
+       RTT_SMOOTHING_DENOM                          8    alpha = 1/8
+       RTT_VAR_DENOM                                4    beta = 1/4
+       RTO_GAIN_MULTIPLIER                          4    K = 4
+
+13.6.  KCC 拥塞控制常量（与 tcp_kcc.c 2.0 完全一致）
+
+       拥塞控制状态机与增益是 tcp_kcc.c 中的固定常量（非运行时 sysctl）：
+
+       Constant                               Value      Description
+       ------------------------------------   --------   --------------------
+       KCC_BW_SCALE                           24         带宽定点缩放位数
+       KCC_BW_UNIT                            1<<24      带宽单位（1.0）
+       KCC_BBR_SCALE                          8          增益定点缩放位数
+       KCC_BBR_UNIT                           256        增益单位（1.0x）
+       KCC_HIGH_GAIN                          739        STARTUP pacing 与
+                                                         cwnd 增益（2.887x，
+                                                         = 256*2885/1000 + 1）
+       KCC_DRAIN_GAIN                         88         DRAIN pacing 增益
+                                                         （0.344x，
+                                                         = 256*1000/2885）
+       KCC_CWND_GAIN                          512        PROBE_BW cwnd 增益
+                                                         （BBR_UNIT 下 2.0x）
+       KCC_PACING_INIT_GAIN                   739         初始 pacing 增益
+                                                          （2.887x，预计算）
+       KCC_CYCLE_LEN                          8           PROBE_BW 循环相位数
+       KCC_PACING_GAIN_CYCLE                  {320,192,   8 相位 PROBE_BW
+                                               256,256,   pacing 增益表（BBR_UNIT
+                                               256,256,   单位，即 {1.25, 0.75,
+                                               256,256}   1.0 x6}）
+       KCC_PACING_SAFETY_NUM/DEN              99/100     pacing 安全余量因子
+       KCC_FULL_BW_THRESH                     320        STARTUP 退出增长
+                                                         （1.25x）
+       KCC_FULL_BW_CNT                        3           退出前增长不足
+                                                          1.25x 的轮数
+       KCC_BW_RT_CYCLE_LEN                    10          带宽滑动窗口最大
+                                                          值滤波器（轮）
+       KCC_CWND_MIN_TARGET                    4           最小 cwnd（段）
+       KCC_CWND_ABSOLUTE_MIN                  1           丢包下限（段）
+       KCC_PROBE_CWND_BONUS                   2           探测上升相位 cwnd
+                                                          奖励（段）
+       KCC_BDP_MIN_RTT_US                     1           BDP min_rtt 下限
+                                                          （us）
+       KCC_TSO_HEADROOM_MULT                  3           TSO 余量（skbs）
+       KCC_TSO_MAX_SEGS                       127         TSO 段上限
+       KCC_QDELAY_CLEAN_BP                    1000        干净 qdelay 阈值
+                                                          （min_rtt 的 10%）
+       KCC_QDELAY_CONG_BP                     2500        拥塞 qdelay 阈值
+                                                          （min_rtt 的 25%）
+       KCC_QDELAY_FLOOR_US                    500         qdelay 阈值下限
+       KCC_RTT_MIN_FLOOR_US                   1           RTT 样本下限（us）
+       KCC_SRTT_SHIFT                         3           SRTT 平滑移位
+       KCC_DEFAULT_RTT_US                     1000        回退 RTT（us）
+
+13.6a.  测地线估计器常量（与 tcp_kcc.c 完全一致）
+
+       Parameter                          Default      Description
+       ---------------------------------  -----------  --------------------------
+       KCC_SCALE                          1024         x_est 定点缩放
+                                                       （KCC_SCALE_SHIFT = 10）
+       KCC_G2_GROWTH_NUM/DEN              122/1000     G2 几何增长（每 RTT
+                                                       12.2%）
+       KCC_G3_FAST_TH_NUM/DEN             11/10        G3 快路径阈值（1.10x）
+       KCC_G3_SLOW_TH_NUM/DEN             21/20        G3 慢路径阈值（1.05x）
+       KCC_G3_FAST_CNT                    6            G3 快路径连续计数
+       KCC_G3_SLOW_CNT                    7            G3 慢路径连续计数
+       KCC_LOCK_THRESH_US                 5000         min_rtt < 5 ms：G3 锁定
+       KCC_FAST_ONLY_THRESH_US            7500         min_rtt 5-7.5 ms：仅快路径
+       KCC_PD_NOISE_GATE_NUM/DEN          95/100       测地线接管门
+       KCC_STALENESS_RNDS                 128          G3 观测窗口（轮）
+       KCC_MIN_SAMPLES                    5            接管前所需样本数
+       KCC_P_EST_INIT                     1000         收敛代理初值
+       KCC_P_EST_FLOOR                    10           收敛代理下限
+       KCC_P_EST_MAX                      1000000      收敛代理上限
+       KCC_P_EST_DECAY_SHIFT              4            p_est 衰减移位
+       KCC_P_EST_GROWTH_SHIFT             3            p_est 增长移位
+       KCC_RTT_SAMPLE_MAX_US              500000       RTT 样本上限（us）
+       KCC_EWMA_JITTER_NUM/DEN            7/8          抖动 EWMA 权重
+       KCC_EWMA_QDELAY_NUM/DEN            7/8          Qdelay EWMA 权重
+       KCC_JITTER_SEED_SHIFT              2            冷启动抖动种子
+       KCC_MINRTT_STICKY_NUM/DEN          75/100       Sticky min_rtt 阈值
+       KCC_MINRTT_FAST_FALL_DIV           4            快速下降除数
+       KCC_MINRTT_FAST_FALL_CNT           5            快速下降连续计数
+       KCC_MINRTT_SRTT_GUARD_NUM/DEN      90/100       SRTT 防护比率
+
+13.6b.  KCC 模块参数 —— 状态机（与 tcp_kcc.c 完全一致）
+
+       以下为 Linux 内核模块的运行时模块参数（经 /proc/sys/net/kcc/
+       写入）：
+
+       Parameter                          Default      Description
+       ---------------------------------  -----------  --------------------------
+       kcc_kf_enable                      0            跨连接 KF 总开关
+                                                       （0=关，1=开）
+       kcc_kf_mode                        0            KF 模式（0=峰值跟踪，
+                                                       1=瞬时）
+       kcc_kf_discount_num/den            50/100       KF 公平份额折扣
+       kcc_probe_bw_up_limit              0            Probe-up 退出受应用
+                                                       发送状态门控
+       kcc_drain_and_or_mode              1            DRAIN 退出：1=AND
+                                                       （排空且 1 RTT），
+                                                       0=OR（与 BBR 相同）
+       kcc_extra_acked_gain               256          ACK 聚合补偿增益
+                                                       （BBR_UNIT = 1.0x，
+                                                       0=关）
+       kcc_ecn_enable                     0            ECN 退避总开关
+       kcc_ecn_backoff_num/den            20/100       ECN 退避比例（20%）
+
+       固定状态机行为：
+       - STARTUP：pacing/cwnd 增益 739（2.887x）；cwnd 每 ACK 慢启动至
+         BDP 目标，带 10 报文闩锁（累计交付不足 10 报文时即使已达
+         目标仍增长，与 tcp_kcc.c 一致）；带宽增长连续 3 轮不足 1.25x 后退出。
+       - DRAIN：pacing 增益 88（0.344x），cwnd 增益 739；当在途 <= 1.0x
+         BDP 且经过 1 个 RTT（AND 门），或 4x min_rtt 超时后退出。
+       - PROBE_BW：8 相位 pacing 增益循环 {1.25, 0.75, 1.0 x6}，cwnd
+         增益 512（2.0x），入口相位偏移在 7 个相位内随机化，lt_use_bw
+         置位时 pacing 增益强制为 1.0x，min_rtt 由测地线 G1/G3 跟踪
+         （无 PROBE_RTT 模式）。
+
+13.6c.  ACK 聚合常量（与 tcp_kcc.c 完全一致）
+
+       Parameter                          Default      Description
+       ---------------------------------  -----------  --------------------------
+       KCC_AGG_WINDOW_ROTATION_RTTS       5            双窗口轮换周期（RTT）
+       KCC_EXTRA_ACKED_WIN_RTTS_MAX       31           最大轮换 RTT 数
+       KCC_EXTRA_ACKED_MAX_MS_RATIO       100          extra_acked 上限窗口
+                                                       （ms）
+       KCC_ACK_EPOCH_MAX                  0x100000     ACK 周期累加器上限
+                                                       （字节）
+       kcc_extra_acked_gain               256          补偿增益
+                                                       （BBR_UNIT = 1.0x，
+                                                       0=关）
+       （仅在 min_rtt >= 7500 us 时应用；奖励上限为 bw x 100 ms）
+
+13.6d.  LT 带宽常量（与 tcp_kcc.c 完全一致）
+
+       Parameter                          Default      Description
+       ---------------------------------  -----------  --------------------------
+       KCC_LT_INTVL_MIN_RTTS              4            有效 LT 间隔所需最小
+                                                       RTT 数
+       KCC_LT_INTVL_MAX_MULT              4            LT 间隔超时倍数
+       KCC_LT_LOSS_THRESH                 50           有损间隔阈值（50/256
+                                                       约 20% 丢包/投递比）
+       KCC_LT_BW_RATIO_NUM/DEN            1/8          LT BW 相对容差
+       KCC_LT_BW_DIFF                     500          LT BW 绝对容差（B/s）
+       KCC_LT_BW_EMA_NUM/DEN              1/2          LT BW EMA 系数（0.5）
+       KCC_LT_BW_MAX_RTTS                 48           LT BW 活动最大 RTT 数
+       KCC_LT_BW_ITHRESH                  5000         SRTT 超限中止阈值（us）
+
+13.6e.  跨连接卡尔曼滤波器（KF）常量（与 tcp_kcc.c 完全一致）
+
+       Parameter                          Default      Description
+       ---------------------------------  -----------  --------------------------
+       kcc_kf_enable                      0            KF 总开关（默认禁用，
+                                                      运行时可选开启）
+       kcc_kf_mode                        0            KF 模式（0=峰值跟踪，
+                                                      1=瞬时）
+       kcc_kf_discount_num/den            50/100       快速启动公平份额折扣
+                                                      （50%）
+       KCC_KF_CHI2_NUM/DEN                384/100      新息 chi2 门
+       KCC_KF_STARTUP_R_PCT               15           测量噪声 R 占 z 的
+                                                      %（首批样本）
+       KCC_KF_STEADY_R_PCT                5            测量噪声 R 占 z 的
+                                                      %（稳态）
+       KCC_KF_Q_SHIFT                      20          过程噪声下限
+                                                      （每样本 P += 1<<20）
+       KCC_KF_INNOV_SHIFT                  10          新息定点移位
+       KCC_KF_VAR_SHIFT                    20          方差定点移位
+       KCC_KF_OVERFLOW_GUARD               1<<31       P+R 溢出防护
+       KCC_KF_CWND_SEGS_MAX                20000       快速启动 cwnd 上限
+                                                      （段数）
+
+       KF 默认禁用（kcc_kf_enable = 0）。启用后，折扣公平份额估计初始化
+       pacing 速率，并将初始 cwnd 钳制在 [max(cwnd, INITIAL_CWND_PACKETS),
+       20000] 段之间（见 8.9 节）。
+
+13.6f.  ECN 模块参数（与 tcp_kcc.c 完全一致）
+
+       Parameter                          Default      Description
+       ---------------------------------  -----------  ------------------
+       kcc_ecn_enable                     0            ECN 总开关（默认禁用）
+       kcc_ecn_backoff_num/den            20/100       ECN 退避比例（20%）
+       KCC_ECN_EWMA_RETAINED/TOTAL        3/4          ECN 标记率 EWMA 权重
+       KCC_ECN_IDLE_DECAY_NUM/DEN         31/32        每 ACK ECN 空闲衰减
+       KCC_ECN_EWMA_FLOOR                 4            ECN EWMA 下限
+
+13.7.  丢包检测与 NAK 常量
+
+       Constant                               Value      Description
+       ------------------------------------   --------   ----------------
+       SACK_FAST_RETRANSMIT_THRESHOLD             2     SACK 快速重传阈值
+       SACK_FAST_RETRANSMIT_DISTANCE_THRESHOLD   48     SACK 距离阈值
+       MAX_SACK_SEND_COUNT                       2     每块最大发送次数
+       DUPLICATE_ACK_THRESHOLD                    3     重复 ACK 阈值
+       NAK_MISSING_THRESHOLD                      2     NAK 缺失阈值
+       NAK_REORDER_GRACE_MICROS                2000     NAK 乱序宽限期（2ms）
+       MAX_NAK_SEQUENCES_PER_PACKET             256     每个 NAK 最大缺失数
+       MAX_NAKS_PER_RTT                        1024     每 RTT 最大 NAK 数
+       NAK_REPEAT_INTERVAL_MICROS             5,000     C# UcpConstants.cs 声明
+                                                       但未使用（抑制用
+                                                       per-sequence 标记）
+       TLP_MAX_INFLIGHT_SEGMENTS                   2     TLP 触发在途段数
+       TLP_TIMEOUT_RTT_RATIO                     1.5     TLP 超时相对 SRTT
+                                                         的倍数
+       EARLY_RETRANSMIT_MAX_INFLIGHT               4     提前重传在途阈值
+       SEGMENTS
+
+13.8.  FEC 常量
+
+       Constant               Value      Description
+       --------------------   --------   ---------------------------
+       FecGroupSize                8     默认 FEC 组大小（配置）
+       FecRedundancy               0.0   修复比例；修复包数 =
+                                        ceil(FecGroupSize * FecRedundancy)
+       MAX_FEC_SLOT_LENGTH      1200     最大 FEC 槽长度
+
+13.9.  DPLPMTUD 常量
+
+       Constant                          Value       Description
+       ------------------------------    ---------   -------------------
+       BASE_PLPMTU                        1200       基础探测大小
+       MAX_PLPMTU                         1500       最大探测大小
+       MtuProbeTimeoutMicros       10,000,000       探测确认超时（10s）
+       MtuProbeIntervalMicros     600,000,000       稳态重新探测间隔（600s）
+
+
+14.  参考文献
+
+14.1.  规范性引用
+
+     [RFC2119]  Bradner, S., "Key words for use in RFCs to Indicate
+                Requirement Levels", BCP 14, RFC 2119,
+                DOI 10.17487/RFC2119, March 1997,
+                <https://www.rfc-editor.org/info/rfc2119>.
+
+     [RFC6298]  Paxson, V., Allman, M., Chu, J., and M. Sargent,
+                "Computing TCP's Retransmission Timer", RFC 6298,
+                DOI 10.17487/RFC6298, June 2011,
+                <https://www.rfc-editor.org/info/rfc6298>.
+
+     [RFC8174]  Leiba, B., "Ambiguity of Uppercase vs Lowercase in
+                RFC 2119 Key Words", BCP 14, RFC 8174,
+                DOI 10.17487/RFC8174, May 2017,
+                <https://www.rfc-editor.org/info/rfc8174>.
+
+     [RFC8899]  Fairhurst, G., Jones, T., Tuexen, M., Ruengeler, I.,
+                and T. Voelker, "Packetization Layer Path MTU Discovery
+                for Datagram Transports", RFC 8899,
+                DOI 10.17487/RFC8899, September 2020,
+                <https://www.rfc-editor.org/info/rfc8899>.
+
+     [RFC9000]  Iyengar, J., Ed., and M. Thomson, Ed., "QUIC: A
+                UDP-Based Multiplexed and Secure Transport", RFC 9000,
+                DOI 10.17487/RFC9000, May 2021,
+                <https://www.rfc-editor.org/info/rfc9000>.
+
+     [RFC9147]  Rescorla, E., Tschofenig, H., and N. Modadugu, "The
+                Datagram Transport Layer Security (DTLS) Protocol
+                Version 1.3", RFC 9147, DOI 10.17487/RFC9147,
+                April 2022,
+                <https://www.rfc-editor.org/info/rfc9147>.
+
+     [RFC9293]  Eddy, W., Ed., "Transmission Control Protocol (TCP)",
+                STD 7, RFC 9293, DOI 10.17487/RFC9293, August 2022,
+                <https://www.rfc-editor.org/info/rfc9293>.
+
+14.2.  资料性引用
+
+      [ReedSolomon]
+                Reed, I. S. and G. Solomon, "Polynomial Codes Over
+                Certain Finite Fields", Journal of the Society for
+                Industrial and Applied Mathematics, Volume 8, Issue 2,
+                pp. 300-304, June 1960.
+
+     [SipHash]  Aumasson, J. and D. Bernstein, "SipHash: A Fast
+                Short-Input PRF", Progress in Cryptology - INDOCRYPT
+                2012, pp. 489-508, December 2012.
+
+     [Copa]     Arun, V. and H. Balakrishnan, "Copa: Practical
+                Delay-Based Congestion Control for the Internet",
+                NSDI 2018.
+
+
+作者地址
+
+     UCP 工作组
+     电子邮件：（联系信息）
+
+
+     本文档是通用通信协议（UCP）的协议规范。它以符合 IETF RFC 惯例的
+     方式定义了该协议的线上格式、状态机、可靠性机制、拥塞控制算法、
+     前向纠错计算与安全模型。
+
+
+
+
+
+

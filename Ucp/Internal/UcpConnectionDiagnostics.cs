@@ -1,0 +1,57 @@
+namespace Ucp.Internal
+{
+
+    internal sealed class UcpConnectionDiagnostics
+    {
+
+        public UcpConnectionState State;
+
+        public long FlightBytes;
+
+        public uint RemoteWindowBytes;
+
+        public int BufferedReceiveBytes;
+
+        public long BytesSent;
+
+        public long BytesReceived;
+
+        public int SentDataPackets;
+
+        public int RetransmittedPackets;
+
+        public int SentAckPackets;
+
+        public int SentNakPackets;
+
+        public int SentRstPackets;
+
+        public int FastRetransmissions;
+
+        public int TimeoutRetransmissions;
+
+        public long CongestionWindowBytes;
+
+        public double PacingRateBytesPerSecond;
+
+        public double MeasuredBandwidthBytesPerSecond;
+
+        public double EstimatedLossPercent;
+
+        public long LastRttMicros;
+
+        public System.Collections.Generic.List<long> RttSamplesMicros = new System.Collections.Generic.List<long>();
+
+        public bool ReceivedReset;
+
+        public int CurrentMtu;
+
+        public int MtuProbeMin;
+
+        public int MtuProbeMax;
+
+        public int MtuProbeValue;
+
+        public bool MtuProbePending;
+    }
+}

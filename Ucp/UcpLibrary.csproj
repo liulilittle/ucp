@@ -1,0 +1,12 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- netstandard2.0 for broad compatibility (Framework, .NET Core 2.0+, Mono, Unity, Xamarin) -->
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <AssemblyName>ucp</AssemblyName>
+    <Nullable>disable</Nullable>
+  </PropertyGroup>
+
+</Project>

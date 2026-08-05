@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="Ucp/UcpLibrary.csproj" />
+  <Project Path="Ucp.Tests/UcpTest.csproj" />
+</Solution>
